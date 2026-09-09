@@ -458,7 +458,7 @@
                     <li>
                       인증 항목은 맨 아래의
                       <strong>No authentication(인증 없음)</strong>을 선택하세요. 이 앱은 비밀 주소로 보호되며
-                      not by a login.
+                      별도의 로그인 인증을 사용하지 않습니다.
                     </li>
                   </ul>
                   <!-- One card per connector. The name and description are what ChatGPT matches
@@ -491,13 +491,12 @@
                   <h3>Chrome 확장 프로그램 추가</h3>
                   <p>
                     <code>chrome://extensions</code>에서 <strong>개발자 모드</strong>를 켜고
-                    <strong>압축해제된 확장 프로그램을 로드합니다</strong>를 선택한 뒤 아래 버튼으로 연 폴더를 지정하세요. 앱과
-                    pairs with this app by itself — there is no code to type.
+                    <strong>압축해제된 확장 프로그램을 로드합니다</strong>를 선택한 뒤 아래 버튼으로 연 폴더를 지정하세요.
+                    앱과 자동으로 연결되므로 코드를 입력할 필요가 없습니다.
                   </p>
                   <p class="hint is-required">
-                    <strong>보조 에이전트 사용에 필수:</strong> 확장이 설치되고
-                    and connected in ChatGPT. Without it, Chat On Steroids cannot identify, open or
-                    coordinate worker chats.
+                    <strong>보조 에이전트 사용에 필수:</strong> 확장이 설치되고 ChatGPT에 연결되어 있어야 합니다.
+                    확장이 없으면 Chat On Steroids가 작업자 대화를 식별하거나 열거나 작업을 전달할 수 없습니다.
                   </p>
                   <div class="step-actions">
                     <button class="btn btn-solid" id="bridgeFolder" type="button">
@@ -629,7 +628,7 @@
                     <textarea id="mcpInstructions" rows="6" maxlength="4000" spellcheck="false" placeholder="예: 변경이 작동한다고 보고하기 전에 필요한 테스트를 실행하세요."></textarea>
                     <p class="hint">각 연결의 설명 뒤에 사용자 지시문으로 구분하여 추가하며 업데이트 후에도 유지합니다. 필요 없으면 비워 두세요.</p>
                   </div>
-                  <p class="muted">ChatGPT reads connector instructions once, when it loads the tools, so a change reaches an existing conversation only after the connector is loaded 생성 직후 복사하세요.</p>
+                  <p class="muted">ChatGPT는 도구를 불러올 때 연결 지시문을 읽습니다. 기존 대화에는 연결을 다시 불러온 뒤 변경 사항이 적용됩니다.</p>
                 </div>
                 <h2 class="settings-section-title">ChatGPT 모델</h2>
                 <div class="pane">
@@ -787,7 +786,7 @@
                   <div class="field goal-prompt" id="goalLoopPromptPanel" hidden>
                     <label for="goalLoopPrompt">반복 지시문</label>
                     <textarea id="goalLoopPrompt" rows="14" spellcheck="false"></textarea>
-                    <p class="hint">Saved when you leave the editor. There is no stop response here - the app refuses one and asks 생성 직후 복사하세요.</p>
+                    <p class="hint">편집창에서 나오면 저장됩니다. Loop에서는 종료 응답을 허용하지 않으며, 종료 응답이 오면 앱이 다시 요청합니다.</p>
                     <div class="step-actions">
                       <button class="btn" id="goalLoopPromptReset" type="button">기본값 복원</button>
                     </div>

@@ -16,9 +16,10 @@ vi.mock('../src/main/mcp/call-context.js', async (importOriginal) => ({
 }));
 const { defaultConfig, initConfigPath, saveConfig } = await import('../src/main/config.js');
 const { initSessionStore, createSession, getSession, rebindSession, appendEvent, readRecentEvents, flushSessions, resetSessionStoreForTests, observeSessionModel } = await import('../src/main/session/store.js');
-const { resetRecorderForTests } = await import('../src/main/session/recorder.js');
+const recorder = await import('../src/main/session/recorder.js');
+const { resetRecorderForTests } = recorder;
 const { announceSessionFinish: announceTransport, settleSessionFinishForTests, requestSessionFinishGoal, sessionFinishWaiting, setFinishNotifier, releaseSessionFinish, sessionFinishHeld } = await import('../src/main/session/finish.js');
-const { makeTempDir, removeTempDir } = await import('./helpers.js');
+const { faultGate, makeTempDir, removeTempDir } = await import('./helpers.js');
 async function announceSessionFinish(sessionId: string, summary: string): Promise<string> {
   const result = await announceTransport(sessionId, summary);
   await settleSessionFinishForTests();
@@ -53,20 +54,25 @@ afterEach(() => {
 afterAll(async () => { setFinishNotifier(null); resetSessionStoreForTests(); await removeTempDir(directory); });
 describe('session finish turn identity', () => {
   it('keeps one Goal operation through transient retries and queues its eventual result once', async () => {
-    let fail!: (error: Error) => void;
-    hooks.followup.mockImplementationOnce(() => new Promise((_resolve, reject) => { fail = reject; }));
+    const provider = faultGate();
+    hooks.followup.mockImplementationOnce(async () => {
+      await provider.hold();
+      throw new TaskRequestError('rate_limited: busy', true);
+    });
     await announceTransport(sessionId, 'Ready');
-    await vi.waitFor(() => expect(fail).toBeTypeOf('function'));
-    vi.useFakeTimers();
-    fail(new TaskRequestError('rate_limited: busy', true));
+    // Draft admission first writes a real durable reservation. Its completion, not a
+    // one-second polling budget, owns when this test may start advancing the retry clock.
+    await provider.entered;
+    vi.useFakeTimers({ toFake: ['setTimeout', 'clearTimeout'] });
+    provider.release();
     await vi.advanceTimersByTimeAsync(0);
     await announceTransport(sessionId, 'Still waiting');
     await vi.advanceTimersByTimeAsync(14999);
     expect(hooks.followup).toHaveBeenCalledTimes(1);
     expect(hooks.enqueue).not.toHaveBeenCalled();
     await vi.advanceTimersByTimeAsync(1);
-    vi.useRealTimers();
     await settleSessionFinishForTests();
+    vi.useRealTimers();
     expect(hooks.followup).toHaveBeenCalledTimes(2);
     expect(hooks.enqueue).toHaveBeenCalledTimes(1);
     expect(hooks.enqueue).toHaveBeenCalledWith(expect.objectContaining({ sessionId, mode: 'auto', text: 'Check the remaining requirement' }),
@@ -75,18 +81,30 @@ describe('session finish turn identity', () => {
     expect(hooks.followup).toHaveBeenCalledTimes(2);
   });
   it.each(['new input', 'turn release'])('cancels a pending Goal retry on %s', async reason => {
-    let fail!: (error: Error) => void;
-    hooks.followup.mockImplementationOnce(() => new Promise((_resolve, reject) => { fail = reject; }));
+    const provider = faultGate();
+    let retryPublished!: () => void;
+    const retryReady = new Promise<void>(resolve => { retryPublished = resolve; });
+    const record = recorder.recordProgress;
+    vi.spyOn(recorder, 'recordProgress').mockImplementation(async (...args) => {
+      const result = await record(...args);
+      if (args[0] === sessionId && args[2].startsWith('Goal temporarily unavailable')) retryPublished();
+      return result;
+    });
+    hooks.followup.mockImplementationOnce(async () => {
+      await provider.hold();
+      throw new TaskRequestError('http_503: busy', true);
+    });
     await announceTransport(sessionId, 'Ready');
-    await vi.waitFor(() => expect(fail).toBeTypeOf('function'));
-    vi.useFakeTimers();
-    fail(new TaskRequestError('http_503: busy', true));
-    await vi.advanceTimersByTimeAsync(0);
+    await provider.entered;
+    provider.release();
+    await retryReady;
+    // Cancellation is event-driven, not a retry-deadline test. Keep real timers until
+    // the durable release's recorder notification has aborted and settled this owner;
+    // useRealTimers previously deleted that queued notification before it could run.
     if (reason === 'new input') {
       hooks.delivered.push({ id: 'new-user-work', sessionId, text: 'Changed instructions', state: 'sent' });
       for (const listener of hooks.inputListeners) listener();
     } else await releaseSessionFinish(sessionId, 'turn-one');
-    vi.useRealTimers();
     await settleSessionFinishForTests();
     expect(hooks.followup).toHaveBeenCalledTimes(1);
     expect(hooks.enqueue).not.toHaveBeenCalled();

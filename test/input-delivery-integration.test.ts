@@ -441,11 +441,21 @@ it.each(['auto', 'finish'] as const)('adds one short reminder to every later Ast
   const t = Date.now();
   await post('/events', { conversationId, events: [
     { kind: 'model_selection', model: 'gpt-6-pro', reasoningEffort: 'pro', time: t },
-    { kind: 'turn_start', turnId: 'previous-astra', time: t },
-    { kind: 'turn_end', turnId: 'previous-astra', outcome: 'completed', time: t + 1000 }
+    { kind: 'turn_start', turnId: 'previous-astra', time: t }
   ] });
   const request = { ...message(chat.id, 'off'), mode, afterTurn: true } as Parameters<typeof input.enqueueInput>[0];
-  await input.enqueueInput(request);
+  // A finish-stage message spends a completion observed after it was queued. Publishing
+  // t+1000 before the enqueue only worked when all intervening HTTP/disk work took <1s.
+  if (mode === 'finish') {
+    await input.enqueueInput(request);
+    expect(await input.claimBrowserInput(request.id, 'later-page', conversationId, true)).toBeNull();
+  }
+  expect((await post('/events', { conversationId, events: [
+    { kind: 'turn_end', turnId: 'previous-astra', outcome: 'completed', time: Date.now() }
+  ] })).status).toBe(200);
+  // A direct send is authored after completion so its ordinary transport is browser,
+  // not an injection into the still-running Astra turn.
+  if (mode === 'auto') await input.enqueueInput(request);
   const claimed = await input.claimBrowserInput(request.id, 'later-page', conversationId, true);
   expect(claimed?.text).toBe(request.text + '\n\n' + finishInstruction(3));
   expect(claimed?.text).not.toContain('The user just sent');

@@ -290,7 +290,7 @@ it.each([false, true])('closes a saved queue editor while Save has focus (delaye
   live.inputs.push({ id: 'edit-task', sessionId: summary([]).id, text: 'Before', mode: 'after-turn', dueAt: 0,
     model: null, reasoningEffort: null, state: 'queued', owner: null, createdAt: 0, conversationId: 'chat-b' });
   await append([]);
-  (w.document.querySelector('[aria-label="Edit queued task"]') as HTMLButtonElement).click();
+  (w.document.querySelector('[aria-label="대기 작업 편집"]') as HTMLButtonElement).click();
   const field = w.document.querySelector<HTMLTextAreaElement>('#finishQueue textarea')!;
   field.value = '  Saved task  ';
   const save = field.nextElementSibling as HTMLButtonElement;
@@ -309,7 +309,7 @@ it('keeps queue edits during refresh and allows only one pending save, retaining
   live.inputs.push({ id: 'edit-task', sessionId: summary([]).id, text: 'Before', mode: 'finish', dueAt: 0,
     model: null, reasoningEffort: null, state: 'queued', owner: null, createdAt: 0, conversationId: 'chat-b' });
   await append([]);
-  (w.document.querySelector('[aria-label="Edit queued task"]') as HTMLButtonElement).click();
+  (w.document.querySelector('[aria-label="대기 작업 편집"]') as HTMLButtonElement).click();
   const field = w.document.querySelector<HTMLTextAreaElement>('#finishQueue textarea')!;
   field.value = 'Keep my edit';
   const save = field.nextElementSibling as HTMLButtonElement;
@@ -319,12 +319,12 @@ it('keeps queue edits during refresh and allows only one pending save, retaining
   save.focus(); save.click(); save.click();
   expect(edit).toHaveBeenCalledTimes(1);
   expect(save.disabled).toBe(true);
-  expect(save.textContent).toBe('Saving…');
+  expect(save.textContent).toBe('저장 중…');
   w.document.getElementById('chatInput')!.focus(); await append([]);
   expect(w.document.querySelector('#finishQueue textarea')).toBe(field);
   finish({ ok: false, error: 'Could not save this task' }); await settle();
   expect(field.value).toBe('Keep my edit'); expect(field.readOnly).toBe(false);
-  expect(save.disabled).toBe(false); expect(save.textContent).toBe('Save');
+  expect(save.disabled).toBe(false); expect(save.textContent).toBe('저장');
   expect(w.document.body.textContent).toContain('Could not save this task');
 });
 
@@ -489,7 +489,7 @@ it('preserves the draft and refuses send while model discovery has no confirmed 
   expect(input.value).toBe('Keep this until a real model is selected');
   expect(live.sent).toHaveLength(0);
   expect(discover).toHaveBeenCalledTimes(2); // Manual Reload, then automatic discovery on Send.
-  expect(w.document.body.textContent).toContain('Model discovery could not confirm your selection');
+  expect(w.document.body.textContent).toContain('선택한 모델을 확인하지 못했습니다');
   expect(w.document.querySelector('.pending-message')).toBeNull();
 });
 
@@ -539,7 +539,7 @@ it('folds a whole Compact & Resume into one row that says the new chat opened', 
   expect(cards).toHaveLength(1);
   const card = cards[0]!;
   expect(card.className).toContain('tone-good');
-  expect(card.querySelector('summary')!.textContent).toMatch(/^Compact & Resume:New chat opened at .* \(44 characters\)$/);
+  expect(card.querySelector('summary')!.textContent).toMatch(/^요약 후 이어가기:새 대화 열림: .* \(44 characters\)$/);
   expect(card.querySelectorAll('summary .step')).toHaveLength(0);
 
   // The rows the card replaces are gone from the list; nothing else is.
@@ -553,10 +553,10 @@ it('folds a whole Compact & Resume into one row that says the new chat opened', 
 
   // Everything is still there for whoever unfolds the card.
   card.toggleAttribute('open', true);
-  expect(card.textContent).toContain('Brief request');
+  expect(card.textContent).toContain('요약 요청');
   expect(card.textContent).toContain('keep the loop running');
-  expect(card.textContent).toContain('Handoff saved');
-  expect(card.textContent).toContain('Bootstrap sent into the new chat');
+  expect(card.textContent).toContain('이어가기 요약 저장됨');
+  expect(card.textContent).toContain('새 대화에 이어가기 메시지 전송');
 });
 
 it('starts in New Chat despite active history and selects only the exact acknowledged send', async () => {
@@ -605,9 +605,9 @@ it.each(['composer', 'bubble'])('clears New Chat drafts and removes a delivery c
   expect(live.inputs[0]!.state).toBe('browser'); // Preserve ambiguous receipts; never retry them.
   const cancel = vi.fn(async (id: string) => { live.inputs = live.inputs.map(row => row.id === id ? { ...row, state: 'cancelled' as const, error: 'Not sent: this delivery was cancelled before Send was authorized.' } : row); return { ok: true, data: true }; });
   (w as any).api.cancelInput = cancel;
-  expect(w.document.getElementById('chatSend')!.getAttribute('aria-label')).toBe('Cancel delivery');
+  expect(w.document.getElementById('chatSend')!.getAttribute('aria-label')).toBe('전달 취소');
   if (control === 'composer') w.document.getElementById('composer')!.dispatchEvent(new w.Event('submit', { cancelable: true }));
-  else (w.document.querySelector('#inputQueue [title="Cancel delivery"]') as HTMLButtonElement).click();
+  else (w.document.querySelector('#inputQueue [title="전달 취소"]') as HTMLButtonElement).click();
   await settle();
   expect(cancel).toHaveBeenCalledWith(live.inputs[0]!.id);
   expect(w.document.getElementById('inputQueue')!.textContent).not.toContain('Old attempt');
@@ -630,12 +630,12 @@ it.each([false, true])('dismisses retired delivery errors in selected-chat=%s wi
   const queue = w.document.getElementById('inputQueue')!;
   expect(queue.textContent).toContain('Expired request');
   expect(queue.textContent).toContain('may already have reached ChatGPT');
-  const retry = queue.querySelector<HTMLButtonElement>('[aria-label="Retry delivery"]')!;
+  const retry = queue.querySelector<HTMLButtonElement>('[aria-label="전달 다시 준비"]')!;
   expect(retry.classList.contains('delivery-retry')).toBe(true);
   expect(retry.textContent).toBe('');
   expect(retry.querySelector('use')?.getAttribute('href')).toBe('#i-retry');
-  expect(w.document.getElementById('chatSend')!.getAttribute('aria-label')).not.toBe('Cancel delivery');
-  (queue.querySelector('[title="Dismiss delivery notice"]') as HTMLButtonElement).click();
+  expect(w.document.getElementById('chatSend')!.getAttribute('aria-label')).not.toBe('전달 취소');
+  (queue.querySelector('[title="전달 알림 닫기"]') as HTMLButtonElement).click();
   await app.append([]);
   expect(queue.textContent).not.toContain('Expired request');
   input.value = 'Fresh request'; submit(); await settle();
@@ -673,12 +673,12 @@ it('shows a compaction that never made it into a new chat as failed once the cha
   const timeline = w.document.getElementById('timeline')!;
   const state = () => timeline.querySelector('details.compaction summary .state')!.textContent;
   // Still the newest thing recorded: the summary is written, the app is saving it.
-  expect(state()).toBe('Summary written — saving the handoff…');
+  expect(state()).toBe('요약 작성 완료 — 저장 중…');
   expect(timeline.querySelector('details.compaction')!.className).toContain('tone-wait');
 
   // The old chat carried on instead — the handoff never became a new chat.
   await append([toolCall(9, 'call-late')]);
-  expect(state()).toBe('Summary written, but the app never saved it — the chat carried on here');
+  expect(state()).toBe('요약을 작성했지만 앱에 저장하지 못했습니다. 기존 대화를 유지합니다.');
   expect(timeline.querySelector('details.compaction')!.className).toContain('tone-bad');
 });
 
@@ -730,7 +730,7 @@ it('says why a compaction died when the app abandoned it', async () => {
   const timeline = w.document.getElementById('timeline')!;
   const card = timeline.querySelector('details.compaction')!;
   expect(card.className).toContain('tone-bad');
-  expect(card.querySelector('summary .state')!.textContent).toBe('Failed — the handover never landed and was given up on');
+  expect(card.querySelector('summary .state')!.textContent).toBe('실패 — the handover never landed and was given up on');
   // The note is the card's, not a loose row of its own.
   expect(timeline.querySelectorAll('.ev-note')).toHaveLength(0);
   card.toggleAttribute('open', true);
@@ -768,7 +768,7 @@ it('keeps an unfolded tool row as the same open node while the chat keeps append
   expect(timeline.querySelector('details.tool-group')).toBe(group);
   expect(group.open).toBe(false);
   expect(group.querySelector('summary')!.textContent).toBe('Read README.md');
-  expect(group.querySelector('summary')!.title).toContain('4 actions');
+  expect(group.querySelector('summary')!.title).toContain('작업 4개');
 });
 
 it('keeps mixed tool and agent activity in one latest-action disclosure between authored messages', async () => {
@@ -782,7 +782,7 @@ it('keeps mixed tool and agent activity in one latest-action disclosure between 
   const group = timeline.querySelector<HTMLDetailsElement>('.tool-group')!;
   expect(group.open).toBe(false);
   expect(group.querySelector('.activity-title')!.textContent).toBe('Read README.md');
-  expect(group.querySelector('.agent-communication summary')!.textContent).toContain('Message from worker-2');
+  expect(group.querySelector('.agent-communication summary')!.textContent).toContain('worker-2의 메시지');
   expect(group.querySelector('.agent-avatar')).not.toBeNull();
   expect(group.querySelectorAll('.ev')).toHaveLength(3);
   await append([
@@ -817,7 +817,7 @@ it('offers deliberate helper retry only for the selected source session', async 
     { id: 'paused-other', sourceSessionId: 'another-session' }
   ]);
   const queue = w.document.getElementById('inputQueue')!;
-  expect(queue.textContent).toContain('Its old chat may still be running');
+  expect(queue.textContent).toContain('기존 대화가 아직 실행 중일 수 있습니다');
   expect(queue.querySelectorAll('button')).toHaveLength(1);
   expect(live.controlCalls).toEqual([]);
   (queue.querySelector('button') as HTMLButtonElement).click();
@@ -836,11 +836,11 @@ it('does not expose the retired End turn menu action', async () => {
 it('updates an offered injection receipt in its existing transcript position', async () => {
   const message: SessionEvent = { seq: 1, time: T0, source: 'app', kind: 'user_message', messageId: 'input:receipt-test', message: text('Injected instruction'), inputDelivery: 'offered' };
   const app = await boot([message, toolCall(2, 'later-work')]);
-  expect(app.w.document.querySelector('.input-receipt')?.getAttribute('aria-label')).toBe('Sent to the active turn · awaiting receipt');
+  expect(app.w.document.querySelector('.input-receipt')?.getAttribute('aria-label')).toBe('현재 턴에 전달됨 · 수신 확인 대기');
   app.live.events[0] = { ...message, seq: 3, inputDelivery: 'confirmed' };
   await app.append([]);
   expect(app.w.document.querySelectorAll('.input-receipt')).toHaveLength(1);
-  expect(app.w.document.querySelector('.input-receipt')?.getAttribute('aria-label')).toBe('Delivery confirmed');
+  expect(app.w.document.querySelector('.input-receipt')?.getAttribute('aria-label')).toBe('전달 확인됨');
 });
 
 it.each(['menu', 'send'])('queues an Astra finish message through %s using the existing staged queue', async action => {
@@ -851,7 +851,7 @@ it.each(['menu', 'send'])('queues an Astra finish message through %s using the e
   api.getSessionControls = async (id: string) => ({ ok: true, data: { ...(await original(id)).data, queueAtFinish: true, canInject: true } });
   await app.append([]);
   expect(w.document.getElementById('queueAtFinish')!.hidden).toBe(false);
-  expect(w.document.getElementById('afterTurnLabel')!.textContent).toBe('Queue at Session finish');
+  expect(w.document.getElementById('afterTurnLabel')!.textContent).toBe('종료 시점에 예약');
   const input = w.document.getElementById('chatInput') as HTMLTextAreaElement;
   input.value = 'The next stage';
   input.dispatchEvent(new w.Event('input'));
@@ -879,10 +879,10 @@ it('shows injection only for an exact active turn, never merely recent chat acti
 
 it('shows elapsed work for the exact recorded turn without exposing lifecycle rows', async () => {
   const { w, append } = await boot([{ seq: 1, time: T0, source: 'extension', kind: 'turn_start', turnId: 'held-turn' }]);
-  expect(w.document.getElementById('chatState')!.textContent).toMatch(/^Working for /);
+  expect(w.document.getElementById('chatState')!.textContent).toMatch(/^작업 중 · /);
   (w as any).api.getSessionControls = (id: string) => Promise.resolve({ ok: true, data: { sessionId: id, automation: 'off', activeTurnId: null, finishHeld: false, blocked: '', job: null } });
   await append([{ seq: 2, time: T0 + 65_000, source: 'extension', kind: 'turn_end', turnId: 'held-turn', outcome: 'completed' }]);
-  expect(w.document.getElementById('chatState')!.textContent).toBe('Worked for 1m 5s');
+  expect(w.document.getElementById('chatState')!.textContent).toBe('작업함 · 1분 5초');
 });
 
 
@@ -892,11 +892,11 @@ it('stops directly from the empty composer without a second Stop menu action', a
   (w as any).api.stopSessionTurn = stop;
   const input = w.document.getElementById('chatInput') as HTMLTextAreaElement;
   const send = w.document.getElementById('chatSend') as HTMLButtonElement;
-  expect(send.getAttribute('aria-label')).toBe('Stop turn');
+  expect(send.getAttribute('aria-label')).toBe('응답 중지');
   input.dispatchEvent(new w.KeyboardEvent('keydown', { key: 'Enter', bubbles: true, cancelable: true }));
   await settle(); expect(stop).not.toHaveBeenCalled();
   input.value = 'Keep this draft'; input.dispatchEvent(new w.Event('input'));
-  expect(send.getAttribute('aria-label')).toBe('Send message');
+  expect(send.getAttribute('aria-label')).toBe('메시지 보내기');
   expect(w.document.getElementById('sendOptions')!.hidden).toBe(false);
   expect(w.document.getElementById('stopTurnAction')).toBeNull();
   input.value = ''; input.dispatchEvent(new w.Event('input'));
@@ -960,11 +960,11 @@ it('keeps editable stages and sends the original request with the full workflow 
   await settle();
   expect(live.sent).toHaveLength(0);
   expect(w.document.getElementById('taskPlanPreview')!.textContent).not.toMatch(/Start plan|Review stages/);
-  const edit = w.document.querySelector<HTMLButtonElement>('[aria-label="Edit stage 1"]')!;
+  const edit = w.document.querySelector<HTMLButtonElement>('[aria-label="1단계 편집"]')!;
   edit.click();
-  const stage = w.document.querySelector<HTMLTextAreaElement>('textarea[aria-label="Edit stage 1"]')!;
+  const stage = w.document.querySelector<HTMLTextAreaElement>('textarea[aria-label="1단계 편집"]')!;
   stage.value = 'Build the edited foundation'; stage.dispatchEvent(new w.Event('input'));
-  expect(w.document.getElementById('chatSend')!.getAttribute('aria-label')).toBe('Start full plan');
+  expect(w.document.getElementById('chatSend')!.getAttribute('aria-label')).toBe('전체 계획 시작');
   w.document.getElementById('composer')!.dispatchEvent(new w.Event('submit', { cancelable: true }));
   w.document.getElementById('composer')!.dispatchEvent(new w.Event('submit', { cancelable: true }));
   await settle();
@@ -973,7 +973,7 @@ it('keeps editable stages and sends the original request with the full workflow 
   expect(w.document.getElementById('taskPlanPreview')!.hidden).toBe(true);
   expect(w.document.getElementById('finishQueue')!.hidden).toBe(false);
   expect(w.document.getElementById('finishQueue')!.textContent).toContain('Verify it');
-  expect(w.document.querySelector('[aria-label="Plan stage · waiting for the first message to be sent"]')).not.toBeNull();
+  expect(w.document.querySelector('[aria-label="계획 단계 · 첫 메시지 전송 대기"]')).not.toBeNull();
 });
 
 it.each([true, false])('hands plan presentation to queued stages while sending and restores a rejected draft (accepted=%s)', async accepted => {
@@ -1021,21 +1021,21 @@ it('disables empty task actions and confirms saving without the old helper sente
   const plan = w.document.getElementById('createPlan') as HTMLButtonElement;
   plan.click();
   expect(w.document.activeElement?.id).toBe('chatInput');
-  expect((w.document.getElementById('chatInput') as HTMLTextAreaElement).placeholder).toContain('plan');
-  expect(w.document.getElementById('chatSend')!.title).toBe('Click to generate plan');
-  expect(w.document.getElementById('chatSend')!.getAttribute('aria-label')).toBe('Generate plan');
+  expect((w.document.getElementById('chatInput') as HTMLTextAreaElement).placeholder).toContain('계획');
+  expect(w.document.getElementById('chatSend')!.title).toBe('클릭하여 계획 생성');
+  expect(w.document.getElementById('chatSend')!.getAttribute('aria-label')).toBe('계획 생성');
   expect(plan.getAttribute('aria-pressed')).toBe('true');
   plan.click();
   expect(plan.getAttribute('aria-pressed')).toBe('false');
-  expect((w.document.getElementById('chatInput') as HTMLTextAreaElement).placeholder).toBe('Ask anything…');
+  expect((w.document.getElementById('chatInput') as HTMLTextAreaElement).placeholder).toBe('메시지를 입력하세요…');
   expect(w.document.getElementById('chatSend')!.title).toBe('');
   const objective = w.document.getElementById('sessionObjective') as HTMLTextAreaElement;
   objective.value = 'Implement and verify'; objective.dispatchEvent(new w.Event('input'));
   expect(save.disabled).toBe(false); save.click(); await settle();
-  expect(save.textContent).toContain('Saved'); expect(save.disabled).toBe(true);
+  expect(save.textContent).toContain('저장됨'); expect(save.disabled).toBe(true);
   expect(w.document.getElementById('sessionControlStatus')!.textContent).toBe('');
   objective.value += ' everything'; objective.dispatchEvent(new w.Event('input'));
-  expect(save.disabled).toBe(false); expect(save.textContent).not.toContain('Saved');
+  expect(save.disabled).toBe(false); expect(save.textContent).not.toContain('저장됨');
 });
 
 
@@ -1094,7 +1094,7 @@ it('dismisses only the displayed recovery revision and reveals a changed status 
   const repair: SessionEvent = { seq: 1, time, source: 'app', kind: 'progress', progressId: 'browser-repair:dismiss', message: text('Reloaded chat to recover an unresponsive open turn.') };
   const { w, append, live } = await boot([repair], true, [], [], { developerMode: true });
   const status = w.document.getElementById('recoveryStatus')!;
-  const dismiss = () => (status.querySelector('[aria-label="Dismiss recovery notice"]') as HTMLButtonElement).click();
+  const dismiss = () => (status.querySelector('[aria-label="복구 알림 닫기"]') as HTMLButtonElement).click();
   expect(status.hidden).toBe(false); dismiss(); expect(status.hidden).toBe(true);
   expect(live.events).toEqual([repair]);
   expect(w.document.querySelector('.ev-progress')?.textContent).toContain('Reloaded chat');
@@ -1115,13 +1115,13 @@ it('blocks an empty stage, deletes it explicitly, and hides the whole dock in se
   const input = w.document.getElementById('chatInput') as HTMLTextAreaElement;
   input.value = 'Rain poem'; input.dispatchEvent(new w.Event('input'));
   w.document.getElementById('createPlan')!.click(); await settle();
-  const stage = w.document.querySelector<HTMLTextAreaElement>('textarea[aria-label="Edit stage 1"]')!;
+  const stage = w.document.querySelector<HTMLTextAreaElement>('textarea[aria-label="1단계 편집"]')!;
   stage.value = ''; stage.dispatchEvent(new w.Event('input'));
   expect(stage.getAttribute('aria-invalid')).toBe('true');
   expect((w.document.getElementById('chatSend') as HTMLButtonElement).disabled).toBe(true);
   w.document.getElementById('composer')!.dispatchEvent(new w.Event('submit', { cancelable: true }));
   await settle(); expect(live.sent).toHaveLength(0);
-  w.document.querySelector<HTMLButtonElement>('[aria-label="Delete stage 1"]')!.click();
+  w.document.querySelector<HTMLButtonElement>('[aria-label="1단계 삭제"]')!.click();
   expect(w.document.querySelectorAll('.plan-stage')).toHaveLength(1);
   expect((w.document.getElementById('chatSend') as HTMLButtonElement).disabled).toBe(false);
   const chat = await import('../src/renderer/chat.js');
@@ -1170,7 +1170,7 @@ it('clearing the complete planner task cancels generation and restores Create pl
   input.value = ''; input.dispatchEvent(new w.Event('input'));
   expect(api.cancelTaskRequest).toHaveBeenCalled();
   expect(w.document.getElementById('createPlan')!.getAttribute('aria-pressed')).toBe('false');
-  expect(w.document.getElementById('createPlan')!.textContent).toBe('Create plan');
+  expect(w.document.getElementById('createPlan')!.textContent).toBe('계획 만들기');
   finish({ ok: true, data: ['Old stage', 'Old check'] }); await settle();
   expect(live.sent).toHaveLength(0);
   expect(w.document.querySelectorAll('.plan-stage')).toHaveLength(0);
@@ -1195,7 +1195,7 @@ it('routes an armed empty-composer plan through the planner and paints only its 
   progress({ requestId, phase: 'generating', text: 'Design the SVG paths' });
   expect(w.document.getElementById('taskPlanPreview')!.textContent).toContain('Design the SVG paths');
   progress({ requestId, phase: 'retrying', text: '', attempt: 2, retryAt: Date.now() + 30000, error: 'rate_limited' });
-  expect(w.document.getElementById('taskPlanPreview')!.textContent).toContain('Provider busy · retry 2');
+  expect(w.document.getElementById('taskPlanPreview')!.textContent).toContain('공급자 응답 대기 · 재시도 2');
   expect(w.document.getElementById('createPlan')!.getAttribute('aria-busy')).toBe('true');
   finish({ ok: true, data: ['Write SVG paths', 'Validate the SVG'] }); await settle();
   expect(live.sent).toHaveLength(0);
@@ -1262,13 +1262,13 @@ it('streams a new Goal opening, queues it once, and displays authoritative deliv
   objective.value = 'Implement and verify'; objective.dispatchEvent(new w.Event('input'));
   (w.document.getElementById('saveSessionObjective') as HTMLButtonElement).click();
   const row = w.document.getElementById('goalLifecycle')!;
-  expect(row.textContent).toContain('Preparing the opening message');
+  expect(row.textContent).toContain('첫 메시지 준비 중');
   expect(row.getAttribute('aria-busy')).toBe('true');
   const requestId = opening.mock.calls[0]![2];
   progress({ requestId: 'unrelated-request', phase: 'generating', text: 'Wrong Goal' });
   expect(row.textContent).not.toContain('Wrong Goal');
   progress({ requestId, phase: 'retrying', text: '', error: 'rate_limited', attempt: 2, retryAt: Date.now() + 30000 });
-  expect(row.textContent).toContain('Provider busy · retry 2');
+  expect(row.textContent).toContain('공급자 응답 대기 · 재시도 2');
   expect(row.getAttribute('aria-busy')).toBe('true');
   progress({ requestId, phase: 'generating', text: 'Inspect the existing code first' });
   expect(row.textContent).toContain('Inspect the existing code first');
@@ -1277,7 +1277,7 @@ it('streams a new Goal opening, queues it once, and displays authoritative deliv
   await settle();
   expect(live.sent).toHaveLength(1);
   expect(live.sent[0]).toMatchObject({ text: 'Inspect and implement the task', objective: 'Implement and verify', automation: 'goal' });
-  expect(row.textContent).toContain('Opening message queued');
+  expect(row.textContent).toContain('첫 메시지 대기열에 추가됨');
   live.inputs = live.inputs.map(input => ({ ...input, state: 'failed', error: 'Model could not be selected' }));
   await append([]);
   expect(row.textContent).toContain('Model could not be selected');
@@ -1393,7 +1393,7 @@ it('renders existing-chat Goal draft stages from main controls without starting 
   expect(row.textContent).toContain('Actual continuation text');
   expect(row.getAttribute('aria-busy')).toBe('true');
   draft = { ...draft, stage: 'ready' }; await append([]);
-  expect(row.textContent).toContain('awaiting ChatGPT delivery');
+  expect(row.textContent).toContain('ChatGPT 전달 대기');
   draft = { ...draft, stage: 'failed', error: 'no_api_key' }; await append([]);
   expect(row.textContent).toContain('no_api_key');
   expect(row.getAttribute('aria-busy')).toBe('false');
@@ -1426,11 +1426,11 @@ it('shows the active finish animation after an earlier ordinary Goal save failed
   objective.value = 'Verify remaining work'; objective.dispatchEvent(new w.Event('input'));
   w.document.getElementById('saveSessionObjective')!.click(); await settle();
   const row = w.document.getElementById('goalLifecycle')!;
-  expect(row.textContent).toContain('Task could not be saved');
+  expect(row.textContent).toContain('작업을 저장하지 못했습니다');
   finishGoalDraft = { stage: 'answering', model: 'fixture', text: 'Check the active task', error: null };
   await append([]);
   expect(row.textContent).toContain('Check the active task');
-  expect(row.textContent).not.toContain('Task could not be saved');
+  expect(row.textContent).not.toContain('작업을 저장하지 못했습니다');
   expect(row.getAttribute('aria-busy')).toBe('true');
   expect(row.querySelector('.session-status.is-working')).not.toBeNull();
 });

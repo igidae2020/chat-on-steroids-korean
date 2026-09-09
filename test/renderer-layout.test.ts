@@ -42,7 +42,7 @@ it('searches whole settings sections without empty headings, orphaned controls o
   const conditional = document.getElementById('goalModels')!;
   expect(conditional.hidden).toBe(true);
   filterSettingsSections(view, '  SESSION FINISH  ');
-  expect(sections.filter(section => !section.hidden).map(section => section.textContent)).toEqual(['Keep the turn open']);
+  expect(sections.filter(section => !section.hidden).map(section => section.textContent)).toEqual(['턴 유지']);
   for (const section of sections) expect((section.nextElementSibling as HTMLElement).hidden).toBe(section.hidden);
   expect(document.getElementById('finishAction')!.closest('.pane')!.hasAttribute('hidden')).toBe(false);
   expect(document.getElementById('goalKey')!.closest('.pane')!.hasAttribute('hidden')).toBe(true);
@@ -59,7 +59,7 @@ it('exposes Goal tool context as an opt-in setting wired into the existing form'
   const toggle = document.getElementById('goalIncludeToolCalls') as HTMLInputElement;
   expect(toggle.type).toBe('checkbox');
   expect(toggle.checked).toBe(false);
-  expect(toggle.closest('label')?.textContent).toContain('recorded tool arguments and results');
+  expect(toggle.closest('label')?.textContent).toContain('기록된 도구 인수·결과');
   expect(chatSource).toContain("includeToolCalls: $<HTMLInputElement>('goalIncludeToolCalls').checked");
   expect(chatSource).toContain("applyChatChecked($<HTMLInputElement>('goalIncludeToolCalls')");
 });
@@ -194,7 +194,7 @@ describe('a session row', () => {
 describe('the session-row chat actions', () => {
   it('keeps current-chat pressure in the conversation detail', () => {
     expect(chatSource).toContain('compactNumber(summary.contextTokens)');
-    expect(chatSource).toContain('rough current-chat context tokens');
+    expect(chatSource).toContain('현재 대화 맥락 약');
   });
 
   it('reserves all three top-right hit targets instead of laying the timestamp underneath them', () => {
@@ -229,7 +229,7 @@ describe('the session-row chat actions', () => {
     );
     expect(chatSource).toMatch(/unattributedBlocked\(\)[\s\S]{0,200}allowUnattributedCalls === false/);
     // Same word and same tone as a blocked chat: one state, read the same way down the list.
-    expect(chatSource).toMatch(/unattributedBlocked\(\)[\s\S]{0,120}text: 'blocked', tone: 'is-failed'/);
+    expect(chatSource).toMatch(/unattributedBlocked\(\)[\s\S]{0,120}text: '차단됨', tone: 'is-failed'/);
     // And the row says what it is, on its own line, because no other row needs explaining.
     expect(rule('.session-diagnostics > summary')).toContain('cursor: pointer');
   });
@@ -316,7 +316,7 @@ describe('an expanded tool call', () => {
 /**
  * Every recorded event kind has a row.
  *
- * `eventBody` ends in a `default` arm that renders the words "Unknown event", so a kind
+ * `eventBody` ends in a `default` arm that renders the words "알 수 없는 이벤트", so a kind
  * added to the recorder and not to the renderer does not fail a build or a type check —
  * it ships, and shows the user grey placeholder rows in their own timeline. That is how
  * `agent_message` came to be unrendered: it was added to the union, written by the

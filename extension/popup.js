@@ -33,9 +33,9 @@ function shorten(value, keep = 6) {
 function ago(at) {
   if (!at) return '';
   const seconds = Math.max(0, Math.round((Date.now() - at) / 1000));
-  if (seconds < 60) return `${seconds}s`;
-  if (seconds < 3600) return `${Math.round(seconds / 60)}m`;
-  return `${Math.round(seconds / 3600)}h`;
+  if (seconds < 60) return `${seconds}초`;
+  if (seconds < 3600) return `${Math.round(seconds / 60)}분`;
+  return `${Math.round(seconds / 3600)}시간`;
 }
 
 /** One capture row: ok, no, wait or off, plus whatever it wants to say on the right. */
@@ -61,12 +61,12 @@ function stage(name, state, meta) {
 
 /** How the app describes what it placed a call on, in its own words. */
 const ATTRIBUTION = {
-  request_id: 'exact request id',
-  unattributed: 'request id not resolved',
-  agent: 'agent key',
-  turn: 'tool block on the page',
-  generation: 'the only chat generating',
-  inferred: 'not placed in a chat'
+  request_id: '정확한 요청 ID',
+  unattributed: '요청 ID 미확인',
+  agent: '에이전트 키',
+  turn: '페이지의 도구 블록',
+  generation: '응답 중인 유일한 대화',
+  inferred: '대화 미확인'
 };
 
 /**
@@ -85,27 +85,27 @@ function pipeline(info, ready) {
 
   if (!info || !info.isChat) return { read: ['off'], sent: ['off'], proc: ['off'], why: ['', ''] };
   if (!info.recorder) {
-    return { read: ['failed'], sent: ['off'], proc: ['off'], why: ['bad', 'No recorder in this tab. Reload the page.'] };
+    return { read: ['failed'], sent: ['off'], proc: ['off'], why: ['bad', '이 탭에 기록기가 없습니다. 페이지를 새로고침하세요.'] };
   }
   if (read === 0) {
-    return { read: ['running'], sent: ['off'], proc: ['off'], why: ['', 'Waiting for the first message.'] };
+    return { read: ['running'], sent: ['off'], proc: ['off'], why: ['', '첫 메시지를 기다리는 중입니다.'] };
   }
 
   const readStage = ['done', String(read)];
   if (!ready) {
     return {
       read: readStage,
-      sent: ['failed', pending ? `${pending} held` : ''],
+      sent: ['failed', pending ? `${pending}개 보관 중` : ''],
       proc: ['off'],
-      why: ['bad', 'Delivery is blocked until the app is connected and protocol compatibility is confirmed.']
+      why: ['bad', '앱 연결과 프로토콜 호환성이 확인될 때까지 전달이 차단됩니다.']
     };
   }
   if (sent && sent.ok === false) {
     return {
       read: readStage,
-      sent: ['failed', String(sent.error || 'failed')],
+      sent: ['failed', String(sent.error || '실패')],
       proc: ['off'],
-      why: ['bad', `The app rejected the last delivery (${sent.error || 'failed'}).`]
+      why: ['bad', `앱이 마지막 전달을 거부했습니다 (${sent.error || '실패'}).`]
     };
   }
   // Refused by the extension itself, before anything could be queued for the app. `pending`
@@ -116,22 +116,22 @@ function pipeline(info, ready) {
   if (page.blocked) {
     return {
       read: readStage,
-      sent: ['failed', page.queued ? `${page.queued} held in page` : String(page.blocked)],
+      sent: ['failed', page.queued ? `${page.queued}개 페이지에 보관 중` : String(page.blocked)],
       proc: ['off'],
       why: [
         'bad',
-        'The extension is not accepting this tab’s observations (' +
+        '확장이 이 탭의 기록 수집을 거부했습니다 (' +
           String(page.blocked) +
-          '). Reload the ChatGPT tab.'
+          '). ChatGPT 탭을 새로고침하세요.'
       ]
     };
   }
   if (pending > 0) {
     return {
       read: readStage,
-      sent: ['running', `${pending} queued`],
+      sent: ['running', `${pending}개 대기 중`],
       proc: ['off'],
-      why: ['', 'Queued here. Retrying delivery to the app.']
+      why: ['', '대기열에 보관 중입니다. 앱 전달을 다시 시도합니다.']
     };
   }
 
@@ -142,7 +142,7 @@ function pipeline(info, ready) {
       proc: ['running'],
       // The worker's delivery counters cover every tab. Only the page's session
       // receipt proves that this particular chat reached the app.
-      why: ['', 'App reachable. Waiting for this chat’s session receipt.']
+      why: ['', '앱에 연결할 수 있습니다. 이 대화의 세션 수신 확인을 기다립니다.']
     };
   }
   const sentStage = ['done', sent && sent.total ? String(sent.total) : ''];
@@ -157,7 +157,7 @@ function pipeline(info, ready) {
       proc: ['failed', `${placed}/${calls.length}`],
       why: [
         'bad',
-        `The app could not place ${missed.length === 1 ? 'a call' : `${missed.length} calls`} by request id — it fell back to ${ATTRIBUTION[missed[0].app] || missed[0].app}.`
+        `앱이 요청 ID로 ${missed.length === 1 ? '호출 1개' : `호출 ${missed.length}개`}의 대화를 확인하지 못했습니다. 대신 ${ATTRIBUTION[missed[0].app] || missed[0].app} 상태로 기록했습니다.`
       ]
     };
   }
@@ -165,7 +165,7 @@ function pipeline(info, ready) {
     read: readStage,
     sent: sentStage,
     proc: ['done', calls.length ? `${placed}/${calls.length}` : ''],
-    why: ['', calls.length ? 'Every tool call matched end to end.' : 'Recording into the app.']
+    why: ['', calls.length ? '모든 도구 호출의 대화 귀속을 확인했습니다.' : '앱에 기록 중입니다.']
   };
 }
 
@@ -190,11 +190,11 @@ function paintCalls(page) {
     }
     const tool = document.createElement('span');
     tool.className = 'tool';
-    tool.textContent = entry.tool || 'tool call';
+    tool.textContent = entry.tool || '도구 호출';
     const id = document.createElement('span');
     id.className = 'id';
     id.textContent = shorten(entry.requestId, 5);
-    line.title = `${entry.requestId} — picked up ${entry.read ? 'yes' : 'no'} · sent ${entry.sent ? 'yes' : 'no'} · app ${ATTRIBUTION[entry.app] || 'no record'}`;
+    line.title = `${entry.requestId} — 수집 ${entry.read ? '완료' : '미완료'} · 전달 ${entry.sent ? '완료' : '미완료'} · 앱 ${ATTRIBUTION[entry.app] || '기록 없음'}`;
     line.append(pips, tool, id);
     box.append(line);
   }
@@ -214,18 +214,18 @@ function paintHeader(status) {
 
   $('pill').className = `pill ${ready ? '' : incompatible ? 'bad' : 'off'}`;
   $('state').textContent = incompatible
-    ? 'Version mismatch'
+    ? '버전 불일치'
     : off
-      ? 'Disconnected'
+      ? '연결 해제됨'
       : !connected
-        ? 'App not reachable'
+        ? '앱에 연결할 수 없음'
         : ready
           // Health + pairing prove reachability, not the recorder/command flow.
-          ? `App reachable · Port ${status.port}`
-          : `Port ${status.port} · connecting`;
+          ? `앱 접근 가능 · 포트 ${status.port}`
+          : `포트 ${status.port} · 연결 중`;
 
   $('retryBtn').hidden = ready || incompatible;
-  $('retryBtn').textContent = off ? 'Connect' : 'Try again';
+  $('retryBtn').textContent = off ? '연결' : '다시 시도';
   $('unpairBtn').hidden = !paired || incompatible;
   return ready;
 }
@@ -236,11 +236,11 @@ function paintAlert(status, info) {
   const pairError = status && status.pairError;
   const error = page && page.lastError;
   const text = incompatible
-    ? `App v${status.appVersion || '?'} (protocol ${status.appProtocol ?? '?'}); companion v${status.extensionVersion || '?'} (protocol ${status.extensionProtocol ?? '?'}). Open your browser's Extensions page, enable Developer mode, then Update / Reload this companion. If the mismatch remains, use Open extension folder in Chat On Steroids and load that folder. Reload ChatGPT tabs when their active work is finished.`
+    ? `앱 v${status.appVersion || '?'} (프로토콜 ${status.appProtocol ?? '?'}), 확장 v${status.extensionVersion || '?'} (프로토콜 ${status.extensionProtocol ?? '?'}). 브라우저 확장 관리에서 개발자 모드를 켜고 확장을 업데이트 또는 새로고침하세요. 계속 불일치하면 COS의 확장 폴더 열기로 확인한 폴더를 로드하세요. 진행 중인 작업이 끝난 뒤 ChatGPT 탭을 새로고침하세요.`
     : pairError && pairError.message
       ? pairError.message
       : pairError && pairError.error === 'secure_storage_unavailable'
-        ? 'Secure credential storage is unavailable. Open Chat On Steroids for setup instructions.'
+        ? '보안 저장소를 사용할 수 없습니다. Chat On Steroids 앱에서 상태를 확인하세요.'
     : error && Date.now() - error.at < 10 * 60 * 1000
       ? error.text
       : '';
@@ -271,39 +271,39 @@ function paintDetails(status, info) {
   const page = info && info.page;
   const sent = info && info.delivery;
 
-  detail(grid, 'app', status ? `v${status.appVersion || '?'} · port ${status.port || '—'}` : null);
+  detail(grid, '앱', status ? `v${status.appVersion || '?'} · 포트 ${status.port || '—'}` : null);
   detail(
     grid,
-    'extension',
-    status ? `v${status.extensionVersion} · protocol ${status.extensionProtocol}` : null,
+    '확장',
+    status ? `v${status.extensionVersion} · 프로토콜 ${status.extensionProtocol}` : null,
     status && status.compatible === false
   );
-  detail(grid, 'chat id', (info && info.conversationId) || null);
-  detail(grid, 'app session', (page && page.session) || null, Boolean(page && !page.session));
-  detail(grid, 'tab', info ? `${info.tab} · epoch ${info.epoch ?? '—'}` : null);
+  detail(grid, '대화 ID', (info && info.conversationId) || null);
+  detail(grid, '앱 세션', (page && page.session) || null, Boolean(page && !page.session));
+  detail(grid, '탭', info ? `${info.tab} · 탐색 세대 ${info.epoch ?? '—'}` : null);
   detail(
     grid,
-    'ownership',
-    info ? (info.terminal ? 'retired' : info.bound ? 'bound' : 'unbound') : null,
+    '귀속',
+    info ? (info.terminal ? '종료됨' : info.bound ? '연결됨' : '미연결') : null,
     Boolean(info && info.terminal)
   );
-  detail(grid, 'recorder', page ? `fiber v${page.recorderVersion} · run ${page.runId}` : 'not attached', !page);
-  detail(grid, 'turn', page ? (page.generating ? `${shorten(page.turnId, 8)} · live` : 'idle') : null);
-  detail(grid, 'observed', page ? `${page.events} events · ${page.calls} calls` : null);
+  detail(grid, '기록기', page ? `fiber v${page.recorderVersion} · 실행 ${page.runId}` : '미연결', !page);
+  detail(grid, '응답', page ? (page.generating ? `${shorten(page.turnId, 8)} · 진행 중` : '대기') : null);
+  detail(grid, '수집', page ? `이벤트 ${page.events}개 · 호출 ${page.calls}개` : null);
   detail(
     grid,
-    'in this browser',
-    info ? `${info.pending} held · ${info.pendingAll} total` : null,
+    '이 브라우저',
+    info ? `${info.pending}개 보관 · 총 ${info.pendingAll}개` : null,
     Boolean(info && info.pendingAll)
   );
   detail(
     grid,
-    'last delivery',
-    sent && sent.at ? `${sent.ok ? 'ok' : sent.error || 'failed'} · ${sent.events} · ${ago(sent.at)} ago` : null,
+    '마지막 전달',
+    sent && sent.at ? `${sent.ok ? '성공' : sent.error || '실패'} · ${sent.events} · ${ago(sent.at)} 전` : null,
     Boolean(sent && sent.ok === false)
   );
-  detail(grid, 'delivered', sent ? sent.total : null);
-  detail(grid, 'page sends', page ? `${page.sends} · ${page.failures} failed` : null, Boolean(page && page.failures));
+  detail(grid, '전달 완료', sent ? sent.total : null);
+  detail(grid, '페이지 전송', page ? `${page.sends} · ${page.failures}회 실패` : null, Boolean(page && page.failures));
 }
 
 async function refresh() {
@@ -317,14 +317,14 @@ async function refresh() {
   const isChat = Boolean(info && info.isChat);
   const page = info && info.page;
 
-  row('tab', isChat ? 'ok' : 'off', isChat ? '' : 'none open');
-  row('rec', !isChat ? 'off' : info.recorder ? 'ok' : 'no', !isChat ? '' : info.recorder ? (page.generating ? 'answering' : '') : 'reload');
+  row('tab', isChat ? 'ok' : 'off', isChat ? '' : '열린 탭 없음');
+  row('rec', !isChat ? 'off' : info.recorder ? 'ok' : 'no', !isChat ? '' : info.recorder ? (page.generating ? '응답 중' : '') : '새로고침 필요');
 
   const chatId = info && info.conversationId;
-  idRow('chat', !isChat ? 'off' : chatId ? 'ok' : 'wait', !isChat ? '' : chatId ? shorten(chatId, 8) : 'new chat', chatId);
+  idRow('chat', !isChat ? 'off' : chatId ? 'ok' : 'wait', !isChat ? '' : chatId ? shorten(chatId, 8) : '새 대화', chatId);
 
   const requestId = page && page.requestId;
-  idRow('req', !isChat ? 'off' : requestId ? 'ok' : 'wait', !isChat ? '' : requestId ? shorten(requestId, 9) : 'none yet', requestId);
+  idRow('req', !isChat ? 'off' : requestId ? 'ok' : 'wait', !isChat ? '' : requestId ? shorten(requestId, 9) : '아직 없음', requestId);
 
   const state = pipeline(info, ready);
   stage('read', ...state.read);
@@ -339,7 +339,7 @@ async function refresh() {
   row(
     'app',
     !isChat ? 'off' : broken ? 'no' : flowing ? 'ok' : 'wait',
-    !isChat ? '' : broken ? 'blocked' : flowing ? ago(info.delivery && info.delivery.at) || 'live' : 'waiting'
+    !isChat ? '' : broken ? '차단됨' : flowing ? ago(info.delivery && info.delivery.at) || '진행 중' : '대기 중'
   );
   // Opens itself the first time something is actually wrong, so the panel that explains
   // the failure is already open when the popup is opened to look at one.
@@ -372,12 +372,12 @@ async function copyInto(button, text) {
   const was = button.textContent;
   try {
     await navigator.clipboard.writeText(text);
-    button.textContent = 'copied';
+    button.textContent = '복사됨';
   } catch {
-    button.textContent = 'copy failed';
+    button.textContent = '복사 실패';
   }
   setTimeout(() => {
-    if (button.textContent === 'copied' || button.textContent === 'copy failed') button.textContent = was;
+    if (button.textContent === '복사됨' || button.textContent === '복사 실패') button.textContent = was;
   }, 900);
 }
 

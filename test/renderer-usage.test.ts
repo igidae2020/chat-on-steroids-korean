@@ -31,11 +31,11 @@ it('edits the canonical formula controls and per-model rates without reloading r
   formulaDetails.querySelector('summary')!.click();
   expect(formulaDetails.open).toBe(true);
   const balances = dom.window.document.getElementById('modelUsage')!;
-  for (const label of ['Deep research', 'File uploads', 'Pasted text files', 'Image generation']) expect(balances.textContent).toContain(label);
+  for (const label of ['심층 리서치', '파일 업로드', '붙여넣은 텍스트 파일', '이미지 생성']) expect(balances.textContent).toContain(label);
   expect(balances.textContent).not.toMatch(/deep_research|file_upload|paste_text_to_file|image_gen|below/);
   expect(field('usageDivisor')).toBe(divisor);
   expect(dom.window.document.getElementById('costModel')).toBeNull();
-  expect(cost()).toContain('0.48'); expect(cost()).toContain('unpriced');
+  expect(cost()).toContain('0.48'); expect(cost()).toContain('미산정');
   change(divisor, '4');
   expect(cost()).toContain('0.24');
   expect(dom.window.document.getElementById('usageFormula')!.textContent).toContain('÷ 4');
@@ -44,9 +44,9 @@ it('edits the canonical formula controls and per-model rates without reloading r
   expect(cost()).toContain('0.24');
   change(divisor, '0'); // Invalid edits do not corrupt the active calculation.
   expect(cost()).toContain('0.24');
-  const unknownRate = dom.window.document.querySelector('input[aria-label="another-model cached-input USD per million tokens"]') as HTMLInputElement;
+  const unknownRate = dom.window.document.querySelector('input[aria-label="another-model 캐시 입력 100만 토큰당 USD"]') as HTMLInputElement;
   change(unknownRate, '1');
-  expect(cost()).toContain('0.84'); expect(cost()).not.toContain('unpriced');
+  expect(cost()).toContain('0.84'); expect(cost()).not.toContain('미산정');
   change(field('usageMultiplier'), '1');
   expect(cost()).toContain('0.70');
   expect(getUsage).toHaveBeenCalledTimes(1);
@@ -67,18 +67,18 @@ it('shows the Sol picker alias rate and preserves an explicitly cleared rate aft
   Object.assign(dom.window, { api: { getUsage, getChatModels: async () => ({ ok: true, data: { models: [] } }) } });
   const usage = await import('../src/renderer/usage.js');
   usage.initUsage(); await usage.refreshUsage();
-  const rate = () => dom.window.document.querySelector('input[aria-label="gpt-5-6-thinking cached-input USD per million tokens"]') as HTMLInputElement;
+  const rate = () => dom.window.document.querySelector('input[aria-label="gpt-5-6-thinking 캐시 입력 100만 토큰당 USD"]') as HTMLInputElement;
   expect(rate().value).toBe('0.4');
   expect(dom.window.document.getElementById('usageTotalCost')!.textContent).toContain('0.21');
-  expect(dom.window.document.getElementById('usageDays')!.textContent).not.toContain('Rate unknown');
+  expect(dom.window.document.getElementById('usageDays')!.textContent).not.toContain('단가 미확인');
   rate().value = ''; rate().dispatchEvent(new dom.window.Event('input'));
   expect(getUsage).toHaveBeenCalledTimes(1);
-  expect(dom.window.document.getElementById('usageDays')!.textContent).toContain('Rate unknown');
+  expect(dom.window.document.getElementById('usageDays')!.textContent).toContain('단가 미확인');
   vi.resetModules();
   const restored = await import('../src/renderer/usage.js');
   restored.initUsage(); await restored.refreshUsage();
   expect(rate().value).toBe('');
-  expect(dom.window.document.getElementById('usageDays')!.textContent).toContain('Rate unknown');
+  expect(dom.window.document.getElementById('usageDays')!.textContent).toContain('단가 미확인');
 });
 
 it('combines equivalent recorded names in the table while keeping raw rate edits and partial unknown cost', async () => {
@@ -93,11 +93,11 @@ it('combines equivalent recorded names in the table while keeping raw rate edits
   expect(table().querySelectorAll('tr')).toHaveLength(2);
   expect(table().textContent).toContain('gpt-5.6-sol · high');
   expect(table().textContent).toContain('1.44');
-  expect(table().querySelector('[data-usage-hint]')!.getAttribute('data-usage-hint')).toBe('Recorded IDs: 5.6, gpt-5-6-thinking, gpt-5.6-sol');
+  expect(table().querySelector('[data-usage-hint]')!.getAttribute('data-usage-hint')).toBe('기록된 ID: 5.6, gpt-5-6-thinking, gpt-5.6-sol');
   expect(dom.window.document.querySelectorAll('#usageRates input')).toHaveLength(3);
-  const rate = dom.window.document.querySelector('input[aria-label="5.6 cached-input USD per million tokens"]') as HTMLInputElement;
+  const rate = dom.window.document.querySelector('input[aria-label="5.6 캐시 입력 100만 토큰당 USD"]') as HTMLInputElement;
   rate.value = ''; rate.dispatchEvent(new dom.window.Event('input'));
-  expect(table().textContent).toContain('0.96 + unpriced');
+  expect(table().textContent).toContain('0.96 + 미산정');
   expect(getUsage).toHaveBeenCalledTimes(1);
   expect(models[0]!.model).toBe('5.6');
 });

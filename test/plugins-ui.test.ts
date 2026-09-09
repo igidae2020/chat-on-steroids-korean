@@ -25,21 +25,21 @@ it('renders server text safely and does not claim Ready before tool discovery', 
   await refreshPlugins();
   expect(document.querySelector('.plugin-card h2')!.textContent).toContain('<img');
   expect(document.querySelector('.plugin-card h2 img')).toBeNull();
-  expect(document.querySelector('.plugin-card .pill')!.textContent).toBe('Connected · no tools');
+  expect(document.querySelector('.plugin-card .pill')!.textContent).toBe('연결됨 · 도구 없음');
   state.plugins[0]!.tools = [{ name: 'remember', exposedName: 'plugin_one_remember', enabled: true }];
   await refreshPlugins();
-  expect(document.querySelector('.plugin-card .pill')!.textContent).toBe('Ready');
+  expect(document.querySelector('.plugin-card .pill')!.textContent).toBe('준비됨');
 });
 
 it('keeps credential edits private and stable while status updates arrive', async () => {
   initPlugins(); await tick();
-  [...document.querySelectorAll('button')].find((node) => node.textContent === 'Configure')!.click();
+  [...document.querySelectorAll<HTMLButtonElement>('.plugin-menu button')].find((node) => node.textContent === '설정')!.click();
   const password = document.querySelector<HTMLInputElement>('#pluginDialog input[type=password]')!;
   expect(password.value).toBe(''); password.value = 'never-show-this';
   await refreshPlugins();
   expect(document.querySelector('#pluginDialog input[type=password]')).toBe(password);
   expect(password.value).toBe('never-show-this');
-  [...document.querySelectorAll<HTMLButtonElement>('#pluginDialog button')].find((node) => node.textContent === 'Save and reconnect')!.click(); await tick();
+  [...document.querySelectorAll<HTMLButtonElement>('#pluginDialog button')].find((node) => node.textContent === '저장 후 다시 연결')!.click(); await tick();
   expect(api.pluginsConfigure).toHaveBeenCalledWith('one', expect.objectContaining({ credentials: { TOKEN: 'never-show-this' } }));
   expect(document.body.textContent).not.toContain('never-show-this');
 });
@@ -50,34 +50,34 @@ it('routes exact plugin and tool identity for disabling a discovered tool', asyn
   const toggle = document.querySelector<HTMLInputElement>('.plugin-tool input')!;
   toggle.checked = false; toggle.dispatchEvent(new dom.window.Event('change')); await tick();
   expect(api.pluginsSetToolEnabled).toHaveBeenCalledWith('one', 'remember', false);
-  expect(document.querySelector('.toast')!.textContent).toContain('Refresh the Chat On Steroids Plugins connector in ChatGPT');
+  expect(document.querySelector('.toast')!.textContent).toContain('ChatGPT에서 Chat On Steroids Plugins 연결을 새로고침');
 });
 
 it('distinguishes a serving connector from evidence of ChatGPT contact', () => {
   applyPluginsState({ config: { tunnel: { kind: 'manual' } }, status: { surfaces: [{ id: 'plugins', state: 'live', connectorName: 'Chat On Steroids Plugins', description: 'Plugins', localUrl: 'http://localhost/mcp', lastRequestAt: null }] } } as unknown as AppState);
-  expect(document.getElementById('pluginsConnectionStatus')!.textContent).toBe('Connector online · waiting for ChatGPT');
+  expect(document.getElementById('pluginsConnectionStatus')!.textContent).toBe('연결 제공 중 · ChatGPT 접속 대기');
   expect(document.getElementById('pluginsSetup')).toBeNull();
   expect(document.querySelector('[data-panel="setup"] #pluginsTunnelId')).toBeNull();
   expect(document.querySelector('.plugin-connection')!.classList.contains('is-configured')).toBe(true);
-  expect(document.getElementById('pluginsSetupLink')!.textContent).toBe('Plugin setup');
+  expect(document.getElementById('pluginsSetupLink')!.textContent).toBe('플러그인 연결 설정');
 });
 
 it('keeps saved plugin setup compact after restart even while its connector is offline', () => {
   applyPluginsState({ config: { tunnel: { kind: 'openai', pluginsTunnelId: 'saved-plugins' } }, status: { surfaces: [] } } as unknown as AppState);
   expect(document.querySelector('.plugin-connection')!.classList.contains('is-configured')).toBe(true);
-  expect(document.getElementById('pluginsConnectionStatus')!.textContent).toBe('Plugins connector offline');
-  expect(document.getElementById('pluginsSetupLink')!.textContent).toBe('Plugin setup');
+  expect(document.getElementById('pluginsConnectionStatus')!.textContent).toBe('플러그인 연결 오프라인');
+  expect(document.getElementById('pluginsSetupLink')!.textContent).toBe('플러그인 연결 설정');
   applyPluginsState({ config: { tunnel: { kind: 'openai', pluginsTunnelId: '' } }, status: { surfaces: [] } } as unknown as AppState);
   expect(document.querySelector('.plugin-connection')!.classList.contains('is-configured')).toBe(false);
 });
 
 it('keeps first-use setup and the connector-refresh instruction visible, including after connection', async () => {
   initPlugins(); await tick();
-  expect(document.querySelector('.plugin-connection')!.textContent).toContain('before your first use');
-  expect(document.querySelector('.plugin-refresh-guide')!.textContent).toContain('After installing, updating or changing enabled plugins');
+  expect(document.querySelector('.plugin-connection')!.textContent).toContain('첫 사용 전');
+  expect(document.querySelector('.plugin-refresh-guide')!.textContent).toContain('플러그인 설치·업데이트·도구 활성화 변경 후');
   applyPluginsState({ config: { tunnel: { kind: 'manual' } }, status: { surfaces: [{ id: 'plugins', state: 'live', lastRequestAt: 1 }] } } as unknown as AppState);
-  expect(document.getElementById('pluginsSetupTitle')!.textContent).toBe('Your Plugins connector');
-  expect(document.querySelector('.plugin-refresh-guide')!.textContent).toContain('refresh Chat On Steroids Plugins in ChatGPT');
+  expect(document.getElementById('pluginsSetupTitle')!.textContent).toBe('플러그인 연결');
+  expect(document.querySelector('.plugin-refresh-guide')!.textContent).toContain('ChatGPT에서 Chat On Steroids Plugins 연결을 새로고침');
   document.getElementById('pluginsOpenChatGPT')!.click(); await tick();
   expect(api.openLink).toHaveBeenCalledWith('https://chatgpt.com/#settings/Plugins');
 });
@@ -86,7 +86,7 @@ it('keeps plugin connection setup local, preserves a draft and saves through the
   const next = { hasApiKey: true, config: { tunnel: { kind: 'openai', tunnelId: 'core-original', pluginsTunnelId: 'plugins-original' }, ui: { theme: 'dark' } }, status: { surfaces: [{ id: 'plugins', state: 'live', tools: ['get_scene_info'], connectorName: 'Chat On Steroids Plugins', description: 'External tools', lastRequestAt: 1 }] } } as unknown as AppState;
   initPlugins(); applyPluginsState(next); await tick();
   document.getElementById('pluginsSetupLink')!.click();
-  expect(document.getElementById('pluginDialogTitle')!.textContent).toBe('Plugin setup');
+  expect(document.getElementById('pluginDialogTitle')!.textContent).toBe('플러그인 연결 설정');
   const input = document.querySelector<HTMLInputElement>('#pluginDialog #pluginsTunnelId')!;
   input.value = 'plugins-new'; input.focus();
   const updated = structuredClone(next); updated.config.tunnel.tunnelId = 'core-concurrent';
@@ -94,7 +94,7 @@ it('keeps plugin connection setup local, preserves a draft and saves through the
   expect(document.getElementById('pluginsTunnelId')).toBe(input);
   expect(input.value).toBe('plugins-new');
   api.saveSettings!.mockResolvedValue({ ok: true, data: updated }); api.connect!.mockResolvedValue({ ok: true, data: updated });
-  [...document.querySelectorAll<HTMLButtonElement>('#pluginDialog button')].find(node => node.textContent === 'Save & connect')!.click(); await tick();
+  [...document.querySelectorAll<HTMLButtonElement>('#pluginDialog button')].find(node => node.textContent === '저장 후 연결')!.click(); await tick();
   expect(api.saveSettings).toHaveBeenCalledWith(expect.objectContaining({ tunnel: expect.objectContaining({ tunnelId: 'core-concurrent', pluginsTunnelId: 'plugins-new' }) }), expect.objectContaining({ tunnel: expect.objectContaining({ tunnelId: 'core-concurrent', pluginsTunnelId: 'plugins-original' }) }));
   expect(document.querySelector('[data-panel="setup"] #pluginsTunnelId')).toBeNull();
   expect(document.querySelector('#pluginDialog .plugin-tools')).toBeNull();
@@ -104,8 +104,8 @@ it('explains starting enabled runtimes and tool publication conflicts', async ()
   state.plugins[0]!.status = 'connecting';
   state.plugins[0]!.tools = [{ name: 'get_scene_info', exposedName: 'get_scene_info', enabled: true, published: false, exposureError: 'Another installed plugin declares get_scene_info.' }];
   await refreshPlugins();
-  expect(document.querySelector('.plugin-card .pill')!.textContent).toBe('Connecting\u2026');
-  expect(document.querySelector('.plugin-tool-count')!.textContent).toBe('1 tool enabled');
+  expect(document.querySelector('.plugin-card .pill')!.textContent).toBe('연결 중…');
+  expect(document.querySelector('.plugin-tool-count')!.textContent).toBe('도구 1개 활성화됨');
   document.querySelector<HTMLButtonElement>('.plugin-entry')!.click();
   expect(document.querySelector('.plugin-tool')!.textContent).toContain('Another installed plugin declares get_scene_info.');
 });
@@ -137,9 +137,9 @@ it('opens a concise tool preview without installing or showing enabled-tool cont
   expect(document.querySelector('.plugin-card-head')!.textContent).toContain('Knowledge graph');
   const actions = document.querySelector('.plugin-card-head')!.nextElementSibling!;
   expect(actions.classList.contains('plugin-actions')).toBe(true);
-  expect(actions.querySelector('button:first-child')!.textContent).toBe('Install and connect');
+  expect(actions.querySelector('button:first-child')!.textContent).toBe('설치 후 연결');
   expect(actions.querySelector('button:first-child')!.classList.contains('btn-solid')).toBe(true);
-  expect(actions.nextElementSibling!.textContent).toBe('Tool preview');
+  expect(actions.nextElementSibling!.textContent).toBe('도구 미리보기');
   expect([...document.querySelectorAll('.plugin-tool-preview li')].map(node => node.textContent)).toEqual(['remember', 'recall']);
   expect(document.querySelector('.plugin-tool input')).toBeNull();
   expect(document.querySelector<HTMLDetailsElement>('.plugin-about')!.open).toBe(false);
@@ -156,21 +156,21 @@ it('opens the full error from the compact card and exposes configuration beside 
   expect(document.querySelector('.plugin-detail-tools .plugin-error')!.textContent).toBe(error);
   expect(document.querySelectorAll('.plugin-tools-summary')).toHaveLength(1);
   document.querySelector<HTMLButtonElement>('.plugin-detail-intro .plugin-configure')!.click();
-  expect(document.getElementById('pluginDialogTitle')!.textContent).toMatch(/^Configure /);
+  expect(document.getElementById('pluginDialogTitle')!.textContent).toMatch(/^설정 · /);
 });
 
 it('waits for explicit sign-in and updates the same detail with a cancellable authentication state', async () => {
   state.plugins[0]!.source = { kind: 'remote', url: 'https://example.org/mcp', auth: 'oauth' };
   state.plugins[0]!.status = 'needs-auth';
   initPlugins(); await tick();
-  expect(document.querySelector('.plugin-card .pill')!.textContent).toBe('Sign in needed');
+  expect(document.querySelector('.plugin-card .pill')!.textContent).toBe('로그인 필요');
   document.querySelector<HTMLButtonElement>('.plugin-entry')!.click();
   expect(api.pluginsAuthenticate).not.toHaveBeenCalled();
   document.querySelector<HTMLButtonElement>('.plugin-auth button')!.click(); await tick();
   expect(api.pluginsAuthenticate).toHaveBeenCalledWith('one');
   expect(document.querySelector('.toast')).toBeNull();
   state.plugins[0]!.status = 'authenticating'; await refreshPlugins();
-  expect(document.querySelector('.plugin-auth')!.textContent).toContain('Finish signing in through your browser.');
+  expect(document.querySelector('.plugin-auth')!.textContent).toContain('브라우저에서 로그인을 완료하세요.');
   document.querySelector<HTMLButtonElement>('.plugin-auth button')!.click(); await tick();
   expect(api.pluginsCancelAuthentication).toHaveBeenCalledWith('one');
   state.plugins[0]!.status = 'ready'; await refreshPlugins();

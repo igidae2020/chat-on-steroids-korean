@@ -1,3 +1,11 @@
+> [!NOTE]
+> **한국어 · OpenCodex 배포판** — 공식 v2.0.8을 기준으로 사용자 UI를 한국어화하고,
+> 공식 사용자 지정 공급자에 OpenCodex 프리셋을 추가했습니다. Goal/Loop 엔진·프롬프트·권한·브라우저 복구 정책은 공식판 그대로입니다.
+> OpenCodex를 선택하면 로컬 주소 `http://127.0.0.1:10100/v1`, 모델 `gpt-6-astra`, 추론 `high`가 설정되며 모델과 추론은 변경할 수 있습니다.
+> 앱·확장은 이 저장소의 동일한 한국어판 릴리스에서 업데이트합니다. 개인 설정·키·세션·백업은 배포물에 포함하지 않습니다.
+> 공식 새 릴리스는 매일 확인합니다. 자동 병합·검증과 기존 플랫폼별 빌드·패키지 검사에 성공한 버전만 배포합니다.
+> 병합 충돌이나 검사 실패가 있으면 업데이트가 보류되며 현재 설치된 버전은 유지됩니다. GitHub Actions 실패 내역에서 원인을 확인할 수 있습니다.
+
 > [!IMPORTANT]
 > **2.0.8 — Darkex by dark tibo — needs its matching companion extension.** Reload the unpacked extension after updating.
 > Model discovery now reads your account's native picker state across languages and nested version menus.

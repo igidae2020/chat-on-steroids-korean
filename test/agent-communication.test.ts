@@ -22,7 +22,7 @@ it('preserves incoming, repeated, ambiguous and unrelated communication', () => 
 });
 it('distinguishes worker status, messages and final reports', () => {
   const title = (value: string) => communicationTitle(message({ from: 'worker-1', to: 'prime', message: text(value) }) as Extract<SessionEvent, { kind: 'agent_message' }>);
-  expect(title('[worker-1 is awake again] It resumed')).toBe('worker-1 resumed work');
-  expect(title('[worker-1 reported] RESULT: Done')).toBe('worker-1 finished · report');
-  expect(title('The room is ready for review')).toBe('Message from worker-1');
+  expect(title('[worker-1 is awake again] It resumed')).toBe('worker-1 작업 재개');
+  expect(title('[worker-1 reported] RESULT: Done')).toBe('worker-1 완료 · 보고');
+  expect(title('The room is ready for review')).toBe('worker-1의 메시지');
 });

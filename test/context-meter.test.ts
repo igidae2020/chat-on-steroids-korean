@@ -20,12 +20,12 @@ function setup(model: string, reasoningEffort: 'high' | 'pro' = 'high') {
 it('keeps Pro static and identifies token estimates and compaction exclusion', () => {
   const doc = setup('gpt-6', 'pro');
   expect(doc.getElementById('contextMeterArc')?.getAttribute('stroke-dasharray')).toBe('0 37.7');
-  expect(doc.getElementById('contextMeterInfo')?.textContent).toContain('Auto-compaction off for Pro');
-  expect(doc.getElementById('contextMeterInfo')?.textContent).toContain('estimated');
+  expect(doc.getElementById('contextMeterInfo')?.textContent).toContain('Pro는 자동 요약 꺼짐');
+  expect(doc.getElementById('contextMeterInfo')?.textContent).toContain('추정치');
 });
 it('uses configured limits for ordinary models and supports click and Escape', () => {
   const doc = setup('gpt-5.6-sol-high');
-  expect(doc.getElementById('contextMeterInfo')?.textContent).toContain('50% of configured limit');
+  expect(doc.getElementById('contextMeterInfo')?.textContent).toContain('설정 한도의 50%');
   initContextMeter();
   const button = doc.getElementById('contextMeterButton')!;
   button.click();

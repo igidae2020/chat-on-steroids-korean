@@ -1,5 +1,5 @@
 <!doctype html>
-<html lang="en">
+<html lang="ko">
   <head>
     <meta charset="utf-8" />
     <title>Chat On Steroids</title>
@@ -27,48 +27,48 @@
         <h1>Chat On Steroids</h1>
       </header>
 
-      <p class="pill off" id="pill"><span class="dot"></span><span id="state">Looking for the app</span></p>
+      <p class="pill off" id="pill"><span class="dot"></span><span id="state">앱 찾는 중</span></p>
 
 
       <p class="alert" id="alert" hidden></p>
-      <p class="caption">Session capture</p>
+      <p class="caption">대화 기록</p>
       <section class="card">
         <div class="row" id="r-tab">
           <svg class="ico"><use href="#i-tab" /></svg>
-          <span class="name">ChatGPT tab</span>
+          <span class="name">ChatGPT 탭</span>
           <span class="meta" id="d-tab"></span>
           <span class="badge"></span>
       </div>
       <div class="row" id="r-rec">
         <svg class="ico"><use href="#i-rec" /></svg>
-        <span class="name">Recording this chat</span>
+        <span class="name">현재 대화 기록</span>
         <span class="meta" id="d-rec"></span>
         <span class="badge"></span>
       </div>
       <div class="row" id="r-chat">
         <svg class="ico"><use href="#i-hash" /></svg>
-        <span class="name">Chat ID</span>
+        <span class="name">대화 ID</span>
         <button class="meta copy" id="d-chat" type="button"></button>
         <span class="badge"></span>
       </div>
       <div class="row" id="r-req">
         <svg class="ico"><use href="#i-req" /></svg>
-        <span class="name">Request ID</span>
+        <span class="name">요청 ID</span>
         <button class="meta copy" id="d-req" type="button"></button>
         <span class="badge"></span>
       </div>
       <details id="stream">
         <summary class="row" id="r-app">
           <svg class="ico"><use href="#i-send" /></svg>
-          <span class="name">Reaching the app</span>
+          <span class="name">앱 전달 상태</span>
           <span class="meta" id="d-app"></span>
           <span class="badge"></span>
           <span class="chevron" aria-hidden="true"></span>
         </summary>
         <div class="stages">
-          <div class="stage" id="s-read"><span class="tick"></span><span class="name">Picked up</span><span class="meta" id="n-read"></span></div>
-          <div class="stage" id="s-sent"><span class="tick"></span><span class="name">Sent to app</span><span class="meta" id="n-sent"></span></div>
-          <div class="stage" id="s-proc"><span class="tick"></span><span class="name">App processed</span><span class="meta" id="n-proc"></span></div>
+          <div class="stage" id="s-read"><span class="tick"></span><span class="name">페이지 수집</span><span class="meta" id="n-read"></span></div>
+          <div class="stage" id="s-sent"><span class="tick"></span><span class="name">앱 전달</span><span class="meta" id="n-sent"></span></div>
+          <div class="stage" id="s-proc"><span class="tick"></span><span class="name">앱 처리</span><span class="meta" id="n-proc"></span></div>
           <p class="why" id="why"></p>
           <div class="calls" id="calls"></div>
         </div>
@@ -76,17 +76,17 @@
     </section>
 
 
-    <p class="caption">Augment ChatGPT</p>
+    <p class="caption">ChatGPT 표시 개선</p>
     <section class="card">
       <label class="row" for="overwriteToggle">
         <svg class="ico"><use href="#i-pen" /></svg>
-        <span class="name">Overwrite ChatGPT</span>
+        <span class="name">도구 활동 표시 개선</span>
         <input id="overwriteToggle" type="checkbox" checked />
         <span class="track" aria-hidden="true"><span class="thumb"></span></span>
       </label>
       <label class="row" for="timeToggle">
         <svg class="ico"><use href="#i-clock" /></svg>
-        <span class="name">Timestamps</span>
+        <span class="name">시간 표시</span>
         <input id="timeToggle" type="checkbox" />
         <span class="track" aria-hidden="true"><span class="thumb"></span></span>
       </label>
@@ -95,19 +95,19 @@
     <details id="more">
       <summary class="card row">
         <svg class="ico"><use href="#i-more" /></svg>
-        <span class="name">Advanced</span>
+        <span class="name">고급 정보</span>
         <span class="chevron" aria-hidden="true"></span>
       </summary>
       <dl class="grid" id="grid"></dl>
       <div class="actions">
-        <button id="copyBtn" type="button">Copy</button>
-        <button id="retryBtn" type="button" hidden>Try again</button>
-        <button id="unpairBtn" type="button" hidden>Disconnect</button>
+        <button id="copyBtn" type="button">복사</button>
+        <button id="retryBtn" type="button" hidden>다시 시도</button>
+        <button id="unpairBtn" type="button" hidden>연결 해제</button>
       </div>
     </details>
 
     <div class="actions reload-action">
-      <button id="reloadBtn" type="button">Reload companion</button>
+      <button id="reloadBtn" type="button">확장 새로고침</button>
     </div>
 
     </div>

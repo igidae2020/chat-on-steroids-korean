@@ -17,7 +17,7 @@ it('keeps Prime selection independent and rejects late results after parent navi
   const panel = createAgentPanel({ host, toggle, load, render, openMain, working: () => false });
   const worker = { id: 'worker-session', title: 'Worker', updatedAt: 1 } as SessionSummary;
   panel.update('prime-session', [worker]); toggle.click();
-  expect(host.textContent).toContain('History · 1');
+  expect(host.textContent).toContain('기록 · 1');
   const opening = panel.open(worker.id);
   expect(openMain).not.toHaveBeenCalled();
   panel.update('another-prime', []);
@@ -39,7 +39,7 @@ it('renders a selected worker and offers an explicit full-chat navigation', asyn
   await panel.open('worker');
   expect(host.textContent).toContain('Recorded response');
   expect(openMain).not.toHaveBeenCalled();
-  [...host.querySelectorAll('button')].find(button => button.textContent === 'Open full chat')!.click();
+  [...host.querySelectorAll('button')].find(button => button.textContent === '전체 대화 열기')!.click();
   expect(openMain).toHaveBeenCalledWith('worker');
   expect(host.querySelector('aside')!.hidden).toBe(true);
 });

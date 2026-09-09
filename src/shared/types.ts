@@ -508,7 +508,9 @@ export interface UpdateStatus {
 }
 
 /** Where an installation that cannot update itself gets the new version by hand. */
-export const RELEASES_PAGE = 'https://github.com/totec448-spec/chat-on-steroids/releases/latest';
+export const RELEASE_REPOSITORY = 'igidae2020/chat-on-steroids-korean';
+export const DISTRIBUTION_LABEL = '한국어 · OpenCodex';
+export const RELEASES_PAGE = `https://github.com/${RELEASE_REPOSITORY}/releases/latest`;
 
 /**
  * Whether `candidate` is a later release than `current`, compared as three numbers.
@@ -591,20 +593,20 @@ export const DEFAULT_CAPABILITIES: Capabilities = {
 };
 
 export const CAPABILITY_LABELS: Record<Capability, string> = {
-  browse: 'Browse folders',
-  search: 'Search files',
-  read: 'Read files',
-  metadata: 'File metadata',
-  create: 'Create files',
-  edit: 'Edit files',
-  move: 'Move / rename',
-  deleteFile: 'Delete files',
-  command: 'Run commands',
-  saveArtifact: 'Save ChatGPT files',
-  screen: 'See the screen',
-  control: 'Control mouse and keyboard',
-  clipboardRead: 'Read clipboard',
-  clipboardWrite: 'Write clipboard'
+  browse: '폴더 탐색',
+  search: '파일 검색',
+  read: '파일 읽기',
+  metadata: '파일 정보',
+  create: '파일 생성',
+  edit: '파일 편집',
+  move: '이동·이름 변경',
+  deleteFile: '파일 삭제',
+  command: '명령 실행',
+  saveArtifact: 'ChatGPT 파일 저장',
+  screen: '화면 확인',
+  control: '마우스·키보드 제어',
+  clipboardRead: '클립보드 읽기',
+  clipboardWrite: '클립보드 쓰기'
 };
 
 /**
@@ -616,20 +618,20 @@ export const CAPABILITY_LABELS: Record<Capability, string> = {
  * buried in it is a sentence nobody rewrites when the tool is renamed.
  */
 export const CAPABILITY_DETAILS: Record<Capability, string> = {
-  browse: 'List what is inside an approved folder.',
-  search: 'Find files by name or glob, and text inside them.',
-  read: 'Read text in ranges, and open local images into vision.',
-  metadata: 'Size, dates and line count, without the contents.',
-  create: 'Add new files, and the folders they need.',
-  edit: 'Exact edits, applied atomically across files.',
-  move: 'Move or rename, both ends inside approved folders.',
-  deleteFile: 'Permanent — there is no Recycle Bin.',
-  command: 'Run anything as you. NOT limited to approved folders.',
-  saveArtifact: 'Save images and files ChatGPT generates into an approved folder.',
-  screen: 'Screenshots, open windows, and the controls on them.',
-  control: 'Moves the pointer, clicks, types and presses keys, as you.',
-  clipboardRead: 'Read the current clipboard text.',
-  clipboardWrite: 'Replace the clipboard without focus or keystrokes.'
+  browse: '승인한 폴더의 내용을 나열합니다.',
+  search: '파일 이름·패턴과 파일 안의 텍스트를 검색합니다.',
+  read: '지정 범위의 텍스트를 읽고 로컬 이미지를 확인합니다.',
+  metadata: '내용을 읽지 않고 크기·날짜·줄 수를 확인합니다.',
+  create: '새 파일과 필요한 폴더를 만듭니다.',
+  edit: '정확한 수정 내용을 여러 파일에 원자적으로 적용합니다.',
+  move: '승인한 폴더 안에서 이동하거나 이름을 바꿉니다.',
+  deleteFile: '영구 삭제입니다. 휴지통으로 이동하지 않습니다.',
+  command: '현재 사용자 권한으로 실행합니다. 승인한 폴더로 제한되지 않습니다.',
+  saveArtifact: 'ChatGPT가 생성한 이미지와 파일을 승인한 폴더에 저장합니다.',
+  screen: '화면 캡처와 열린 창·UI 요소를 확인합니다.',
+  control: '현재 사용자로 포인터 이동·클릭·텍스트 입력·키 입력을 수행합니다.',
+  clipboardRead: '현재 클립보드 텍스트를 읽습니다.',
+  clipboardWrite: '창 포커스나 키 입력 없이 클립보드 내용을 바꿉니다.'
 };
 
 /**

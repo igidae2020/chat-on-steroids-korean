@@ -35,9 +35,9 @@ describe('companion extension setup contract', () => {
       readFile(path.join(repo, 'src/main/ipc.ts'), 'utf8')
     ]);
 
-    expect(html).toMatch(/id="bridgeDownload"[\s\S]*?Download extension ZIP/i);
-    expect(html).toMatch(/Required for sub-agents/i);
-    expect(html).toMatch(/Requires the Chrome extension to be loaded and connected/i);
+    expect(html).toMatch(/id="bridgeDownload"[\s\S]*?확장 ZIP 받기/);
+    expect(html).toContain('보조 에이전트 사용에 필수');
+    expect(html).toContain('Chrome 확장이 설치·연결되어 있어야 합니다');
     expect(html).not.toContain('/releases/latest/');
     expect(ipc).not.toContain('/releases/latest/');
     expect(renderer).toContain('api.downloadExtension()');

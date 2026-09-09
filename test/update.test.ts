@@ -41,8 +41,8 @@ vi.mock('electron', () => ({
 }));
 vi.mock('../src/main/logger.js', () => ({ logInfo: () => undefined, logWarn: () => undefined }));
 
-const { APP_VERSION } = await import('../src/main/version.js');
-const { isNewer } = await import('../src/shared/types.js');
+const { APP_VERSION, RELEASE_REPOSITORY, extensionDownloadUrl } = await import('../src/main/version.js');
+const { isNewer, RELEASES_PAGE } = await import('../src/shared/types.js');
 const {
   applyStagedUpdate,
   checkForUpdates,
@@ -206,6 +206,30 @@ describe('finding a newer release', () => {
 });
 
 describe('staging the new version', () => {
+  it('uses one localized channel for app updates, extension downloads and release links', async () => {
+    const { fetch } = github();
+    await asPlatform('win32', undefined, () => checkForUpdates());
+    const channel = `https://github.com/${RELEASE_REPOSITORY}`;
+    expect(fetch.mock.calls.map(([url]) => String(url))).toEqual([
+      `https://api.github.com/repos/${RELEASE_REPOSITORY}/releases/latest`,
+      `${channel}/releases/download/v${NEXT}/SHA256SUMS.txt`,
+      `${channel}/releases/download/v${NEXT}/${WINDOWS_ASSET}`
+    ]);
+    expect(RELEASE_REPOSITORY).not.toBe('totec448-spec/chat-on-steroids');
+    expect(RELEASES_PAGE).toBe(`${channel}/releases/latest`);
+    expect(extensionDownloadUrl()).toBe(`${channel}/releases/download/v${APP_VERSION}/Chat-On-Steroids-Extension.zip`);
+  });
+
+  it('does not fall back to an official binary when the localized channel is inaccessible', async () => {
+    const fetch = vi.fn(async () => new Response('not found', { status: 404 }));
+    vi.stubGlobal('fetch', fetch);
+    await asPlatform('win32', undefined, () => checkForUpdates());
+    expect(updateStatus().stage).toBe('failed');
+    expect(fetch).toHaveBeenCalledTimes(1);
+    await applyStagedUpdate();
+    expect(spawned).toEqual([]);
+  });
+
   it('downloads the artifact, checks it against the published SHA-256, and installs it on quit', async () => {
     const { asked, body } = github();
     await asPlatform('win32', undefined, () => checkForUpdates());

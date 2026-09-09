@@ -11,12 +11,12 @@ export function createAgentPanel(options: {
   working: (summary: SessionSummary) => boolean;
 }) {
   const pane = el('aside', 'agent-panel'); pane.hidden = true;
-  pane.setAttribute('aria-label', 'Sub-agents');
+  pane.setAttribute('aria-label', '보조 에이전트');
   const head = el('div', 'agent-panel-header');
-  const back = el('button', 'btn', '←'); back.title = 'Back to sub-agents'; back.setAttribute('type', 'button');
+  const back = el('button', 'btn', '←'); back.title = '보조 에이전트 목록으로'; back.setAttribute('type', 'button');
   back.setAttribute('aria-label', back.title);
-  const title = el('strong', '', 'Sub-agents');
-  const close = el('button', 'btn', '×'); close.setAttribute('type', 'button'); close.setAttribute('aria-label', 'Close sub-agents');
+  const title = el('strong', '', '보조 에이전트');
+  const close = el('button', 'btn', '×'); close.setAttribute('type', 'button'); close.setAttribute('aria-label', '보조 에이전트 닫기');
   const body = el('div', 'agent-panel-body');
   head.append(back, title, close); pane.append(head, body); options.host.append(pane);
   let parent: string | null = null, workers: SessionSummary[] = [], selected: string | null = null;
@@ -29,11 +29,11 @@ export function createAgentPanel(options: {
     pane.hidden = false; options.host.classList.add('has-agent-panel'); options.toggle.setAttribute('aria-expanded', 'true');
   }
   function list(): void {
-    generation++; selected = null; back.hidden = true; title.textContent = 'Sub-agents'; body.replaceChildren();
+    generation++; selected = null; back.hidden = true; title.textContent = '보조 에이전트'; body.replaceChildren();
     for (const active of [true, false]) {
       const group = workers.filter(worker => options.working(worker) === active);
-      body.append(el('h3', '', `${active ? 'Active' : 'History'} · ${group.length}`));
-      if (!group.length) { body.append(el('p', 'meta', active ? 'No active sub-agents' : 'No recorded sub-agents')); continue; }
+      body.append(el('h3', '', `${active ? '실행 중' : '기록'} · ${group.length}`));
+      if (!group.length) { body.append(el('p', 'meta', active ? '실행 중인 보조 에이전트 없음' : '기록된 보조 에이전트 없음')); continue; }
       for (const worker of group) {
         const row = el('button', 'agent-panel-row'); row.setAttribute('type', 'button');
         row.append(el('span', 'agent-avatar', worker.origin?.agentId?.replace(/^worker-/, '') ?? '•'), el('span', '', worker.title));
@@ -48,12 +48,12 @@ export function createAgentPanel(options: {
     const preserve = refresh && selected === id && !pane.hidden;
     show(); selected = id; const request = ++generation;
     back.hidden = false; title.textContent = worker.title;
-    if (!preserve) body.replaceChildren(el('p', 'meta', 'Loading conversation…'));
+    if (!preserve) body.replaceChildren(el('p', 'meta', '대화 불러오는 중…'));
     const current = () => request === generation && selected === id && !pane.hidden;
     const detail = await options.load(id);
     if (!current()) return;
-    if (!detail) { body.replaceChildren(el('p', 'meta', 'Conversation unavailable')); return; }
-    const openMain = el('button', 'btn', 'Open full chat'); openMain.setAttribute('type', 'button');
+    if (!detail) { body.replaceChildren(el('p', 'meta', '대화를 불러올 수 없습니다')); return; }
+    const openMain = el('button', 'btn', '전체 대화 열기'); openMain.setAttribute('type', 'button');
     openMain.onclick = () => { hide(); options.openMain(id); };
     const position = body.scrollTop;
     const follow = !preserve || position + body.clientHeight >= body.scrollHeight - 40;
@@ -72,7 +72,7 @@ export function createAgentPanel(options: {
       if (parent !== id) { hide(); parent = id; }
       const previous = workers.find(worker => worker.id === selected);
       workers = next; options.toggle.hidden = id === null;
-      options.toggle.title = `Sub-agents · ${workers.length} recorded`;
+      options.toggle.title = `보조 에이전트 · ${workers.length}개 기록`;
       if (pane.hidden) return;
       const latest = workers.find(worker => worker.id === selected);
       if (!selected || !latest) list();

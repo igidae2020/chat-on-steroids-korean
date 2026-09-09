@@ -1,0 +1,78 @@
+name: Update Korean distribution
+
+on:
+  workflow_dispatch:
+  schedule:
+    - cron: '23 3 * * *'
+
+permissions:
+  contents: write
+  actions: write
+
+concurrency:
+  group: korean-upstream-update
+  cancel-in-progress: false
+
+jobs:
+  update:
+    # This workflow must never publish from an accidental third-party fork.
+    if: github.repository == 'igidae2020/chat-on-steroids-korean'
+    runs-on: ubuntu-24.04
+    timeout-minutes: 45
+    env:
+      GH_TOKEN: ${{ github.token }}
+    steps:
+      - uses: actions/checkout@fbc6f3992d24b796d5a048ff273f7fcc4a7b6c09
+        with:
+          ref: main
+          fetch-depth: 0
+      - uses: actions/setup-node@a0853c24544627f65ddf259abe73b1d18a591444
+        with:
+          node-version: 22
+          cache: npm
+      - name: Merge the newest official release without replacing local changes
+        id: upstream
+        shell: bash
+        run: |
+          set -euo pipefail
+          tag="$(gh api repos/totec448-spec/chat-on-steroids/releases/latest --jq .tag_name)"
+          [[ "$tag" =~ ^v[0-9]+\.[0-9]+\.[0-9]+$ ]] || { echo 'Invalid upstream release tag'; exit 1; }
+          git remote add upstream https://github.com/totec448-spec/chat-on-steroids.git
+          git fetch --no-tags upstream main:refs/remotes/upstream/main "refs/tags/$tag:refs/remotes/upstream/releases/$tag"
+          commit="$(git rev-parse "refs/remotes/upstream/releases/$tag^{commit}")"
+          if git merge-base --is-ancestor "$commit" HEAD; then
+            echo 'changed=false' >> "$GITHUB_OUTPUT"
+            exit 0
+          fi
+          TAG="$tag" node --input-type=module <<'NODE'
+          import fs from 'node:fs';
+          const current = JSON.parse(fs.readFileSync('package.json')).version.split('.').map(Number);
+          const next = process.env.TAG.slice(1).split('.').map(Number);
+          const first = next.findIndex((part, i) => part !== current[i]);
+          if (first < 0 || next[first] < current[first]) throw new Error('Not a newer upstream version');
+          NODE
+          git config user.name 'github-actions[bot]'
+          git config user.email '41898282+github-actions[bot]@users.noreply.github.com'
+          # A conflict is a failed update, not permission to discard our localization.
+          git merge --no-edit "$commit"
+          echo "tag=$tag" >> "$GITHUB_OUTPUT"
+          echo 'changed=true' >> "$GITHUB_OUTPUT"
+      - name: Install exact dependencies
+        if: steps.upstream.outputs.changed == 'true'
+        run: npm ci
+      - name: Verify the merged source
+        if: steps.upstream.outputs.changed == 'true'
+        run: npm run verify
+      - name: Publish source and dispatch the existing native release gates
+        if: steps.upstream.outputs.changed == 'true'
+        env:
+          TAG: ${{ steps.upstream.outputs.tag }}
+        shell: bash
+        run: |
+          set -euo pipefail
+          test "v$(node -p "require('./package.json').version")" = "$TAG"
+          # One ordinary atomic push: concurrent main changes or an existing tag refuse it.
+          git tag "$TAG"
+          git push --atomic origin HEAD:main "refs/tags/$TAG"
+          # A GITHUB_TOKEN push does not start another workflow automatically; dispatch is explicit.
+          gh workflow run publish.yml --ref "$TAG"

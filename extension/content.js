@@ -4058,7 +4058,7 @@
     label.setAttribute(
       'data-clf-tip',
       `${entry.tool} — ${entry.outcome}${entry.durationMs ? ` in ${Math.round(entry.durationMs)} ms` : ''}` +
-        `\nOriginally: ${block.dataset.clfOriginal}`
+        `\n원래 표시: ${block.dataset.clfOriginal}`
     );
     block.classList.remove('clf-good', 'clf-bad', 'clf-warn', 'clf-neutral');
     block.classList.add('clf-tool', `clf-${entry.summary.tone}`);
@@ -4078,7 +4078,7 @@
       whoNode = whoNode || document.createElement('span');
       whoNode.className = 'clf-agent';
       whoNode.textContent = wantedWho;
-      whoNode.setAttribute('data-clf-tip', `Run by ${wantedWho}, not by the chat you are reading.`);
+      whoNode.setAttribute('data-clf-tip', `현재 읽는 대화가 아니라 ${wantedWho}에서 실행했습니다.`);
       block.dataset.clfAgent = wantedWho;
       if (!who) label.insertAdjacentElement('beforebegin', whoNode);
     } else if (whoNode) {
@@ -4180,7 +4180,7 @@
     node.textContent = text;
     node.setAttribute(
       'data-clf-tip',
-      `${folded.length} earlier call${folded.length === 1 ? '' : 's'} folded into this row by ChatGPT. Show them.`
+      `ChatGPT가 이전 호출 ${folded.length}개를 이 행에 접어 두었습니다. 펼쳐서 확인하세요.`
     );
     if (!chip) {
       // The chip sits inside ChatGPT's own header button, so its click would also open the
@@ -4281,9 +4281,9 @@
     label.classList.add('clf-tool-title');
     label.title =
       `${seen.path || seen.tool}${seen.app ? ` — ${seen.app}` : ''}\n` +
-      'Named from this chat’s own record. This app did not run the call, so it has no ' +
-      'result or duration here.\n' +
-      `Originally: ${block.dataset.clfOriginal}`;
+      '현재 대화의 기록에 나온 이름입니다. 이 앱에서 실행한 호출이 아니므로 ' +
+      '결과나 실행 시간이 없습니다.\n' +
+      `원래 표시: ${block.dataset.clfOriginal}`;
     block.classList.add('clf-tool', 'clf-page');
   }
 
@@ -5048,7 +5048,7 @@
     const body = document.createElement('span');
     body.className = 'clf-stream-text';
     if (entry.kind === 'tool_call') {
-      body.textContent = entry.summary && entry.summary.title ? entry.summary.title : `Ran ${entry.tool || 'tool'}`;
+      body.textContent = entry.summary && entry.summary.title ? entry.summary.title : `${entry.tool || '도구'} 실행`;
       if (entry.summary && entry.summary.detail) {
         const detail = document.createElement('span');
         detail.className = 'clf-tool-detail';
@@ -5058,12 +5058,12 @@
     } else if (entry.kind === 'agent_message') {
       body.textContent = `${entry.from || 'agent'} → ${entry.to || 'agent'}: ${entry.text || ''}`;
     } else if (entry.kind === 'page_tool') {
-      body.textContent = entry.label || 'ChatGPT tool';
+      body.textContent = entry.label || 'ChatGPT 도구';
     } else if (entry.kind === 'turn_start') {
-      body.textContent = 'Turn started';
+      body.textContent = '응답 시작';
     } else if (entry.kind === 'turn_end') {
       const outcome = entry.outcome ? String(entry.outcome).replace(/_/g, ' ') : 'completed';
-      body.textContent = `Turn ${outcome}${entry.detail ? ` · ${entry.detail}` : ''}`;
+      body.textContent = `응답 ${outcome}${entry.detail ? ` · ${entry.detail}` : ''}`;
     } else {
       body.textContent = entry.text || '';
     }
@@ -5845,8 +5845,8 @@
     if (phase === 'delivering') {
       return {
         mode: 'busy',
-        label: NATIVE_PHASE_LABELS[phase] || 'Saving…',
-        hint: error || 'The brief is finished; waiting for the app to store it.',
+        label: NATIVE_PHASE_LABELS[phase] || '저장 중…',
+        hint: error || '요약 작성을 마쳤습니다. 앱 저장을 기다리는 중입니다.',
         action: 'cancel'
       };
     }
@@ -5855,18 +5855,18 @@
       // The ticket is alive but this page's checkpoint failed. Say the failure without
       // declaring the durable job failed; a later generation/reload may pick it up, and the
       // only immediate action offered here is the explicit cancel that closes the ticket.
-      return { mode: 'error', label: 'Paused', hint: error, action: 'cancel' };
+      return { mode: 'error', label: '일시 중지', hint: error, action: 'cancel' };
     }
 
     if (job && job.busy) {
       if (job.stage === 'opening') {
-        return { mode: 'busy', label: 'Opening…', hint: 'Handoff saved, opening the fresh chat', action: 'cancel' };
+        return { mode: 'busy', label: '대화 여는 중…', hint: '요약 저장 완료 — 새 대화를 여는 중', action: 'cancel' };
       }
       if (job.stage === 'waiting-for-browser') {
         return {
           mode: 'waiting',
-          label: 'Waiting…',
-          hint: job.error || 'The app is trying to open the fresh chat.',
+          label: '대기 중…',
+          hint: job.error || '앱에서 새 대화를 여는 중입니다.',
           action: 'cancel'
         };
       }
@@ -5875,8 +5875,8 @@
       // right now; `handoff-pending` is the app saying it has asked and is waiting.
       return {
         mode: 'busy',
-        label: NATIVE_PHASE_LABELS[phase] || 'Asking…',
-        hint: 'ChatGPT is writing the handoff',
+        label: NATIVE_PHASE_LABELS[phase] || '요청 중…',
+        hint: 'ChatGPT가 이어가기 요약 작성 중',
         action: 'cancel'
       };
     }
@@ -5888,31 +5888,31 @@
      * is a button that is missing whenever it is wanted.
      */
     if (job && job.stage === 'done') {
-      return { mode: 'done', label: 'Opened', hint: 'The fresh chat is open', action: 'start' };
+      return { mode: 'done', label: '열림', hint: '새 대화가 열렸습니다.', action: 'start' };
     }
     if (job && job.stage === 'failed') {
       if (job.error === 'cancelled') {
-        return { mode: 'idle', label: 'Compact', hint: 'Resume cancelled', action: 'start' };
+        return { mode: 'idle', label: '요약', hint: '이어가기를 취소했습니다.', action: 'start' };
       }
-      return { mode: 'error', label: 'Failed', hint: job.error || 'Compaction failed', action: 'start' };
+      return { mode: 'error', label: '실패', hint: job.error || '요약 후 이어가기에 실패했습니다.', action: 'start' };
     }
     if (pressedAt > 0 && now - pressedAt < PRESS_GRACE_MS) {
-      return { mode: 'busy', label: 'Starting…', hint: '', action: 'none' };
+      return { mode: 'busy', label: '시작 중…', hint: '', action: 'none' };
     }
-    if (error) return { mode: 'error', label: 'Failed', hint: error, action: 'start' };
+    if (error) return { mode: 'error', label: '실패', hint: error, action: 'start' };
     if (disconnected) {
       return {
         mode: 'off',
-        label: 'Compact',
-        hint: 'Browser connection is disconnected in Chat On Steroids.',
+        label: '요약',
+        hint: 'COS의 브라우저 연결이 해제되어 있습니다.',
         action: 'none'
       };
     }
     if (!connected) {
       return {
         mode: 'off',
-        label: 'Compact',
-        hint: 'Chat On Steroids is not running on this PC.',
+        label: '요약',
+        hint: '이 컴퓨터에서 Chat On Steroids가 실행 중이 아닙니다.',
         action: 'none'
       };
     }
@@ -5921,12 +5921,12 @@
       // still where a goal is written — which is the one thing that can start the chat.
       return {
         mode: 'off',
-        label: 'Compact',
-        hint: 'Nothing to compact yet — send a message, or set a goal and it writes one.',
+        label: '요약',
+        hint: '아직 요약할 내용이 없습니다. 메시지를 보내거나 목표를 지정해 대화를 시작하세요.',
         action: 'none'
       };
     }
-    return { mode: 'idle', label: 'Compact', hint: '', action: 'start' };
+    return { mode: 'idle', label: '요약', hint: '', action: 'start' };
   }
 
   /**
@@ -5977,7 +5977,7 @@
     const objective = goal && typeof goal.objective === 'string' ? goal.objective : '';
     // The app's own reason, rather than this tab's guess. Today there is exactly one: a
     // worker chat, where the prime already writes the user's turns.
-    const from = threshold > 0 ? `from ${roundK(threshold)} tokens` : '';
+    const from = threshold > 0 ? `${roundK(threshold)} 토큰부터` : '';
     // Is anything driving this chat at all? A saved goal is enough on its own, but only for a
     // chat that has never moved its own switch — the same rule the app applies.
     const armed = own ? goalOn || loopOn : goalOn || loopOn || Boolean(objective);
@@ -5995,41 +5995,41 @@
       // Two short lines rather than a sentence: this is read while reaching for something
       // else, and the only questions it answers are "is it on" and "at what point".
       tip: [
-        auto ? `Auto-compaction on${from ? `, ${from}` : ''}` : 'Auto-compaction off',
+        auto ? `자동 요약 켜짐${from ? `, ${from}` : ''}` : '자동 요약 꺼짐',
         blocked === 'worker'
-          ? 'Goal off — the prime writes this chat'
+          ? '목표 꺼짐 — 주 에이전트가 진행하는 대화'
           : blocked === 'blocked'
-            ? 'Goal off — this chat is blocked in the app'
+            ? '목표 꺼짐 — 앱에서 차단한 대화'
             : fresh
             ? !hasKey
-              ? 'No API key — Goal and Loop unavailable'
+              ? 'API 키 없음 — 목표·반복 사용 불가'
               : objective
-                ? 'Opening this chat on its goal'
-                : 'Add a goal or a loop to start this chat'
+                ? '지정한 목표로 대화를 시작하는 중'
+                : '목표 또는 반복 작업을 추가해 대화를 시작하세요.'
             : position === 'off'
-              ? 'Goal and Loop off'
+              ? '목표·반복 꺼짐'
               : position === 'loop'
                 ? hasKey
-                  ? 'Loop on — never stops on its own'
-                  : 'Loop on — no API key'
+                  ? '반복 켜짐 — 직접 꺼야 종료됩니다.'
+                  : '반복 켜짐 — API 키 없음'
                 : hasKey
                   ? objective
-                    ? 'Goal on — chasing this chat’s goal'
-                    : 'Goal on'
-                  : 'Goal on — no API key'
+                    ? '목표 켜짐 — 지정한 목표를 진행합니다.'
+                    : '목표 켜짐'
+                  : '목표 켜짐 — API 키 없음'
       ].join('\n'),
       rows: [
         {
           key: 'autoCompact',
-          label: 'Auto-compaction',
+          label: '자동 요약',
           note:
             blocked === 'worker'
-              ? 'off here: worker chats never auto-compact'
+              ? '작업자 대화는 자동 요약하지 않습니다.'
               : blocked === 'blocked'
-                ? 'off here: this chat is blocked in the app'
+                ? '앱에서 차단한 대화입니다.'
                 : auto
-                  ? from || 'threshold set in the app'
-                  : 'compact this chat by hand',
+                  ? from || '기준은 앱에서 설정합니다.'
+                  : '이 대화를 수동으로 요약합니다.',
           on: auto,
           warn: false,
           disabled: fenced
@@ -6055,16 +6055,16 @@
         : {
             value: position,
             options: [
-              { value: 'off', label: 'Off', hint: 'Nothing is written here on its own.' },
+              { value: 'off', label: '꺼짐', hint: '자동으로 후속 메시지를 보내지 않습니다.' },
               {
                 value: 'goal',
-                label: 'Goal',
-                hint: `Replies as you until this chat’s goal is reached, then stops. Written with ${modelLabel(goal && goal.model)}.`
+                label: '목표',
+                hint: `사용자를 대신해 목표 달성까지 진행한 뒤 종료합니다. 사용 모델: ${modelLabel(goal && goal.model)}.`
               },
               {
                 value: 'loop',
-                label: 'Loop',
-                hint: `Replies as you for ever — only this slider ends it. Written with ${modelLabel(goal && goal.model)}.`
+                label: '반복',
+                hint: `직접 끌 때까지 계속 진행합니다. 사용 모델: ${modelLabel(goal && goal.model)}.`
               }
             ],
             // The one line under the slider: what the position it is at actually does. The
@@ -6072,16 +6072,16 @@
             // to the only question somebody reaching for this control has.
             note:
               blocked === 'worker'
-                ? 'the prime writes here'
+                ? '주 에이전트가 진행합니다.'
                 : blocked === 'blocked'
-                  ? 'blocked in the app'
+                  ? '앱에서 차단됨'
                   : !hasKey
-                  ? 'OpenRouter key required'
+                  ? 'OpenRouter API 키 필요'
                   : position === 'loop'
-                    ? 'replies for ever'
+                    ? '직접 끌 때까지 계속 진행'
                     : position === 'goal'
-                      ? 'replies until goal reached'
-                      : 'no replies written here',
+                      ? '목표 달성까지 진행'
+                      : '자동 후속 메시지 없음',
             warn: !hasKey || fenced,
             disabled: fenced
           },
@@ -6123,13 +6123,13 @@
           ? [
               {
                 mode: 'goal',
-                label: 'add specific goal',
-                hint: 'Write what this chat has to reach. It then prompts until it is reached, and stops there.'
+                label: '목표 지정',
+                hint: '달성할 목표를 적으세요. 목표에 도달할 때까지 진행한 뒤 자동으로 종료합니다.'
               },
               {
                 mode: 'loop',
-                label: 'add specific loop',
-                hint: 'Write what this chat has to reach. It then prompts for ever — nothing but the Loop slider ends it.'
+                label: '반복 작업 지정',
+                hint: '반복할 작업을 적으세요. 직접 반복 모드를 끌 때까지 계속 진행합니다.'
               }
             ]
           : [
@@ -6139,26 +6139,26 @@
                 // Two links would offer the mode a second time and let a text save masquerade
                 // as a mode switch.
                 mode: driving,
-                label: objective ? 'edit task' : 'add task',
+                label: objective ? '작업 수정' : '작업 추가',
                 // Off is not a mode this task could be saved into, so it is not offered as one.
                 // Picking Goal or Loop first is the same order the slider reads in.
                 disabled: position === 'off',
                 hint:
                   position === 'off'
-                    ? 'Pick Goal or Loop above first — Off writes nothing.'
+                    ? '먼저 위에서 목표 또는 반복을 선택하세요. 꺼짐 상태에서는 실행하지 않습니다.'
                     : objective
-                      ? `Change or clear what this chat has to reach. It runs as ${driving === 'loop' ? 'Loop' : 'Goal'}.`
-                      : `Write what this chat has to reach. It runs as ${driving === 'loop' ? 'Loop' : 'Goal'}.`
+                      ? `작업 내용을 수정하거나 지웁니다. 현재 모드: ${driving === 'loop' ? '반복' : '목표'}.`
+                      : `달성할 작업을 적으세요. 현재 모드: ${driving === 'loop' ? '반복' : '목표'}.`
               }
             ],
         available: hasKey && !blocked,
         unavailable:
           blocked === 'worker'
-            ? 'A worker chat is already driven by its prime.'
+            ? '이 작업자 대화는 주 에이전트가 진행합니다.'
             : blocked === 'blocked'
-              ? 'This chat is blocked in the app. Release it there to drive it again.'
+              ? '앱에서 차단한 대화입니다. 앱에서 차단을 해제한 뒤 다시 진행하세요.'
               : !hasKey
-              ? 'Add an OpenRouter API key in the app first.'
+              ? '먼저 앱에서 OpenRouter API 키를 추가하세요.'
               : ''
       },
       // The button's old job, kept as a row rather than dropped: pressing the gear must not
@@ -6166,15 +6166,15 @@
       action: {
         label:
           fenced
-            ? 'Compact & resume unavailable'
+            ? '요약 후 이어가기 사용 불가'
             : compact.action === 'cancel'
-              ? 'Cancel compaction'
-              : 'Compact & resume now',
+              ? '요약 취소'
+              : '지금 요약 후 이어가기',
         hint:
           blocked === 'worker'
-            ? 'Worker chats stay in their existing conversation and are never manually compacted or resumed.'
+            ? '작업자는 기존 대화를 유지하며 수동 요약·이어가기를 사용하지 않습니다.'
             : blocked === 'blocked'
-              ? 'A blocked chat is never compacted or resumed: the replacement chat would run without its tools. Release it in the app first.'
+              ? '차단한 대화는 요약·이어가기를 실행하지 않습니다. 먼저 앱에서 차단을 해제하세요.'
               : compact.hint,
         action: fenced ? 'none' : compact.action
       }
@@ -6338,7 +6338,7 @@
           ? 'near'
           : 'ok';
     // One compact line is enough in the composer. The meter itself already conveys the rest.
-    const status = `${roundK(tokens)}/${roundK(ceiling)} · autocompact ${context.auto ? 'on' : 'off'}`;
+    const status = `${roundK(tokens)}/${roundK(ceiling)} · 자동 요약 ${context.auto ? '켜짐' : '꺼짐'}`;
     return { filled, level, status, tip: status };
   }
 
@@ -6365,12 +6365,12 @@
    */
   /** Local phases of a ChatGPT-native compaction, as the button says them. */
   const NATIVE_PHASE_LABELS = {
-    requested: 'Starting…',
-    interrupting: 'Stopping…',
-    settling: 'Settling…',
-    prompting: 'Asking…',
-    waiting: 'Writing…',
-    delivering: 'Saving…'
+    requested: '시작 중…',
+    interrupting: '중단 중…',
+    settling: '완료 대기 중…',
+    prompting: '요청 중…',
+    waiting: '작성 중…',
+    delivering: '저장 중…'
   };
 
   /**
@@ -6444,7 +6444,7 @@
     cancel.type = 'button';
     cancel.className = 'clf-cancel';
     cancel.textContent = '×';
-    cancel.setAttribute('aria-label', 'Cancel Compact & resume');
+    cancel.setAttribute('aria-label', '요약 후 이어가기 취소');
     pill.append(spinner, text, cancel);
 
     const button = document.createElement('button');
@@ -6486,10 +6486,10 @@
     // tool refusals. The word says the state, the hover says where it is undone.
     const blocked = document.createElement('span');
     blocked.className = 'clf-blocked';
-    blocked.textContent = 'Chat blocked';
+    blocked.textContent = '대화 차단됨';
     blocked.setAttribute(
       'data-clf-tip',
-      'This chat is blocked in the Chat On Steroids app: its tool calls are refused and Goal, Loop and auto-compaction are off. To release it, open the app’s Chat tab, hover this chat in the sessions list and press its block symbol.'
+      'Chat On Steroids 앱에서 차단한 대화입니다. 도구 호출이 거부되며 목표·반복·자동 요약이 꺼져 있습니다. 해제하려면 앱의 대화 탭에서 이 세션에 마우스를 올리고 차단 아이콘을 누르세요.'
     );
     blocked.hidden = true;
 
@@ -6580,7 +6580,7 @@
     root.className = 'clf-menu';
     root.dataset.clfMenu = '1';
     root.setAttribute('role', 'dialog');
-    root.setAttribute('aria-label', 'Chat On Steroids settings');
+    root.setAttribute('aria-label', 'Chat On Steroids 설정');
     root.hidden = true;
     (document.body || document.documentElement).append(root);
     return root;
@@ -7047,7 +7047,7 @@
     track.className = 'clf-menu-mode-track';
     track.dataset.clfValue = mode.value;
     track.setAttribute('role', 'radiogroup');
-    track.setAttribute('aria-label', 'Goal mode');
+    track.setAttribute('aria-label', '자동 진행 모드');
 
     // Behind the three labels, and the only thing that moves. Its position is the value, so
     // there is nothing to keep in step with the buttons in front of it.
@@ -7144,7 +7144,7 @@
         plus.textContent = objective.summary ? '✎' : '+';
         plus.setAttribute('aria-hidden', 'true');
         const word = document.createElement('span');
-        word.textContent = objectiveBusy ? 'working…' : action.label;
+        word.textContent = objectiveBusy ? '처리 중…' : action.label;
         link.append(word, plus);
         link.addEventListener('click', (event) => {
           event.preventDefault();
@@ -7161,7 +7161,7 @@
     input.className = 'clf-menu-goal-input';
     input.dataset.clfGoalInput = '1';
     input.rows = 3;
-    input.placeholder = 'What does this chat have to reach?';
+    input.placeholder = '이 대화에서 달성할 목표나 반복할 작업을 적어 주세요.';
     input.value = menuDraft;
     input.disabled = objectiveBusy;
     input.addEventListener('keydown', (event) => {
@@ -7185,7 +7185,7 @@
     save.dataset.clfGoalMode = objective.mode;
     // Named, not just "Save". This button is the moment the mode is decided, and the two
     // outcomes are a run that may stop and a run that may not.
-    save.textContent = objectiveBusy ? 'Saving…' : objective.mode === 'loop' ? 'Save as loop' : 'Save as goal';
+    save.textContent = objectiveBusy ? '저장 중…' : objective.mode === 'loop' ? '반복으로 저장' : '목표로 저장';
     save.disabled = objectiveBusy || !menuDraft.trim() || objective.savable === false;
     save.addEventListener('click', (event) => {
       event.preventDefault();
@@ -7195,7 +7195,7 @@
     const cancel = document.createElement('button');
     cancel.type = 'button';
     cancel.className = 'clf-menu-goal-cancel';
-    cancel.textContent = 'Cancel';
+    cancel.textContent = '취소';
     cancel.disabled = objectiveBusy;
     cancel.addEventListener('click', (event) => {
       event.preventDefault();
@@ -7211,14 +7211,14 @@
     // On the row rather than on Save, for the same reason as the link above: the button this
     // explains is disabled, and a disabled button is deaf to the pointer.
     if (objective.savable === false) {
-      buttons.setAttribute('data-clf-tip', 'Pick Goal or Loop above first — Off writes nothing.');
+      buttons.setAttribute('data-clf-tip', '먼저 위에서 목표 또는 반복을 선택하세요. 꺼짐 상태에서는 실행하지 않습니다.');
     }
     buttons.append(save, cancel);
     if (objective.text) {
       const clear = document.createElement('button');
       clear.type = 'button';
       clear.className = 'clf-menu-goal-clear';
-      clear.textContent = 'Clear';
+      clear.textContent = '지우기';
       // Deleting the task is an edit like any other, so Off stops it too. Reachable only from
       // an editor that was already open when the handle moved — and letting it through there
       // would delete the sentence from under a slider that says nothing is written here.
@@ -7305,7 +7305,7 @@
     // Never disabled any more: it opens a sheet, and a sheet that explains why compaction is
     // unavailable is exactly what somebody clicking a dead button wanted to be told.
     control.button.disabled = false;
-    control.button.setAttribute('aria-label', 'Chat On Steroids settings');
+    control.button.setAttribute('aria-label', 'Chat On Steroids 설정');
     control.button.setAttribute('aria-haspopup', 'dialog');
     if (!control.button.hasAttribute('aria-expanded')) control.button.setAttribute('aria-expanded', 'false');
     // The meter only while the button is a button. During a run the control is saying what
@@ -7379,8 +7379,8 @@
     // a row of near-identical worker tabs actually wants from the fold.
     label.textContent =
       bootstrap === 'worker'
-        ? `This is ${bootstrapAgent || agent || 'a worker'} — the instruction this app gave the worker, not something you typed`
-        : 'The handoff brief this app carried over — not something you typed';
+        ? `${bootstrapAgent || agent || '작업자'} — 사용자가 입력한 글이 아니라 앱이 작업자에게 전달한 지시입니다.`
+        : '사용자가 입력한 글이 아니라 앱이 이전 대화에서 가져온 이어가기 요약입니다.';
     head.append(label);
     // The first lines of the folded text, clamped. Not only a courtesy: ChatGPT sizes the user
     // bubble to its content, so a summary that was one short sentence made the bubble narrow
@@ -7409,17 +7409,17 @@
    * Only ever this chat's own work: `job` is reported per conversation, so a tab sitting
    * idle beside a chat that is compacting shows nothing.
    */
-  const COMPACT_STEPS = ['Preparing', 'Writing the handoff', 'Saving it', 'Opening the new chat'];
+  const COMPACT_STEPS = ['준비', '요약 작성', '요약 저장', '새 대화 열기'];
 
   function stageView(input) {
     const { job, goal, phase = nativePhase } = input;
     if (job && job.busy) {
       const stage =
         job.stage === 'opening'
-          ? 'Opening a fresh chat'
+          ? '새 대화 여는 중'
           : job.stage === 'waiting-for-browser'
-            ? 'Waiting for Chrome'
-            : 'ChatGPT is writing the handoff';
+            ? 'Chrome 대기 중'
+            : 'ChatGPT가 이어가기 요약 작성 중';
       // The prompt's durable position, not this document's memory of typing it. A reload
       // during the compaction turn starts a page whose `phase` is empty while the marked
       // prompt has been with ChatGPT for minutes — and the bar then said "Preparing" about
@@ -7467,7 +7467,7 @@
    */
   function modelLabel(id) {
     const name = String(id || '').trim();
-    if (!name) return 'the model';
+    if (!name) return '모델';
     const tail = name.slice(name.lastIndexOf('/') + 1);
     return tail.split(':')[0] || tail;
   }
@@ -7492,7 +7492,7 @@
    * — and a caption on its own only ever answered "what now". It never answered "how far",
    * so a run that had stopped and a run that was merely slow looked identical for minutes.
    */
-  const GOAL_STEPS = ['Answer settling', 'Reading the chat', 'Writing the reply', 'Sending'];
+  const GOAL_STEPS = ['응답 완료 확인', '대화 읽기', '후속 메시지 작성', '전송'];
 
   /**
    * Which of those a phase is.
@@ -7509,56 +7509,56 @@
     const draft = goal.draft || null;
     const who = modelLabel(draft?.model || goal.model);
     const backend = draft?.backend || goal.backend;
-    const dest = backend === 'chatgpt' ? 'ChatGPT helper' : backend === 'templates' ? 'offline templates'
-      : goal.provider === 'custom' ? 'custom endpoint' : 'OpenRouter';
+    const dest = backend === 'chatgpt' ? 'ChatGPT 도우미' : backend === 'templates' ? '오프라인 템플릿'
+      : goal.provider === 'custom' ? '사용자 지정 엔드포인트' : 'OpenRouter';
     const bar = (at, done = false) => ({ steps: GOAL_STEPS, at, done });
-    const failure = goal.error || (draft && draft.stage === 'failed' ? draft.error || `${dest} did not answer` : '');
+    const failure = goal.error || (draft && draft.stage === 'failed' ? draft.error || `${dest}에서 응답하지 않았습니다.` : '');
     if (failure) {
       const at = draft && draft.stage === 'failed' ? 2 : (GOAL_STEP_AT[goal.phase] ?? 1);
       if (goal.phase === 'retrying') {
         const seconds = Math.round((goal.retryMs || GOAL_RETRY_MS) / 1000);
-        return { stage: `Retrying Goal in ${seconds} seconds`, detail: failure, body: '', kind: 'goal', ...bar(at) };
+        return { stage: `${seconds}초 후 자동 진행 재시도`, detail: failure, body: '', kind: 'goal', ...bar(at) };
       }
-      return { stage: 'The goal loop stopped', detail: failure, body: '', kind: 'goal-error', ...bar(at) };
+      return { stage: '자동 진행이 중단되었습니다.', detail: failure, body: '', kind: 'goal-error', ...bar(at) };
     }
     // A chat opening on a specific goal. There is no answer to read and no turn to settle,
     // so the first two steps of the ordinary run simply did not happen; saying "sending the
     // answer to OpenRouter" about a chat with no answer in it yet would be describing a
     // different run entirely.
     if (goal.opening) {
-      if (goal.phase === 'sending') return { stage: 'Sending it to ChatGPT', detail: '', body: '', kind: 'goal', ...bar(3) };
-      return { stage: `${who} is writing the first message`, detail: '', body: '', kind: 'goal', ...bar(2) };
+      if (goal.phase === 'sending') return { stage: 'ChatGPT에 전송 중', detail: '', body: '', kind: 'goal', ...bar(3) };
+      return { stage: `${who} 첫 메시지 작성 중`, detail: '', body: '', kind: 'goal', ...bar(2) };
     }
     if (goal.phase === 'done') {
       // The loop's own success condition, and the one state worth spelling out: nothing was
       // typed, and that is the answer rather than a failure to produce one. The bar stops at
       // the reply for the same reason — there was never anything to send.
-      return { stage: 'Goal reached', detail: 'nothing was sent', body: '', kind: 'goal-done', ...bar(2, true) };
+      return { stage: '목표 달성', detail: '추가 메시지 없이 종료', body: '', kind: 'goal-done', ...bar(2, true) };
     }
     if (goal.phase === 'settling') {
-      return { stage: 'Checking the answer is finished', detail: '', body: '', kind: 'goal', ...bar(0) };
+      return { stage: '응답 완료 여부 확인 중', detail: '', body: '', kind: 'goal', ...bar(0) };
     }
     if (goal.phase === 'sending' && draft && draft.reply) {
-      return { stage: 'Sending it to ChatGPT', detail: '', body: draft.reply, kind: 'goal', ...bar(3) };
+      return { stage: 'ChatGPT에 전송 중', detail: '', body: draft.reply, kind: 'goal', ...bar(3) };
     }
     if (goal.phase === 'requesting' && !draft) {
-      return { stage: `Sending the answer to ${dest}`, detail: who, body: '', kind: 'goal', ...bar(1) };
+      return { stage: `${dest}에게 대화 전달 중`, detail: who, body: '', kind: 'goal', ...bar(1) };
     }
     if (!draft) return null;
     if (draft.stage === 'no-reply') {
-      return { stage: 'Goal reached', detail: 'nothing was sent', body: '', kind: 'goal-done', ...bar(2, true) };
+      return { stage: '목표 달성', detail: '추가 메시지 없이 종료', body: '', kind: 'goal-done', ...bar(2, true) };
     }
     if (draft.stage === 'sending') {
-      return { stage: `Sending the answer to ${dest}`, detail: who, body: '', kind: 'goal', ...bar(1) };
+      return { stage: `${dest}에게 대화 전달 중`, detail: who, body: '', kind: 'goal', ...bar(1) };
     }
     if (draft.stage === 'answering') {
       // Streamed, so the wait has something in it. The text is the message being written for
       // the user, which is exactly the thing worth reading before it is sent.
-      return { stage: `${who} is answering`, detail: '', body: draft.text || '', kind: 'goal', ...bar(2) };
+      return { stage: `${who} 후속 메시지 작성 중`, detail: '', body: draft.text || '', kind: 'goal', ...bar(2) };
     }
     if (draft.stage === 'ready') {
       // Written, not yet typed: the third segment is full and the fourth has not started.
-      return { stage: `${who} wrote the next message`, detail: '', body: draft.reply || '', kind: 'goal', ...bar(2, true) };
+      return { stage: `${who} 후속 메시지 작성 완료`, detail: '', body: draft.reply || '', kind: 'goal', ...bar(2, true) };
     }
     return null;
   }
@@ -7617,8 +7617,8 @@
     close.className = 'clf-stage-close';
     close.type = 'button';
     close.textContent = '×';
-    close.title = 'Dismiss';
-    close.setAttribute('aria-label', 'Dismiss Goal status');
+    close.title = '닫기';
+    close.setAttribute('aria-label', '목표 상태 닫기');
     close.hidden = true;
     close.addEventListener('click', () => {
       // Removing the node alone is not enough: injectStage runs on every activity repaint
@@ -8768,7 +8768,7 @@
     }
     if (draft.stage === 'failed') {
       goalDraft = null;
-      const why = draft.error || `${draft.backend === 'chatgpt' ? 'ChatGPT helper' : draft.backend === 'templates' ? 'Offline templates' : goalConfig && goalConfig.provider === 'custom' ? 'custom endpoint' : 'OpenRouter'} did not answer`;
+      const why = draft.error || `${draft.backend === 'chatgpt' ? 'ChatGPT 도우미' : draft.backend === 'templates' ? '오프라인 템플릿' : goalConfig && goalConfig.provider === 'custom' ? '사용자 지정 엔드포인트' : 'OpenRouter'}에서 응답하지 않았습니다.`;
       const pending = goalConfig && goalConfig.pending;
       let retrying = draft.retryable === true && goalTurnId === draft.turnId;
       // A reload loses the document-local claim while the app keeps both the failed attempt
@@ -8962,7 +8962,7 @@
     if (data.error === 'compaction_running') return 'Another chat is compacting right now.';
     if (data.error === 'turn_still_generating') return 'Wait for this ChatGPT turn to finish first.';
     if (data.error) return String(data.error).slice(0, 160);
-    if (reply.error === 'app_not_found') return 'Chat On Steroids is not running on this PC.';
+    if (reply.error === 'app_not_found') return '이 컴퓨터에서 Chat On Steroids가 실행 중이 아닙니다.';
     return reply.error ? String(reply.error).slice(0, 160) : '';
   }
 

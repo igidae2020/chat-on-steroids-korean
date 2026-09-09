@@ -43,7 +43,7 @@ it('opening an empty or pending picker requests models immediately without a sep
   menu.open = true;
   await new Promise(resolve => setTimeout(resolve, 0));
   expect(requestChatModels).toHaveBeenCalledTimes(1);
-  expect(dom.window.document.getElementById('composerPowerTitle')!.textContent).toBe('Loading models…');
+  expect(dom.window.document.getElementById('composerPowerTitle')!.textContent).toBe('모델 불러오는 중…');
   menu.open = false;
   await new Promise(resolve => setTimeout(resolve, 0));
   menu.open = true;
@@ -114,15 +114,15 @@ it('renders the two observed Pro generations separately and sends their exact se
   slider.value = '2'; slider.dispatchEvent(new dom.window.Event('input'));
   expect(dom.window.document.getElementById('composerModelLabel')!.textContent).toBe('GPT-5.6 Pro');
   expect(confirmedComposerModel()).toEqual({ model: 'gpt-5.6-sol', reasoningEffort: 'pro' });
-  expect(dom.window.document.getElementById('contextMeterInfo')!.textContent).toContain('Auto-compaction off for Pro');
+  expect(dom.window.document.getElementById('contextMeterInfo')!.textContent).toContain('Pro는 자동 요약 꺼짐');
   slider.value = '0'; slider.dispatchEvent(new dom.window.Event('input'));
-  expect(dom.window.document.getElementById('contextMeterInfo')!.textContent).toContain('Auto-compaction off for Pro');
+  expect(dom.window.document.getElementById('contextMeterInfo')!.textContent).toContain('Pro는 자동 요약 꺼짐');
   expect(dom.window.document.getElementById('contextMeterArc')!.getAttribute('stroke-dasharray')).toBe('0 37.7');
   expect(dom.window.document.getElementById('composerModelLabel')!.textContent).toBe('GPT-6 Pro');
   expect(slider.getAttribute('aria-valuetext')).toBe('GPT-6 Pro');
   expect(confirmedComposerModel()).toEqual({ model: 'gpt-6-pro', reasoningEffort: 'pro' });
   slider.value = '1'; slider.dispatchEvent(new dom.window.Event('input'));
-  expect(dom.window.document.getElementById('contextMeterInfo')!.textContent).toMatch(/Auto-compaction at 400[,.]000 tokens/);
+  expect(dom.window.document.getElementById('contextMeterInfo')!.textContent).toMatch(/400[,.]000 토큰에서 자동 요약/);
 });
 
 it('replaces loading with the backend failure reason and an enabled retry control', async () => {
@@ -192,10 +192,10 @@ it('offers only observed models, prefers supported GPT-6 High, and replaces a re
   const reload = dom.window.document.getElementById('refreshComposerModels')!;
   expect(reload.querySelector('svg')).not.toBeNull();
   expect(reload.textContent).toBe('');
-  expect(reload.getAttribute('aria-label')).toBe('Reload ChatGPT models');
+  expect(reload.getAttribute('aria-label')).toBe('ChatGPT 모델 새로고침');
   const slider = dom.window.document.querySelector<HTMLInputElement>('#composerPowerChoices input')!;
   expect(slider.max).toBe('2');
-  expect(slider.getAttribute('aria-valuetext')).toBe('GPT-6 \u00b7 High');
+  expect(slider.getAttribute('aria-valuetext')).toBe('GPT-6 \u00b7 높음');
   slider.value = '0'; slider.dispatchEvent(new dom.window.Event('input'));
   expect(select('composerModel').value).toBe('other');
   expect(select('composerReasoning').value).toBe('medium');
@@ -265,23 +265,23 @@ it('keeps the trigger consistent with send admission during reload and a removed
   const config = { multiAgent: {}, goal: {} } as Config;
   initChatModels(); applyChatModels(config); await Promise.resolve();
   const label = dom.window.document.getElementById('composerModelLabel')!;
-  expect(label.textContent).toBe('GPT-5.6 Sol · High');
+  expect(label.textContent).toBe('GPT-5.6 Sol · 높음');
   expect(confirmedComposerModel()).toEqual({ model: 'sol', reasoningEffort: 'high' });
   dom.window.document.getElementById('refreshComposerModels')!.click();
   expect(confirmedComposerModel()).toEqual({ model: 'sol', reasoningEffort: 'high' });
-  expect(label.textContent).toBe('GPT-5.6 Sol · High');
+  expect(label.textContent).toBe('GPT-5.6 Sol · 높음');
   await Promise.resolve(); await Promise.resolve();
   applyChatModels(config); await Promise.resolve();
-  expect(label.textContent).toBe('GPT-5.6 Sol · High');
+  expect(label.textContent).toBe('GPT-5.6 Sol · 높음');
   expect(confirmedComposerModel()).toEqual({ model: 'sol', reasoningEffort: 'high' });
   catalog = { ...catalog, models: [{ id: 'sol', label: 'GPT-5.6 Sol', efforts: ['medium'] }] };
   applyChatModels(config); await Promise.resolve();
   expect(confirmedComposerModel()).toBeNull();
-  expect(label.textContent).toBe('Select model');
+  expect(label.textContent).toBe('모델 선택');
   const slider = dom.window.document.querySelector<HTMLInputElement>('#composerPowerChoices input')!;
   slider.dispatchEvent(new dom.window.Event('input'));
   expect(confirmedComposerModel()).toEqual({ model: 'sol', reasoningEffort: 'medium' });
-  expect(label.textContent).toBe('GPT-5.6 Sol · Medium');
+  expect(label.textContent).toBe('GPT-5.6 Sol · 중간');
   expect(label.title).toBe(label.textContent);
 });
 it('paints catalog pushes immediately and refuses late startup reads without refetching on unrelated state', async () => {

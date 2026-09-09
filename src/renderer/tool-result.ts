@@ -13,6 +13,6 @@ export function toolResultText(text: string, truncated: boolean, hasImages: bool
       if (hasImages) return '';
     }
   } catch { /* An overflow prefix may end inside a binary field; never paint that payload. */ }
-  if (hasImages && truncated) return 'Image result. Full response retained in the recording.';
+  if (hasImages && truncated) return '이미지 결과입니다. 전체 응답은 기록에 보존되어 있습니다.';
   return text;
 }

@@ -139,7 +139,7 @@ it('does not overwrite a focused dirty settings field on an unsolicited state pu
     }
   ];
   stateListener(withTools);
-  expect(w.document.getElementById('facts')!.textContent).toContain('Tools across Core + Desktop3 total');
+  expect(w.document.getElementById('facts')!.textContent).toContain('Core + Desktop 도구도구 총 3개');
   expect(w.document.getElementById('facts')!.textContent).not.toContain('of 9');
 
   const withMissingMacAccess = structuredClone(withTools) as any;
@@ -157,7 +157,7 @@ it('does not overwrite a focused dirty settings field on an unsolicited state pu
   const accessWarning = w.document.getElementById('desktopAccess')!;
   expect(accessWarning.hidden).toBe(false);
   expect(accessWarning.textContent).toContain('Accessibility: missing');
-  expect(accessWarning.textContent).toContain('live verdicts from the native backend');
+  expect(accessWarning.textContent).toContain('네이티브 기능에서 확인한 현재 권한 상태');
   expect((w.document.getElementById('openDesktopScreen') as HTMLButtonElement).hidden).toBe(true);
   expect((w.document.getElementById('openDesktopAccessibility') as HTMLButtonElement).hidden).toBe(false);
 
@@ -470,6 +470,28 @@ it('uses the OpenRouter default when opened directly on an unrelated custom depl
   expect(mounted.calls[0].goal).toMatchObject({ provider: { kind: 'openrouter' }, model: DEFAULT_GOAL_MODEL });
 });
 
+it('selects OpenCodex as the official custom endpoint preset without changing credentials or backends', async () => {
+  const mounted = await mountChat({ hasGoalKey: true, hasCustomProviderKey: false }, [], {}, { backend: 'api', loopBackend: 'chatgpt' });
+  const provider = mounted.window.document.getElementById('goalProvider') as HTMLSelectElement;
+  provider.value = 'opencodex'; provider.dispatchEvent(new mounted.window.Event('change'));
+  await vi.waitFor(() => expect(mounted.calls).toHaveLength(1));
+  expect(mounted.calls[0].goal).toMatchObject({ provider: { kind: 'custom', baseUrl: 'http://127.0.0.1:10100/v1' }, model: 'gpt-6-astra', reasoning: 'high', backend: 'api', loopBackend: 'chatgpt' });
+  expect(mounted.keys).toEqual([]);
+  expect(mounted.window.document.getElementById('goalKeyField')!.hidden).toBe(true);
+  expect(mounted.window.document.getElementById('goalCustomPanel')!.hidden).toBe(false);
+});
+
+it('restores the OpenCodex preset with an edited model and keeps model selection editable', async () => {
+  const mounted = await mountChat({}, [], {}, { model: 'my-chosen-model', reasoning: 'medium', provider: { kind: 'custom', baseUrl: 'http://127.0.0.1:10100/v1' } });
+  const doc = mounted.window.document;
+  expect((doc.getElementById('goalProvider') as HTMLSelectElement).value).toBe('opencodex');
+  const model = doc.getElementById('goalCustomModel') as HTMLInputElement;
+  expect(model.value).toBe('my-chosen-model');
+  model.value = 'another-model'; model.dispatchEvent(new mounted.window.Event('change'));
+  await vi.waitFor(() => expect(mounted.calls).toHaveLength(1));
+  expect(mounted.calls[0].goal).toMatchObject({ provider: { kind: 'custom', baseUrl: 'http://127.0.0.1:10100/v1' }, model: 'another-model', reasoning: 'medium' });
+});
+
 it('saves a custom deployment id and returns to the known OpenRouter model', async () => {
   const mounted = await mountChat();
   const w = mounted.window;
@@ -534,9 +556,9 @@ it('uses native menu-bar/Dock wording on macOS instead of Windows tray copy', as
   });
   const doc = mounted.window.document;
 
-  expect(doc.getElementById('backgroundRunningCopy')!.textContent).toContain('menu bar and Dock');
+  expect(doc.getElementById('backgroundRunningCopy')!.textContent).toContain('메뉴 막대와 Dock');
   expect(doc.getElementById('backgroundRunningCopy')!.textContent).not.toContain('tray');
-  expect(doc.getElementById('minimizeToTrayCopy')!.textContent).toBe('Hide the window to the menu bar when closed');
+  expect(doc.getElementById('minimizeToTrayCopy')!.textContent).toBe('창을 닫으면 메뉴 막대로 숨기기');
 });
 
 it('surfaces the existing root rename API in the folder row', async () => {
@@ -548,7 +570,7 @@ it('surfaces the existing root rename API in the folder row', async () => {
     }
   });
   const doc = mounted.window.document;
-  const button = doc.querySelector<HTMLButtonElement>('.root button[title="Rename /repo"]');
+  const button = doc.querySelector<HTMLButtonElement>('.root button[title="/repo 이름 변경"]');
   expect(button).not.toBeNull();
 
   button!.click();
@@ -569,7 +591,7 @@ it('preserves an in-progress root rename across unrelated state pushes and cance
     }
   });
   const doc = mounted.window.document;
-  doc.querySelector<HTMLButtonElement>('.root button[title="Rename /repo"]')!.click();
+  doc.querySelector<HTMLButtonElement>('.root button[title="/repo 이름 변경"]')!.click();
 
   const original = doc.querySelector<HTMLInputElement>('.root .root-rename')!;
   original.value = 'new-name';
@@ -599,7 +621,7 @@ it('preserves an in-progress root rename across unrelated state pushes and cance
   escape.dispatchEvent(new mounted.window.KeyboardEvent('keydown', { key: 'Escape', bubbles: true }));
   expect(doc.querySelector('.root-rename')).toBeNull();
 
-  doc.querySelector<HTMLButtonElement>('.root button[title="Rename /repo"]')!.click();
+  doc.querySelector<HTMLButtonElement>('.root button[title="/repo 이름 변경"]')!.click();
   expect(doc.querySelector('.root-rename')).not.toBeNull();
 
   const removed = structuredClone(unrelated) as any;
@@ -643,7 +665,7 @@ it('guides rootless setup from the capabilities that actually need a filesystem 
   mounted.push(mixed);
   const connect = mounted.window.document.getElementById('connectBtn') as HTMLButtonElement;
   expect(connect.disabled).toBe(true);
-  expect(connect.title).toContain('Choose a folder');
+  expect(connect.title).toContain('공유 폴더를 선택');
   expect(mounted.window.document.querySelector('[data-step="folder"]')?.classList.contains('is-current')).toBe(true);
 
   const commandAndDesktop = structuredClone(mixed) as any;
@@ -651,7 +673,7 @@ it('guides rootless setup from the capabilities that actually need a filesystem 
   commandAndDesktop.config.capabilities.command = true;
   mounted.push(commandAndDesktop);
   expect(connect.disabled).toBe(true);
-  expect(connect.title).toContain('Choose a folder');
+  expect(connect.title).toContain('공유 폴더를 선택');
 
   const desktopOnly = structuredClone(mixed) as any;
   desktopOnly.config.capabilities.browse = false;
@@ -699,7 +721,7 @@ it('requires a live browser only when a browser-backed feature is actually enabl
     hasApiKey: true,
     status: {
       state: 'connected',
-      detail: 'Connected.',
+      detail: '연결됨 ·',
       publicUrl: null,
       localUrl: 'http://127.0.0.1:1234',
       handshakeAt: Date.now(),
@@ -725,8 +747,8 @@ it('requires a live browser only when a browser-backed feature is actually enabl
   expect(browserStep.classList.contains('is-done')).toBe(false);
   expect(browserStep.classList.contains('is-current')).toBe(true);
   expect(doc.getElementById('wizard')!.classList.contains('is-tidy')).toBe(false);
-  expect(doc.getElementById('bridgeState')!.textContent).toContain('Authorized');
-  expect(doc.getElementById('bridgeState')!.textContent).not.toContain('Connected.');
+  expect(doc.getElementById('bridgeState')!.textContent).toContain('승인됨');
+  expect(doc.getElementById('bridgeState')!.textContent).not.toContain('연결됨 ·');
 
   const live = structuredClone(mounted.state) as any;
   live.hasApiKey = true;
@@ -734,7 +756,7 @@ it('requires a live browser only when a browser-backed feature is actually enabl
   live.bridge = { running: true, port: 8765, paired: true, present: true, lastSeenAt: Date.now() };
   mounted.push(live);
   expect(browserStep.classList.contains('is-done')).toBe(true);
-  expect(doc.getElementById('bridgeState')!.textContent).toContain('Connected.');
+  expect(doc.getElementById('bridgeState')!.textContent).toContain('연결됨 ·');
 
   // Recording and multi-agent are the two independently viable bridge features. Goal is
   // browser-driven too, but it requires a recorded session and cannot run by itself when
@@ -747,9 +769,9 @@ it('requires a live browser only when a browser-backed feature is actually enabl
   mounted.push(browserFree);
   expect(browserStep.hidden).toBe(true);
   expect(doc.getElementById('wizard')!.classList.contains('is-tidy')).toBe(true);
-  expect(doc.getElementById('bridgeState')!.textContent).toContain('not needed');
+  expect(doc.getElementById('bridgeState')!.textContent).toContain('확장이 필요하지 않습니다');
   expect((doc.getElementById('chatAutomation') as HTMLSelectElement).disabled).toBe(true);
-  expect(doc.getElementById('chatAutomation')!.title).toMatch(/recording/i);
+  expect(doc.getElementById('chatAutomation')!.title).toMatch(/기록/);
 });
 
 /**
@@ -775,7 +797,7 @@ it('says nothing about being current until the check has actually answered', asy
   // Green, both versions, and the same sentence as the one notification this window shows.
   expect(line.hidden).toBe(false);
   expect(line.className).toBe('upline is-ok');
-  expect(line.textContent).toBe('Up to date! Chat On Steroids 2.0.2 · extension 2.0.2');
+  expect(line.textContent).toBe('한국어 · OpenCodex · 최신 버전입니다! Chat On Steroids 2.0.2 · 확장 2.0.2');
   expect(doc.querySelector('.toast')!.textContent).toBe(line.textContent);
   // Nothing to act on, so the header bar stays out of the way.
   expect(doc.getElementById('updateNotice')!.hidden).toBe(true);
@@ -784,7 +806,7 @@ it('says nothing about being current until the check has actually answered', asy
   doc.querySelector('.toast')!.remove();
   mounted.push(structuredClone(checked) as any);
   expect(doc.querySelector('.toast')).toBeNull();
-  expect(line.textContent).toBe('Up to date! Chat On Steroids 2.0.2 · extension 2.0.2');
+  expect(line.textContent).toBe('한국어 · OpenCodex · 최신 버전입니다! Chat On Steroids 2.0.2 · 확장 2.0.2');
 });
 
 /**
@@ -799,7 +821,7 @@ it('reports a staged update in the Activity line and the header bar', async () =
   const doc = mounted.window.document;
   const line = doc.getElementById('updateLine')!;
   expect(line.className).toBe('upline');
-  expect(line.textContent).toContain('2.0.3 is downloaded and ready');
+  expect(line.textContent).toContain('2.0.3 다운로드 완료');
   expect(doc.getElementById('updateNotice')!.hidden).toBe(false);
   // There is nothing to fetch by hand once it is on disk.
   expect((doc.getElementById('updateGet') as HTMLButtonElement).hidden).toBe(true);
@@ -811,7 +833,7 @@ it('reports a staged update in the Activity line and the header bar', async () =
   const checking = structuredClone(staged) as any;
   checking.update.stage = 'checking';
   mounted.push(checking);
-  expect(line.textContent).toContain('Checking for the latest update');
+  expect(line.textContent).toContain('최신 업데이트 확인 중');
   expect(line.textContent).not.toContain('by hand');
   expect((doc.getElementById('updateGet') as HTMLButtonElement).hidden).toBe(true);
   expect((doc.getElementById('updateInstall') as HTMLButtonElement).hidden).toBe(true);
@@ -871,7 +893,7 @@ it('shows a missing-extension reminder while connected and clears it after the c
   connected.status.state = 'connected'; connected.bridge.running = true; connected.bridge.present = false;
   mounted.push(connected);
   const doc = mounted.window.document;
-  expect(doc.getElementById('updateText')!.textContent).toContain('Browser extension not connected');
+  expect(doc.getElementById('updateText')!.textContent).toContain('브라우저 확장이 연결되지 않았습니다');
   expect(doc.getElementById('updateExtension')!.hidden).toBe(false);
   connected.bridge.present = true; connected.bridge.extensionVersion = connected.update.current;
   mounted.push(connected);
@@ -901,7 +923,7 @@ it('reports stored API credentials without exposing app-wide Goal switches', asy
 
   mounted.push({ ...mounted.state, hasGoalKey: true });
   await settle();
-  expect(mounted.window.document.getElementById('goalKeyState')!.textContent).toContain('A key is stored');
+  expect(mounted.window.document.getElementById('goalKeyState')!.textContent).toContain('키가 저장되어 있습니다');
   expect((mounted.window.document.getElementById('goalKeyRemove') as HTMLButtonElement).disabled).toBe(false);
 });
 
@@ -1026,7 +1048,7 @@ it('loads the model catalogue only when the picker is opened, twenty at a time',
 });
 
 /**
- * "Load 20 more" is the deliberate way to ask for the next page. Scrolling to the bottom of
+ * "20개 더 보기" is the deliberate way to ask for the next page. Scrolling to the bottom of
  * the list is the way people actually ask, and it did nothing at all: the list simply ended
  * at twenty with four hundred still to come and no sign that there was a button below it.
  *
@@ -1124,7 +1146,7 @@ it('keeps the model in use when OpenRouter cannot be reached', async () => {
 
   (doc.getElementById('goalPick') as HTMLButtonElement).click();
   await settle();
-  expect(doc.getElementById('goalModelsState')!.textContent).toContain('unchanged');
+  expect(doc.getElementById('goalModelsState')!.textContent).toContain('기존 모델 선택은 유지');
   expect(doc.getElementById('goalModelName')!.textContent).toBe('deepseek/deepseek-v4-flash');
 });
 

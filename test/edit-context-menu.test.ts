@@ -1,7 +1,7 @@
 import { describe, expect, it } from 'vitest';
 import { readFileSync } from 'node:fs';
 import vm from 'node:vm';
-import { editContextMenuTemplate } from '../src/main/edit-context-menu.js';
+import { editContextMenuTemplate, localizeNativeMenu } from '../src/main/edit-context-menu.js';
 
 const flags = { canUndo: true, canRedo: true, canCut: true, canCopy: true, canPaste: true, canDelete: true, canSelectAll: true, canEditRichly: false };
 
@@ -9,8 +9,8 @@ describe('native editable context menu', () => {
   it('uses native edit roles without reading clipboard data or replacing the selection', () => {
     const menu = editContextMenuTemplate({ isEditable: true, editFlags: flags });
     expect(menu).toEqual([
-      { role: 'cut', enabled: true }, { role: 'copy', enabled: true },
-      { role: 'paste', enabled: true }, { role: 'selectAll', enabled: true }
+      { role: 'cut', label: '잘라내기', enabled: true }, { role: 'copy', label: '복사', enabled: true },
+      { role: 'paste', label: '붙여넣기', enabled: true }, { role: 'selectAll', label: '모두 선택', enabled: true }
     ]);
     expect(menu.every(item => !item.click)).toBe(true);
   });
@@ -26,6 +26,17 @@ describe('native editable context menu', () => {
 
   it('does not present editing actions over transcript content or other non-editable UI', () => {
     expect(editContextMenuTemplate({ isEditable: false, editFlags: flags })).toEqual([]);
+  });
+
+  it('translates existing application-menu labels without replacing native roles or callbacks', () => {
+    const click = () => undefined;
+    const entry = { role: 'copy', label: 'Copy', accelerator: 'CmdOrCtrl+C', enabled: false, click };
+    const menu = { items: [{ role: 'editMenu', label: 'Edit', submenu: { items: [entry] } },
+      { label: 'Help', click }, { label: 'User-provided name', click }] };
+    localizeNativeMenu(menu as unknown as Parameters<typeof localizeNativeMenu>[0]);
+    expect(menu.items.map(item => item.label)).toEqual(['편집', '도움말', 'User-provided name']);
+    expect(entry).toEqual({ role: 'copy', label: '복사', accelerator: 'CmdOrCtrl+C', enabled: false, click });
+    expect(menu.items[1]?.click).toBe(click);
   });
 
   it('opens the native editing menu on the window context-menu event only', () => {

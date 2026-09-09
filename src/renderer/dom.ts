@@ -66,22 +66,22 @@ export async function run<T>(
 
 /** "12s ago" for a timestamp the main process vouched for, "never" for null. */
 export function ago(atMs: number | null): string {
-  if (atMs === null) return 'never';
+  if (atMs === null) return '없음';
   const seconds = Math.max(0, Math.round((Date.now() - atMs) / 1000));
-  if (seconds < 3) return 'just now';
-  if (seconds < 90) return `${seconds}s ago`;
+  if (seconds < 3) return '방금';
+  if (seconds < 90) return `${seconds}초 전`;
   const minutes = Math.round(seconds / 60);
-  return minutes < 90 ? `${minutes}m ago` : `${Math.round(minutes / 60)}h ago`;
+  return minutes < 90 ? `${minutes}분 전` : `${Math.round(minutes / 60)}시간 전`;
 }
 
 /** The same age as one glanceable token: "8s", "2m", "—" when there is nothing. */
 export function shortAgo(atMs: number | null): string {
   if (atMs === null) return '—';
   const seconds = Math.max(0, Math.round((Date.now() - atMs) / 1000));
-  if (seconds < 3) return 'now';
-  if (seconds < 90) return `${seconds}s`;
+  if (seconds < 3) return '지금';
+  if (seconds < 90) return `${seconds}초`;
   const minutes = Math.round(seconds / 60);
-  return minutes < 90 ? `${minutes}m` : `${Math.round(minutes / 60)}h`;
+  return minutes < 90 ? `${minutes}분` : `${Math.round(minutes / 60)}시간`;
 }
 
 /** A clock time for one event in a timeline. */

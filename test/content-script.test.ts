@@ -3533,7 +3533,7 @@ describe('the app-owned chronological stream', () => {
       (node.textContent || '').trim()
     );
     expect(rows).toEqual([
-      'Turn started',
+      '응답 시작',
       'Checking the repository',
       'Read second.ts',
       'Reloaded chat to recover missing connector attribution.',
@@ -3560,7 +3560,7 @@ describe('the app-owned chronological stream', () => {
     const rows = overwriteRows(section, '.clf-stream-row .clf-stream-text').map((node) =>
       (node.textContent || '').trim()
     );
-    expect(rows).toEqual(['Turn started', 'Checking the repository', 'Read second.ts', 'Read third.ts']);
+    expect(rows).toEqual(['응답 시작', 'Checking the repository', 'Read second.ts', 'Read third.ts']);
     expect(overwriteRows(section, '.clf-stream-tool_call')).toHaveLength(2);
     expect(section.querySelectorAll('.pointer-events-none.contents')).toHaveLength(0);
     expect(section.getAttribute('data-clf-turn-replaced')).toBe('1');
@@ -3656,10 +3656,10 @@ describe('the app-owned chronological stream', () => {
       (node.textContent || '').trim()
     );
     expect(rows).toEqual([
-      'Turn started',
+      '응답 시작',
       'Read after the false end',
       'Inspected after the false end',
-      'Turn interrupted'
+      '응답 interrupted'
     ]);
     expect(section.textContent).toContain('Before the dropout.');
     expect(section.textContent).toContain('Still working after it.');
@@ -4191,7 +4191,7 @@ describe('the app-owned chronological stream', () => {
     const rows = overwriteRows(section, '.clf-stream-row .clf-stream-text').map((node) =>
       (node.textContent || '').trim()
     );
-    expect(rows).toEqual(['Turn started', 'Listed approved folders', 'Listed open windows']);
+    expect(rows).toEqual(['응답 시작', 'Listed approved folders', 'Listed open windows']);
     expect(section.getAttribute('data-clf-turn-replaced')).toBe('1');
     expect(reasoning.getAttribute('data-clf-native-hidden')).toBe('1');
     for (const block of blocksOf(section)) expect(block.getAttribute('data-clf-native-hidden')).toBe('1');
@@ -4281,7 +4281,7 @@ describe('the app-owned chronological stream', () => {
     live.hook.renderStreams();
     expect(section.getAttribute('data-clf-turn-replaced')).toBe('1');
     expect(overwriteStream(section)?.querySelector('.clf-stream-assistant_message')).toBeNull();
-    expect(overwriteStream(section)?.querySelector('.clf-stream-turn_end')?.textContent).toContain('Turn completed');
+    expect(overwriteStream(section)?.querySelector('.clf-stream-turn_end')?.textContent).toContain('응답 completed');
     expect(prose.isConnected).toBe(true);
     expect(code.isConnected).toBe(true);
     expect(actions.isConnected).toBe(true);
@@ -5127,7 +5127,7 @@ describe('where the page stream puts an event that was recorded late', () => {
     const before = overwriteRows(section, '.clf-stream-row .clf-stream-text').map((node) =>
       (node.textContent || '').trim()
     );
-    expect(before).toEqual(['Turn started', 'Checking the repository', 'Writing it up']);
+    expect(before).toEqual(['응답 시작', 'Checking the repository', 'Writing it up']);
     expect(section.textContent).toContain('Final answer');
 
     late = true;
@@ -5136,7 +5136,7 @@ describe('where the page stream puts an event that was recorded late', () => {
     const after = overwriteRows(section, '.clf-stream-row .clf-stream-text').map((node) =>
       (node.textContent || '').trim()
     );
-    expect(after).toEqual(['Turn started', 'Checking the repository', 'Read second.ts', 'Writing it up']);
+    expect(after).toEqual(['응답 시작', 'Checking the repository', 'Read second.ts', 'Writing it up']);
   });
 
 });
@@ -5272,7 +5272,7 @@ describe('navigating from one chat to another', () => {
         error: '',
         now: Date.now()
       }).label
-    ).toBe('Compact');
+    ).toBe('요약');
   });
 });
 
@@ -9008,7 +9008,7 @@ describe('the Compact & resume control', () => {
     expect(control.dataset.clfMode).toBe('off');
     expect(live.hook.controlState({ connected: true, conversationId: null, now: Date.now() })).toMatchObject({
       action: 'none',
-      hint: 'Nothing to compact yet — send a message, or set a goal and it writes one.'
+      hint: '아직 요약할 내용이 없습니다. 메시지를 보내거나 목표를 지정해 대화를 시작하세요.'
     });
   });
 
@@ -9055,7 +9055,7 @@ describe('the Compact & resume control', () => {
     // The button is a gear now, so the hover answers the question a gear raises — what are
     // the settings — rather than naming one action it no longer performs on its own.
     expect(control.querySelector('.clf-compact-btn')!.getAttribute('data-clf-tip')).toBe(
-      'Auto-compaction off\nGoal and Loop off'
+      '자동 요약 꺼짐\n목표·반복 꺼짐'
     );
   });
 
@@ -9081,12 +9081,12 @@ describe('the Compact & resume control', () => {
     // Goal and Loop are one setting, so they are one control: three stops, one of them true.
     const track = menu.querySelector('.clf-menu-mode-track') as HTMLElement;
     expect([...track.querySelectorAll('.clf-menu-mode-option')].map((stop) => stop.textContent)).toEqual([
-      'Off',
-      'Goal',
-      'Loop'
+      '꺼짐',
+      '목표',
+      '반복'
     ]);
     expect(track.dataset.clfValue).toBe('off');
-    expect(menu.querySelector('.clf-menu-action')!.textContent).toBe('Compact & resume now');
+    expect(menu.querySelector('.clf-menu-action')!.textContent).toBe('지금 요약 후 이어가기');
 
     live.hook.closeMenu();
     expect((live.document.querySelector('.clf-menu') as HTMLElement).hidden).toBe(true);
@@ -9123,15 +9123,15 @@ describe('the Compact & resume control', () => {
     const auto = live.document.querySelector('[data-clf-row="autoCompact"]') as HTMLButtonElement;
     expect(auto.disabled).toBe(true);
     expect(auto.getAttribute('aria-checked')).toBe('false');
-    expect(auto.querySelector('.clf-menu-note')?.textContent).toMatch(/worker chats never auto-compact/i);
+    expect(auto.querySelector('.clf-menu-note')?.textContent).toMatch(/작업자 대화는 자동 요약하지 않습니다/);
     auto.click();
     await settle();
     expect(live.sent.filter((message) => message.type === 'settings_set')).toEqual([]);
 
     const action = live.document.querySelector('.clf-menu-action') as HTMLButtonElement;
     expect(action.disabled).toBe(true);
-    expect(action.textContent).toBe('Compact & resume unavailable');
-    expect(action.getAttribute('data-clf-tip')).toMatch(/never manually compacted or resumed/i);
+    expect(action.textContent).toBe('요약 후 이어가기 사용 불가');
+    expect(action.getAttribute('data-clf-tip')).toMatch(/수동 요약·이어가기를 사용하지 않습니다/);
     action.click();
     await settle();
     expect(live.sent.filter((message) => message.type === 'compact')).toEqual([]);
@@ -9347,11 +9347,11 @@ describe('the Compact & resume control', () => {
     live.hook.toggleMenu();
 
     const note = live.document.querySelector('.clf-menu-mode-note') as HTMLElement;
-    expect(note.textContent).toBe('OpenRouter key required');
+    expect(note.textContent).toBe('OpenRouter API 키 필요');
     expect(note.dataset.clfWarn).toBe('1');
     // The hover line says the same thing in one breath.
     expect(live.document.querySelector('.clf-compact-btn')!.getAttribute('data-clf-tip')).toContain(
-      'Goal on — no API key'
+      '목표 켜짐 — API 키 없음'
     );
   });
 
@@ -9414,57 +9414,57 @@ describe('the Compact & resume control', () => {
         ...over
       });
 
-    expect(state({})).toMatchObject({ mode: 'idle', label: 'Compact', action: 'start' });
+    expect(state({})).toMatchObject({ mode: 'idle', label: '요약', action: 'start' });
     expect(state({ disconnected: true })).toMatchObject({
       mode: 'off',
-      hint: 'Browser connection is disconnected in Chat On Steroids.',
+      hint: 'COS의 브라우저 연결이 해제되어 있습니다.',
       action: 'none'
     });
-    expect(state({ pressedAt: 900 })).toMatchObject({ mode: 'busy', label: 'Starting…', action: 'none' });
+    expect(state({ pressedAt: 900 })).toMatchObject({ mode: 'busy', label: '시작 중…', action: 'none' });
 
     // The local phases, which no app-side state can describe: the app only knows it has
     // asked and is waiting, so `handoff-pending` plus the phase is the whole report.
     const pending = { sessionId: 's1', stage: 'handoff-pending', busy: true, error: null, handoffId: null };
     expect(state({ job: pending, phase: 'interrupting' })).toMatchObject({
       mode: 'busy',
-      label: 'Stopping…',
+      label: '중단 중…',
       action: 'cancel'
     });
-    expect(state({ job: pending, phase: 'settling' })).toMatchObject({ mode: 'busy', label: 'Settling…' });
-    expect(state({ job: pending, phase: 'waiting' })).toMatchObject({ mode: 'busy', label: 'Writing…' });
+    expect(state({ job: pending, phase: 'settling' })).toMatchObject({ mode: 'busy', label: '완료 대기 중…' });
+    expect(state({ job: pending, phase: 'waiting' })).toMatchObject({ mode: 'busy', label: '작성 중…' });
     // An unknown phase — a tab that reloaded mid-run and lost its local state — still says
     // something true rather than nothing.
-    expect(state({ job: pending, phase: '' })).toMatchObject({ mode: 'busy', label: 'Asking…' });
+    expect(state({ job: pending, phase: '' })).toMatchObject({ mode: 'busy', label: '요청 중…' });
 
     expect(state({ job: { stage: 'opening', busy: true, error: null, handoffId: 'h1' } })).toMatchObject({
       mode: 'busy',
-      label: 'Opening…',
+      label: '대화 여는 중…',
       action: 'cancel'
     });
     expect(
       state({ job: { stage: 'waiting-for-browser', busy: true, error: 'could not open your browser', handoffId: 'h1' } })
-    ).toMatchObject({ mode: 'waiting', label: 'Waiting…', action: 'cancel' });
+    ).toMatchObject({ mode: 'waiting', label: '대기 중…', action: 'cancel' });
     expect(state({ job: { stage: 'done', busy: false, error: null, handoffId: 'h1' } })).toMatchObject({
       mode: 'done',
-      label: 'Opened'
+      label: '열림'
     });
     expect(
       state({ job: { stage: 'failed', busy: false, error: 'ChatGPT never wrote the brief', handoffId: null } })
     ).toMatchObject({
       mode: 'error',
-      label: 'Failed',
+      label: '실패',
       hint: 'ChatGPT never wrote the brief',
       action: 'start'
     });
     expect(state({ job: { stage: 'failed', busy: false, error: 'cancelled', handoffId: null } })).toMatchObject({
       mode: 'idle',
-      hint: 'Resume cancelled',
+      hint: '이어가기를 취소했습니다.',
       action: 'start'
     });
     expect(state({ connected: false })).toMatchObject({ mode: 'off', action: 'none' });
     expect(state({ conversationId: null })).toMatchObject({
       mode: 'off',
-      hint: 'Nothing to compact yet — send a message, or set a goal and it writes one.'
+      hint: '아직 요약할 내용이 없습니다. 메시지를 보내거나 목표를 지정해 대화를 시작하세요.'
     });
   });
 
@@ -9494,7 +9494,7 @@ describe('the Compact & resume control', () => {
     // passes it cannot suppress the button by accident.
     expect(state({ generating: true })).toMatchObject({
       mode: 'idle',
-      label: 'Compact',
+      label: '요약',
       action: 'start'
     });
     expect(state({ generating: true, job: { stage: 'handoff-pending', busy: true, error: null, handoffId: null } })).toMatchObject({
@@ -9862,8 +9862,8 @@ describe('the Compact & resume control', () => {
 
     const label = live.document.querySelector('.clf-blocked') as HTMLElement;
     expect(label.hidden).toBe(false);
-    expect(label.textContent).toBe('Chat blocked');
-    expect(label.getAttribute('data-clf-tip')).toMatch(/hover this chat in the sessions list and press its block symbol/);
+    expect(label.textContent).toBe('대화 차단됨');
+    expect(label.getAttribute('data-clf-tip')).toMatch(/세션에 마우스를 올리고 차단 아이콘/);
 
     // Released in the app: the next poll takes the word away.
     blocked = '';
@@ -10001,7 +10001,7 @@ describe('the Compact & resume control', () => {
     // The impatient second press. The sheet's action row is now a cancel, so it must not
     // start another compaction — this is the click that used to fan out into several tabs.
     (live.document.querySelector('.clf-compact-btn') as HTMLButtonElement).click();
-    expect(live.document.querySelector('.clf-menu-action')!.textContent).toBe('Cancel compaction');
+    expect(live.document.querySelector('.clf-menu-action')!.textContent).toBe('요약 취소');
     (live.document.querySelector('.clf-menu-action') as HTMLButtonElement).click();
     await settle();
     const compacts = live.sent.filter((message) => message.type === 'compact');
@@ -10182,7 +10182,7 @@ describe('the Compact & resume control', () => {
     expect((live.document.querySelector('.clf-pill') as HTMLElement).hidden).toBe(true);
     // Off is not silent: the reason is a sentence, so it lives where a sentence fits.
     expect(live.document.querySelector('.clf-compact-btn')!.getAttribute('data-clf-tip')).toContain(
-      'Nothing to compact yet'
+      '아직 요약할 내용이 없습니다'
     );
   });
 });
@@ -10259,10 +10259,10 @@ describe('the field above the composer', () => {
   it('names the stage the transaction is in', async () => {
     live = await harness();
     expect(view({ job: { stage: 'handoff-pending', busy: true } })).toMatchObject({
-      stage: 'ChatGPT is writing the handoff'
+      stage: 'ChatGPT가 이어가기 요약 작성 중'
     });
-    expect(view({ job: { stage: 'opening', busy: true } })).toMatchObject({ stage: 'Opening a fresh chat' });
-    expect(view({ job: { stage: 'waiting-for-browser', busy: true } })).toMatchObject({ stage: 'Waiting for Chrome' });
+    expect(view({ job: { stage: 'opening', busy: true } })).toMatchObject({ stage: '새 대화 여는 중' });
+    expect(view({ job: { stage: 'waiting-for-browser', busy: true } })).toMatchObject({ stage: 'Chrome 대기 중' });
   });
 
   it('stacks above the composer rather than inside it, and leaves when it is done', async () => {
@@ -10283,7 +10283,7 @@ describe('the field above the composer', () => {
     expect(panel.nextElementSibling).toBe(form);
     // The user's own field is untouched, which was the whole complaint.
     expect(live.document.querySelector('#prompt-textarea')!.textContent).toBe('');
-    expect(panel.querySelector('.clf-stage-title')!.textContent).toBe('Opening a fresh chat');
+    expect(panel.querySelector('.clf-stage-title')!.textContent).toBe('새 대화 여는 중');
 
     live.reply.set('activity', () => ({
       ok: true,
@@ -10352,7 +10352,7 @@ describe('folding away the chat’s opening instruction', () => {
     const section = await opened('resume');
     const fold = section.querySelector('.clf-boot') as HTMLElement;
     expect(fold).not.toBeNull();
-    expect(fold.querySelector('summary')!.textContent).toContain('not something you typed');
+    expect(fold.querySelector('summary')!.textContent).toContain('사용자가 입력한 글이 아니라');
     // Moved, not copied: one copy of a several-thousand-character brief, not two.
     expect(section.querySelectorAll('.whitespace-pre-wrap')).toHaveLength(1);
     expect(fold.textContent).toContain('REQUIREMENTS — no install, no reload');
@@ -10364,7 +10364,7 @@ describe('folding away the chat’s opening instruction', () => {
     const section = await opened('worker', 'You are worker agent worker-3. Your task is …', { bootstrapAgent: 'worker-3' });
     const summary = section.querySelector('.clf-boot summary')!;
     expect(summary.querySelector('.clf-boot-label')!.textContent).toBe(
-      'This is worker-3 — the instruction this app gave the worker, not something you typed'
+      'worker-3 — 사용자가 입력한 글이 아니라 앱이 작업자에게 전달한 지시입니다.'
     );
     // The text itself stays visible in the closed fold, clamped, so the bubble keeps its width.
     expect(summary.querySelector('.clf-boot-preview')!.textContent).toContain('You are worker agent worker-3');
@@ -11528,7 +11528,7 @@ describe('the context meter and automatic compaction', () => {
 
     const meter = live.hook.meterView()!;
     expect(meter.filled).toBeCloseTo(0.5, 5);
-    expect(meter.tip).toBe('100k/200k · autocompact on');
+    expect(meter.tip).toBe('100k/200k · 자동 요약 켜짐');
   });
 
   /**
@@ -11545,7 +11545,7 @@ describe('the context meter and automatic compaction', () => {
     await live.hook.pullActivity();
 
     const meter = live.hook.meterView()!;
-    expect(meter.status).toBe('283k/400k · autocompact on');
+    expect(meter.status).toBe('283k/400k · 자동 요약 켜짐');
     // And the line leads the tooltip, so hovering says the short thing before the long one.
     expect(meter.tip.startsWith(meter.status)).toBe(true);
   });
@@ -11554,7 +11554,7 @@ describe('the context meter and automatic compaction', () => {
     live = await harness(undefined, { activity: () => withContext(283_000, settings({ auto: false })) });
     live.hook.injectControl();
     await live.hook.pullActivity();
-    expect(live.hook.meterView()!.status).toBe('283k/400k · autocompact off');
+    expect(live.hook.meterView()!.status).toBe('283k/400k · 자동 요약 꺼짐');
   });
 
   it('counts towards the threshold in the status line too, once one is set', async () => {
@@ -11563,7 +11563,7 @@ describe('the context meter and automatic compaction', () => {
     });
     live.hook.injectControl();
     await live.hook.pullActivity();
-    expect(live.hook.meterView()!.status).toBe('100k/200k · autocompact on');
+    expect(live.hook.meterView()!.status).toBe('100k/200k · 자동 요약 켜짐');
   });
 
   it('draws nothing when the app has sent no numbers to draw', async () => {
@@ -13201,7 +13201,7 @@ describe('the goal loop', () => {
 
     expect(acks(live)).toHaveLength(1);
     expect(wake, 'the reloaded document must keep the retry it promises on screen').not.toBeNull();
-    expect(live.document.querySelector('.clf-stage')?.textContent).toContain('Retrying Goal in 15 seconds');
+    expect(live.document.querySelector('.clf-stage')?.textContent).toContain('15초 후 자동 진행 재시도');
 
     wake!();
     await settle(800);
@@ -13347,7 +13347,7 @@ describe('the goal loop', () => {
     await settle(800);
     expect(asked).toBe(2);
     expect(wakes).toHaveLength(2);
-    expect(stage()).not.toContain('Retrying Goal');
+    expect(stage()).not.toContain('자동 진행 재시도');
 
     // The app has seen the chat finish: the next ask is the draft.
     working = false;
@@ -13408,7 +13408,7 @@ describe('the goal loop', () => {
 
     const stage = () => live!.document.querySelector('.clf-stage')?.textContent ?? '';
     expect(stage()).toContain('provider_completion_error');
-    expect(stage(), 'a wait nobody is told about reads as a loop that gave up').toContain('Retrying Goal in 15 seconds');
+    expect(stage(), 'a wait nobody is told about reads as a loop that gave up').toContain('15초 후 자동 진행 재시도');
 
     // The retry goes out and the model starts answering it.
     source.set({ ...readyDraft(''), turnId, stage: 'answering', text: 'writing the next message' });
@@ -13573,14 +13573,14 @@ describe('the goal loop', () => {
     expect(composerText(live.document)).toBe('');
     expect(new Set(acks(live).map((message) => message.token)).size).toBe(1);
     expect(live.hook.goalStageView({ phase: 'done', error: '', model: MODEL, draft: null })).toMatchObject({
-      stage: 'Goal reached',
+      stage: '목표 달성',
       kind: 'goal-done'
     });
 
     const panel = live.document.querySelector('.clf-stage') as HTMLElement;
     const close = panel.querySelector('.clf-stage-close') as HTMLButtonElement;
     expect(close.hidden).toBe(false);
-    expect(close.getAttribute('aria-label')).toBe('Dismiss Goal status');
+    expect(close.getAttribute('aria-label')).toBe('목표 상태 닫기');
     close.click();
     expect(live.document.querySelector('.clf-stage')).toBeNull();
 
@@ -13698,32 +13698,32 @@ describe('the goal loop', () => {
     const view = (goal: Record<string, unknown>) => hook.stageView({ job: null, goal });
 
     expect(view({ phase: 'settling', error: '', model: MODEL, draft: null })).toMatchObject({
-      stage: 'Checking the answer is finished'
+      stage: '응답 완료 여부 확인 중'
     });
     expect(view({ phase: 'requesting', error: '', model: MODEL, draft: null })).toMatchObject({
-      stage: 'Sending the answer to OpenRouter',
+      stage: 'OpenRouter에게 대화 전달 중',
       // The short name, because `deepseek/deepseek-v4-flash` is the id the API wants and not
       // what anybody calls it.
       detail: 'deepseek-v4-flash'
     });
     expect(
       view({ phase: 'drafting', error: '', model: MODEL, draft: { stage: 'answering', text: 'what about th' } })
-    ).toMatchObject({ stage: 'deepseek-v4-flash is answering', body: 'what about th' });
+    ).toMatchObject({ stage: 'deepseek-v4-flash 후속 메시지 작성 중', body: 'what about th' });
     expect(
       view({ phase: 'drafting', error: '', model: MODEL, draft: { stage: 'ready', reply: 'what about the tests' } })
-    ).toMatchObject({ stage: 'deepseek-v4-flash wrote the next message', body: 'what about the tests' });
+    ).toMatchObject({ stage: 'deepseek-v4-flash 후속 메시지 작성 완료', body: 'what about the tests' });
     expect(
       view({ phase: 'sending', error: '', model: MODEL, draft: { stage: 'ready', reply: 'what about the tests' } })
-    ).toMatchObject({ stage: 'Sending it to ChatGPT', body: 'what about the tests' });
+    ).toMatchObject({ stage: 'ChatGPT에 전송 중', body: 'what about the tests' });
     expect(view({ phase: 'done', error: '', model: MODEL, draft: null })).toMatchObject({
-      stage: 'Goal reached',
-      detail: 'nothing was sent',
+      stage: '목표 달성',
+      detail: '추가 메시지 없이 종료',
       kind: 'goal-done'
     });
     // The failure code is the detail, because "it failed" on its own sends the reader hunting
     // through an app they cannot see from here.
     expect(view({ phase: 'failed', error: 'out_of_credit: add credits', model: MODEL, draft: null })).toMatchObject({
-      stage: 'The goal loop stopped',
+      stage: '자동 진행이 중단되었습니다.',
       detail: 'out_of_credit: add credits',
       kind: 'goal-error'
     });
@@ -13732,24 +13732,24 @@ describe('the goal loop', () => {
     // A custom endpoint is named as one: the OpenRouter default above must not leak into a
     // run that never touched OpenRouter.
     expect(view({ phase: 'requesting', error: '', model: 'llama3.1', provider: 'custom', draft: null })).toMatchObject({
-      stage: 'Sending the answer to custom endpoint',
+      stage: '사용자 지정 엔드포인트에게 대화 전달 중',
       detail: 'llama3.1'
     });
     expect(
       view({ phase: 'drafting', error: '', model: 'llama3.1', provider: 'custom', draft: { stage: 'failed' } })
-    ).toMatchObject({ detail: 'custom endpoint did not answer' });
+    ).toMatchObject({ detail: '사용자 지정 엔드포인트에서 응답하지 않았습니다.' });
     expect(view({ phase: 'requesting', model: 'gpt-5.6-sol', backend: 'chatgpt', provider: 'openrouter', draft: null }))
-      .toMatchObject({ stage: 'Sending the answer to ChatGPT helper', detail: 'gpt-5.6-sol' });
+      .toMatchObject({ stage: 'ChatGPT 도우미에게 대화 전달 중', detail: 'gpt-5.6-sol' });
     expect(view({ phase: 'drafting', model: MODEL, backend: 'api', provider: 'custom',
       draft: { stage: 'sending', backend: 'chatgpt', model: 'gpt-5.6-sol' } }))
-      .toMatchObject({ stage: 'Sending the answer to ChatGPT helper', detail: 'gpt-5.6-sol' });
+      .toMatchObject({ stage: 'ChatGPT 도우미에게 대화 전달 중', detail: 'gpt-5.6-sol' });
     expect(view({ phase: 'drafting', model: MODEL, backend: 'api',
       draft: { stage: 'answering', backend: 'chatgpt', model: 'gpt-5.6-sol', text: 'Next task' } }))
-      .toMatchObject({ stage: 'gpt-5.6-sol is answering', body: 'Next task' });
+      .toMatchObject({ stage: 'gpt-5.6-sol 후속 메시지 작성 중', body: 'Next task' });
     // A running job owns the panel: a compaction is the bigger event, and the loop refuses to
     // act during one anyway.
     expect(hook.stageView({ job: { stage: 'opening', busy: true }, goal: { phase: 'settling', model: MODEL, draft: null } })).toMatchObject({
-      stage: 'Opening a fresh chat'
+      stage: '새 대화 여는 중'
     });
   });
 
@@ -13771,10 +13771,10 @@ describe('the goal loop', () => {
     const view = (goal: Record<string, unknown>) => hook.stageView({ job: null, goal: { model: MODEL, error: '', ...goal } });
 
     expect(view({ phase: 'settling', draft: null })!.steps).toEqual([
-      'Answer settling',
-      'Reading the chat',
-      'Writing the reply',
-      'Sending'
+      '응답 완료 확인',
+      '대화 읽기',
+      '후속 메시지 작성',
+      '전송'
     ]);
 
     expect(view({ phase: 'settling', draft: null })).toMatchObject({ at: 0, done: false });
@@ -13788,7 +13788,7 @@ describe('the goal loop', () => {
 
     // Three stops, three different places.
     expect(view({ phase: 'requesting', error: 'the app did not answer', draft: null })).toMatchObject({
-      stage: 'The goal loop stopped',
+      stage: '자동 진행이 중단되었습니다.',
       kind: 'goal-error',
       at: 1
     });
@@ -13805,14 +13805,14 @@ describe('the goal loop', () => {
     // on it, and the panel simply vanished — which is what "auto goal didn't fire" looks like
     // from the outside whether or not it ever ran.
     expect(view({ phase: 'settling', error: 'that answer had no text to continue from', draft: null })).toMatchObject({
-      stage: 'The goal loop stopped',
+      stage: '자동 진행이 중단되었습니다.',
       detail: 'that answer had no text to continue from',
       kind: 'goal-error',
       at: 0
     });
 
     expect(hook.stageView({ job: { stage: 'opening', busy: true }, goal: null, phase: 'delivering' })).toMatchObject({
-      steps: ['Preparing', 'Writing the handoff', 'Saving it', 'Opening the new chat'],
+      steps: ['준비', '요약 작성', '요약 저장', '새 대화 열기'],
       at: 3
     });
   });
@@ -13832,7 +13832,7 @@ describe('the goal loop', () => {
       live!.hook.stageView({ job: { stage: 'handoff-pending', busy: true, sourceSend }, goal: null });
 
     expect(pending({ state: 'sent', messageId: 'user-raw' })).toMatchObject({
-      stage: 'ChatGPT is writing the handoff',
+      stage: 'ChatGPT가 이어가기 요약 작성 중',
       at: 1
     });
     // Dispatched and unresolved is the same fact for a reader: the click happened, and
@@ -13844,8 +13844,8 @@ describe('the goal loop', () => {
   });
 
   it.each([
-    { backend: 'chatgpt', provider: 'openrouter', model: 'gpt-5.6-sol', destination: 'ChatGPT helper' },
-    { backend: 'api', provider: 'custom', model: 'local-model', destination: 'custom endpoint' }
+    { backend: 'chatgpt', provider: 'openrouter', model: 'gpt-5.6-sol', destination: 'ChatGPT 도우미' },
+    { backend: 'api', provider: 'custom', model: 'local-model', destination: '사용자 지정 엔드포인트' }
   ])('keeps the actual $backend driver in the mounted progress panel', async driver => {
     const activity = () => {
       const reply: any = feed({ token: 'progress-token', conversationId: CHAT, turnId: 'progress-turn',
@@ -13857,7 +13857,7 @@ describe('the goal loop', () => {
     await live.hook.pullActivity();
     live.hook.injectStage();
     const panel = live.document.querySelector('.clf-stage')!;
-    expect(panel.querySelector('.clf-stage-title')!.textContent).toBe(`Sending the answer to ${driver.destination}`);
+    expect(panel.querySelector('.clf-stage-title')!.textContent).toBe(`${driver.destination}에게 대화 전달 중`);
     expect(panel.querySelector('.clf-stage-detail')!.textContent).toBe(driver.model);
   });
 
@@ -13881,10 +13881,10 @@ describe('the goal loop', () => {
     const panel = live.document.querySelector('.clf-stage')!;
     const steps = [...panel.querySelectorAll('.clf-stage-step')] as HTMLElement[];
     expect(steps.map((step) => step.querySelector('.clf-stage-name')!.textContent)).toEqual([
-      'Answer settling',
-      'Reading the chat',
-      'Writing the reply',
-      'Sending'
+      '응답 완료 확인',
+      '대화 읽기',
+      '후속 메시지 작성',
+      '전송'
     ]);
     expect(steps.map((step) => step.dataset.clfStep)).toEqual(['done', 'done', 'now', 'next']);
     expect(panel.querySelector('.clf-stage-body')!.textContent).toBe('what abo');
@@ -14438,8 +14438,8 @@ describe('the goal loop', () => {
 
     expect(attempts).toBe(1);
     expect(wakes, 'a rate-limited opening waits for the Goal retry clock').toHaveLength(1);
-    expect(live.document.body.textContent).toContain('Retrying Goal in 15 seconds');
-    expect(live.document.body.textContent).not.toContain('The goal loop stopped');
+    expect(live.document.body.textContent).toContain('15초 후 자동 진행 재시도');
+    expect(live.document.body.textContent).not.toContain('자동 진행이 중단되었습니다.');
     wakes[0]!();
     await settle(800);
 
@@ -14489,7 +14489,7 @@ describe('the goal loop', () => {
       await settle(300);
       expect(attempts).toBe(round);
       expect(wakes).toHaveLength(round);
-      expect(live.document.body.textContent).not.toContain('The goal loop stopped');
+      expect(live.document.body.textContent).not.toContain('자동 진행이 중단되었습니다.');
       wakes[round - 1]!();
     }
     await settle(800);
@@ -14532,7 +14532,7 @@ describe('the goal loop', () => {
     expect(live.document.querySelectorAll('.clf-menu-mode')).toHaveLength(0);
     const loop = live.document.querySelector('.clf-menu-goal-link[data-clf-goal-mode="loop"]') as HTMLButtonElement;
     expect(loop, 'the New Chat sheet offered no way to add a loop').not.toBeNull();
-    expect(loop.textContent).toContain('add specific loop');
+    expect(loop.textContent).toContain('반복 작업 지정');
     loop.click();
 
     const box = live.document.querySelector('[data-clf-goal-input]') as HTMLTextAreaElement;
@@ -14541,7 +14541,7 @@ describe('the goal loop', () => {
     // The Save button says which of the two it is about to do, because that is the last thing
     // read before the run starts and the two outcomes are "may stop" and "may not".
     const save = live.document.querySelector('.clf-menu-goal-save') as HTMLButtonElement;
-    expect(save.textContent).toBe('Save as loop');
+    expect(save.textContent).toBe('반복으로 저장');
     save.click();
     await settle(800);
 
@@ -14716,14 +14716,14 @@ describe('the goal loop', () => {
     box.value = 'port the module';
     box.dispatchEvent(new live.window.Event('input', { bubbles: true }));
     const save = () => live!.document.querySelector('.clf-menu-goal-save') as HTMLButtonElement;
-    expect(save().textContent).toBe('Save as goal');
+    expect(save().textContent).toBe('목표로 저장');
     expect(save().disabled).toBe(false);
 
     // Moved to Loop mid-sentence: the same words, saved the other way.
     (live.document.querySelector('.clf-menu-mode-option[data-clf-mode="loop"]') as HTMLButtonElement).click();
     await settle();
     expect((live.document.querySelector('[data-clf-goal-input]') as HTMLTextAreaElement).value).toBe('port the module');
-    expect(save().textContent).toBe('Save as loop');
+    expect(save().textContent).toBe('반복으로 저장');
     expect(save().disabled).toBe(false);
 
     // And to Off, where there is nothing to save into. The sentence stays; the button does not fire.
@@ -14744,7 +14744,7 @@ describe('the goal loop', () => {
     // A disabled button hears no pointer, so the reason has to hang on the row around it.
     expect(
       (live.document.querySelector('.clf-menu-goal-buttons') as HTMLElement).getAttribute('data-clf-tip')
-    ).toBe('Pick Goal or Loop above first — Off writes nothing.');
+    ).toBe('먼저 위에서 목표 또는 반복을 선택하세요. 꺼짐 상태에서는 실행하지 않습니다.');
 
     // Back on, and it saves as the mode the handle is at now.
     (live.document.querySelector('.clf-menu-mode-option[data-clf-mode="loop"]') as HTMLButtonElement).click();
@@ -14768,7 +14768,7 @@ describe('the goal loop', () => {
     expect(link.hasAttribute('data-clf-tip')).toBe(false);
     expect(
       (live.document.querySelector('.clf-menu-goal-links') as HTMLElement).getAttribute('data-clf-tip')
-    ).toBe('Pick Goal or Loop above first — Off writes nothing.');
+    ).toBe('먼저 위에서 목표 또는 반복을 선택하세요. 꺼짐 상태에서는 실행하지 않습니다.');
   });
 
   /**
@@ -14911,13 +14911,13 @@ describe('the goal loop', () => {
       const empty = sheet({ enabled: false, hasKey: true, model: MODEL, objective: '', blocked: '' });
       expect(empty.objective).toMatchObject({ summary: '', available: true });
       expect(empty.mode!.value).toBe('off');
-      expect(empty.objective.actions.map((action) => action.label)).toEqual(['add task']);
+      expect(empty.objective.actions.map((action) => action.label)).toEqual(['작업 추가']);
       expect(empty.objective.actions[0]!.disabled).toBe(true);
 
       // On Goal the same one link is live, and it saves into the mode the slider is at.
       const armed = sheet({ enabled: true, mode: 'goal', hasKey: true, model: MODEL, objective: '', blocked: '' });
       expect(armed.mode!.value).toBe('goal');
-      expect(armed.objective.actions[0]).toMatchObject({ label: 'add task', mode: 'goal', disabled: false });
+      expect(armed.objective.actions[0]).toMatchObject({ label: '작업 추가', mode: 'goal', disabled: false });
 
       const set = sheet({
         enabled: false,
@@ -14932,10 +14932,10 @@ describe('the goal loop', () => {
       });
       // A goal is enough on its own, in a chat that has never moved its own switch: nobody who
       // has just written down where a chat has to get to should have to find a second switch.
-      expect(set.tip).toContain('Goal on');
+      expect(set.tip).toContain('목표 켜짐');
       expect(set.mode!.value).toBe('goal');
-      expect(set.mode!.note).toBe('replies until goal reached');
-      expect(set.objective.actions.map((action) => action.label)).toEqual(['edit task']);
+      expect(set.mode!.note).toBe('목표 달성까지 진행');
+      expect(set.objective.actions.map((action) => action.label)).toEqual(['작업 수정']);
     });
 
     /**
@@ -14961,10 +14961,10 @@ describe('the goal loop', () => {
       // until a mode is chosen to write it in.
       const stopped = sheet({ ...carried, own: true });
       expect(stopped.mode!.value).toBe('off');
-      expect(stopped.mode!.note).toBe('no replies written here');
+      expect(stopped.mode!.note).toBe('자동 후속 메시지 없음');
       expect(stopped.objective.summary).toBe('build the voxel sandbox');
-      expect(stopped.objective.actions[0]).toMatchObject({ label: 'edit task', disabled: true });
-      expect(stopped.tip).toContain('Goal and Loop off');
+      expect(stopped.objective.actions[0]).toMatchObject({ label: '작업 수정', disabled: true });
+      expect(stopped.tip).toContain('목표·반복 꺼짐');
     });
 
     /**
@@ -14987,7 +14987,7 @@ describe('the goal loop', () => {
       // The switch is off, so this is a Goal run whatever the app-wide mode preference says.
       expect(sheet(carried).objective.driving).toBe('goal');
       expect(sheet(carried).mode!.value).toBe('goal');
-      expect(sheet(carried).objective.actions.map((action) => action.label)).toEqual(['edit task']);
+      expect(sheet(carried).objective.actions.map((action) => action.label)).toEqual(['작업 수정']);
       expect(sheet(carried).objective.actions[0]!.mode).toBe('goal');
       // Mode alone is not enabled: an off switch never makes this a loop, which is the
       // inheritance rule goalDrivingMode() enforces in the app.
@@ -14999,10 +14999,10 @@ describe('the goal loop', () => {
       // The same one task, read the other way: sliding between the two modes changes how it
       // runs and never what it says.
       expect(looping.objective.summary).toBe('build the voxel sandbox');
-      expect(looping.objective.actions.map((action) => action.label)).toEqual(['edit task']);
+      expect(looping.objective.actions.map((action) => action.label)).toEqual(['작업 수정']);
       expect(looping.objective.actions[0]!.mode).toBe('loop');
-      expect(looping.mode!.note).toBe('replies for ever');
-      expect(looping.tip).toContain('never stops on its own');
+      expect(looping.mode!.note).toBe('직접 끌 때까지 계속 진행');
+      expect(looping.tip).toContain('직접 꺼야 종료됩니다');
     });
 
     /**
@@ -15020,10 +15020,10 @@ describe('the goal loop', () => {
       expect(fresh.mode).toBeNull();
       expect(fresh.objective.actions.map((action) => action.mode)).toEqual(['goal', 'loop']);
       expect(fresh.objective.actions.map((action) => action.label)).toEqual([
-        'add specific goal',
-        'add specific loop'
+        '목표 지정',
+        '반복 작업 지정'
       ]);
-      expect(fresh.tip).toContain('Add a goal or a loop to start this chat');
+      expect(fresh.tip).toContain('목표 또는 반복 작업을 추가해 대화를 시작하세요.');
       // And in a chat the slider stays, because it is the only way to drive one that carries
       // no goal of its own — and the only way to switch a running loop back off.
       const inChat = sheet({ enabled: false, hasKey: true, model: MODEL, objective: '', blocked: '' });
@@ -15077,11 +15077,11 @@ describe('the goal loop', () => {
     it('says why a worker chat cannot be given a goal', async () => {
       await open();
       const view = sheet({ enabled: true, hasKey: true, model: MODEL, objective: '', blocked: 'worker' });
-      expect(view.mode).toMatchObject({ value: 'off', note: 'the prime writes here', warn: true, disabled: true });
-      expect(view.tip).toContain('the prime writes this chat');
+      expect(view.mode).toMatchObject({ value: 'off', note: '주 에이전트가 진행합니다.', warn: true, disabled: true });
+      expect(view.tip).toContain('주 에이전트가 진행하는 대화');
       expect(view.objective).toMatchObject({
         available: false,
-        unavailable: 'A worker chat is already driven by its prime.'
+        unavailable: '이 작업자 대화는 주 에이전트가 진행합니다.'
       });
     });
 
@@ -15095,26 +15095,26 @@ describe('the goal loop', () => {
         { enabled: false, own: true, mode: 'loop', hasKey: true, model: MODEL, objective: 'finish it', blocked: 'blocked' },
         { context: { auto: true, threshold: 400_000, warn: 400_000, limit: 533_333 } }
       );
-      expect(view.tip).toContain('blocked in the app');
+      expect(view.tip).toContain('앱에서 차단한 대화');
       expect(view.rows[0]).toMatchObject({
         key: 'autoCompact',
         on: false,
         disabled: true,
-        note: expect.stringMatching(/blocked in the app/)
+        note: expect.stringMatching(/앱에서 차단한 대화/)
       });
-      expect(view.mode).toMatchObject({ value: 'off', note: 'blocked in the app', warn: true, disabled: true });
+      expect(view.mode).toMatchObject({ value: 'off', note: '앱에서 차단됨', warn: true, disabled: true });
       expect(view.objective).toMatchObject({ available: false });
-      expect(view.objective.unavailable).toMatch(/blocked in the app/);
-      expect(view.action).toMatchObject({ label: 'Compact & resume unavailable', action: 'none' });
+      expect(view.objective.unavailable).toMatch(/앱에서 차단한 대화/);
+      expect(view.action).toMatchObject({ label: '요약 후 이어가기 사용 불가', action: 'none' });
     });
 
     it('keeps pointing at the missing credential the whole feature runs on', async () => {
       await open();
       const view = sheet({ enabled: true, hasKey: false, model: MODEL, objective: '', blocked: '' });
-      expect(view.mode).toMatchObject({ note: 'OpenRouter key required', warn: true });
+      expect(view.mode).toMatchObject({ note: 'OpenRouter API 키 필요', warn: true });
       expect(view.objective).toMatchObject({
         available: false,
-        unavailable: 'Add an OpenRouter API key in the app first.'
+        unavailable: '먼저 앱에서 OpenRouter API 키를 추가하세요.'
       });
     });
 

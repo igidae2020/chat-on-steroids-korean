@@ -20,8 +20,8 @@ export function paintContextMeter(session: SessionSummary | null, config: Config
   arc.setAttribute('stroke-dasharray', `${pro ? 0 : percent * 0.377} 37.7`);
   const tokens = new Intl.NumberFormat().format(used);
   panel.textContent = pro
-    ? `Session context · estimated\n${tokens} tokens used\nAuto-compaction off for Pro`
-    : `Session context · estimated\n${tokens} / ${new Intl.NumberFormat().format(limit)} tokens · ${percent}% of configured limit\n${config.compaction.auto ? `Auto-compaction at ${new Intl.NumberFormat().format(config.compaction.autoTokens)} tokens` : 'Auto-compaction off'}`;
+    ? `세션 맥락 · 추정치\n${tokens} 토큰 사용\nPro는 자동 요약 꺼짐`
+    : `세션 맥락 · 추정치\n${tokens} / ${new Intl.NumberFormat().format(limit)} 토큰 · 설정 한도의 ${percent}%\n${config.compaction.auto ? `${new Intl.NumberFormat().format(config.compaction.autoTokens)} 토큰에서 자동 요약` : '자동 요약 꺼짐'}`;
   button.setAttribute('aria-label', panel.textContent.replaceAll('\n', '. '));
 }
 

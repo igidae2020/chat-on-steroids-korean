@@ -12,6 +12,9 @@
  * extension does nothing" into a diagnosable mismatch.
  */
 
+import { RELEASE_REPOSITORY } from '../shared/types.js';
+
+export { RELEASE_REPOSITORY, DISTRIBUTION_LABEL } from '../shared/types.js';
 export const APP_VERSION = '2.0.8';
 
 /**
@@ -19,7 +22,7 @@ export const APP_VERSION = '2.0.8';
  * `latest` asset can pair an older installed app with a newer, incompatible bridge protocol.
  */
 export function extensionDownloadUrl(version = APP_VERSION): string {
-  return `https://github.com/totec448-spec/chat-on-steroids/releases/download/v${encodeURIComponent(version)}/Chat-On-Steroids-Extension.zip`;
+  return `https://github.com/${RELEASE_REPOSITORY}/releases/download/v${encodeURIComponent(version)}/Chat-On-Steroids-Extension.zip`;
 }
 
 /**

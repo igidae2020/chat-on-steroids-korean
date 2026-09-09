@@ -74,7 +74,7 @@ import {
 } from './window-lifecycle.js';
 import { trayGuidArgsForPlatform, trayImageSpec } from './tray-image.js';
 import { browserWindowIconPath } from './window-icon.js';
-import { editContextMenuTemplate } from './edit-context-menu.js';
+import { editContextMenuTemplate, localizeNativeMenu } from './edit-context-menu.js';
 
 /** Durable state file holding the multi-agent run. Hashes only, never credentials. */
 const SWARM_STATE = 'swarm';
@@ -217,7 +217,7 @@ setFinishNotifier((title, body, sessionId, turnId) => {
     if (target.isLoadingMainFrame()) target.once('did-finish-load', open); else open();
   };
   const notice = new Notification({ title, body, actions: [
-    { type: 'button', text: 'Send Automatic Goal' }, { type: 'button', text: 'Write Directly' }
+    { type: 'button', text: '자동 Goal 보내기' }, { type: 'button', text: '직접 입력' }
   ] });
   notice.on('click', write);
   notice.on('action', (details) => {
@@ -256,21 +256,21 @@ function refreshTray(): void {
   const offline = state === 'offline';
   // Offline keeps the running icon: the bridge is up, the internet is not.
   const running = connected || offline;
-  const label = connected ? 'Connected' : offline ? 'No internet' : 'Not connected';
+  const label = connected ? '연결됨' : offline ? '인터넷 연결 없음' : '연결 안 됨';
   tray.setImage(trayIcon(running));
   tray.setToolTip(`Chat On Steroids — ${label.toLowerCase()}`);
   tray.setContextMenu(
     Menu.buildFromTemplate([
       { label, enabled: false },
       { type: 'separator' },
-      { label: 'Open', click: windowActivation.request },
+      { label: '열기', click: windowActivation.request },
       {
-        label: running ? 'Disconnect' : 'Connect',
+        label: running ? '연결 해제' : '연결',
         click: () => void (running ? disconnect() : connect())
       },
       { type: 'separator' },
       {
-        label: 'Quit',
+        label: '종료',
         click: () => {
           quitting = true;
           app.quit();
@@ -305,6 +305,11 @@ void app.whenReady().then(async () => {
   // user choice instead of Electron's default `system` theme. On macOS this controls the window
   // frame, application menus and OS dialogs; on Linux/Windows it covers Electron-native UI.
   nativeTheme.themeSource = getConfig().ui.theme;
+  const applicationMenu = Menu.getApplicationMenu();
+  if (applicationMenu) {
+    localizeNativeMenu(applicationMenu);
+    Menu.setApplicationMenu(applicationMenu);
+  }
   const savedGoalObjectives = await readDurable<GoalObjectivesSnapshot>(GOAL_OBJECTIVES_STATE);
   if (windowActivation.isDisabled()) return;
   restoreGoalObjectives(savedGoalObjectives);

@@ -45,12 +45,12 @@ export type TurnOutcome =
   | 'unknown';
 
 export const TURN_OUTCOME_LABELS: Record<TurnOutcome, string> = {
-  completed: 'completed',
-  failed: 'failed with a visible error',
-  stopped: 'stopped by the user',
-  interrupted: 'interrupted before it finished',
-  stalled: 'stalled — no visible progress',
-  unknown: 'ended for an unknown reason'
+  completed: '완료',
+  failed: '오류가 표시되며 실패',
+  stopped: '사용자가 중단함',
+  interrupted: '완료 전에 끊김',
+  stalled: '정체됨 — 표시되는 진행 없음',
+  unknown: '알 수 없는 이유로 종료됨'
 };
 
 /**
@@ -169,13 +169,13 @@ export type CallAttribution =
  * goes rather than being guessed into somebody's history.
  */
 export const ATTRIBUTION_LABELS: Record<CallAttribution, string> = {
-  request_id: 'exact request id',
-  unattributed: 'request id not resolved',
-  superseded: 'retired conversation',
-  agent: 'agent key',
-  turn: 'tool block on the page',
-  generation: 'the only chat generating',
-  inferred: 'not placed in a chat'
+  request_id: '정확한 요청 ID',
+  unattributed: '요청 ID 귀속 미확인',
+  superseded: '교체된 이전 대화',
+  agent: '에이전트 키',
+  turn: '웹페이지의 도구 블록',
+  generation: '유일하게 응답 중인 대화',
+  inferred: '대화에 귀속되지 않음'
 };
 
 export interface ToolCallRecord {

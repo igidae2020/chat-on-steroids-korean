@@ -13,7 +13,7 @@ let catalogSubscribed = false;
 type ObservedSelection = { model: string; reasoningEffort?: ReasoningEffort; observedAt: number };
 let composerContext: { scope: string | null; observation: ObservedSelection | null; edited: boolean } | null = null;
 const pairs = [['composerModel', 'composerReasoning'], ['workerModel', 'workerReasoning'], ['helperModel', 'helperReasoning']] as const;
-const effortNames: Record<string, string> = { none: 'Instant', minimal: 'Minimal', low: 'Low', medium: 'Medium', high: 'High', xhigh: 'Extra high', max: 'Max', ultra: 'Ultra', pro: 'Pro' } satisfies Record<ReasoningEffort, string>;
+const effortNames: Record<string, string> = { none: '즉시', minimal: '최소', low: '낮음', medium: '중간', high: '높음', xhigh: '매우 높음', max: '최대', ultra: '최고', pro: 'Pro' } satisfies Record<ReasoningEffort, string>;
 const composerEfforts = ['low', 'medium', 'high', 'xhigh', 'max', 'ultra', 'pro'] as const;
 function observedModel(value: string) {
   const normalize = (text: string) => text.toLowerCase().replace(/[^a-z0-9.]/g, '');
@@ -56,10 +56,10 @@ function options(select: HTMLSelectElement, choices: Array<{ id: string; label: 
   };
   const desired = choices.map(choice => option(choice.label, choice.id));
   if (!desired.length && !value) {
-    const unavailable = option('No observed choices', ''); unavailable.disabled = true; desired.push(unavailable);
+    const unavailable = option('확인된 모델 없음', ''); unavailable.disabled = true; desired.push(unavailable);
   }
   if (value && !choices.some(choice => choice.id === value)) {
-    const unverified = option(`${value} · not verified`, value);
+    const unverified = option(`${value} · 미확인`, value);
     unverified.disabled = true;
     desired.push(unverified);
   }
@@ -112,8 +112,8 @@ function paintComposerChoices(): void {
   const title = document.getElementById('composerPowerTitle');
   const subtitle = document.getElementById('composerPowerModel');
   if (!steps.length) {
-    if (title) title.textContent = catalog.state === 'pending' ? 'Loading models…' : 'Models unavailable';
-    if (subtitle) subtitle.textContent = catalog.state === 'pending' ? 'Reading your ChatGPT account' : 'Reload models';
+    if (title) title.textContent = catalog.state === 'pending' ? '모델 불러오는 중…' : '확인된 선택 항목 없음';
+    if (subtitle) subtitle.textContent = catalog.state === 'pending' ? 'ChatGPT 계정의 모델 목록 확인 중' : '모델 목록 새로고침';
     return;
   }
   const current = steps.findIndex(step => step.model === selected.value && step.effort === effort.value);
@@ -122,7 +122,7 @@ function paintComposerChoices(): void {
   dots.append(...steps.map(() => el('span', 'power-dot')));
   const slider = document.createElement('input'); slider.type = 'range'; slider.min = '0'; slider.max = String(steps.length - 1); slider.step = '1';
   slider.value = String(Math.max(0, current));
-  slider.setAttribute('aria-label', 'Model and thinking effort');
+  slider.setAttribute('aria-label', '모델과 추론 강도');
   const show = () => {
     const step = steps[Number(slider.value)]!;
     if (title) title.textContent = effortNames[step.effort] ?? step.effort;
@@ -133,9 +133,9 @@ function paintComposerChoices(): void {
   };
   if (current >= 0) show();
   else {
-    if (title) title.textContent = 'Choose a level';
-    if (subtitle) subtitle.textContent = 'Previous selection unavailable';
-    slider.setAttribute('aria-valuetext', 'Choose an available model and effort');
+    if (title) title.textContent = '추론 강도 선택';
+    if (subtitle) subtitle.textContent = '이전 선택을 사용할 수 없음';
+    slider.setAttribute('aria-valuetext', '사용 가능한 모델과 추론 강도를 선택하세요');
   }
   const choose = () => {
     if (composerContext) composerContext.edited = true;
@@ -165,7 +165,7 @@ function paintComposerLabel(): void {
   const confirmed = confirmedComposerModel();
   const label = confirmed
     ? chatModelDisplayLabel(catalog.models.find(model => model.id === confirmed.model)!.label, confirmed.reasoningEffort, effortNames[confirmed.reasoningEffort]!)
-    : catalog.state === 'pending' ? 'Loading models…' : 'Select model';
+    : catalog.state === 'pending' ? '모델 불러오는 중…' : '모델 선택';
   const node = $('composerModelLabel');
   node.textContent = label;
   node.title = label;
@@ -174,13 +174,13 @@ function paintComposerLabel(): void {
 
 function paintStatus(): void {
   paintComposerChoices();
-  const message = catalog.state === 'pending' ? 'Reading your account’s model choices…'
-    : catalog.state === 'ready' ? `Available in your ChatGPT account · checked ${new Date(catalog.observedAt!).toLocaleTimeString([], { hour: '2-digit', minute: '2-digit' })}`
-    : catalog.error ?? 'Connect to ChatGPT to load your models.';
+  const message = catalog.state === 'pending' ? '계정에서 사용 가능한 모델을 확인하고 있습니다…'
+    : catalog.state === 'ready' ? `ChatGPT 계정에서 사용 가능 · ${new Date(catalog.observedAt!).toLocaleTimeString([], { hour: '2-digit', minute: '2-digit' })} 확인`
+    : catalog.error ?? 'ChatGPT에 연결해 모델을 불러오세요.';
   for (const id of ['chatModelStatus', 'composerModelStatus']) {
     const node = document.getElementById(id);
     if (node) {
-      node.textContent = id === 'composerModelStatus' ? (catalog.state === 'pending' ? 'Loading models…' : catalog.error ?? 'Models unavailable · retry discovery') : message;
+      node.textContent = id === 'composerModelStatus' ? (catalog.state === 'pending' ? '모델 불러오는 중…' : catalog.error ?? '모델 목록을 확인할 수 없습니다. 새로고침해 주세요.') : message;
       if (id === 'composerModelStatus') node.hidden = catalog.state === 'ready';
     }
   }
@@ -191,7 +191,7 @@ function paintStatus(): void {
       button.disabled = false;
       if (id === 'refreshComposerModels') {
         button.hidden = false;
-        button.title = catalog.state === 'pending' ? 'Reading ChatGPT models' : 'Reload ChatGPT models';
+        button.title = catalog.state === 'pending' ? 'ChatGPT 모델 확인 중' : 'ChatGPT 모델 새로고침';
         button.setAttribute('aria-label', button.title);
       }
     }
@@ -209,7 +209,7 @@ function discoverModels(): Promise<void> {
   const work = (async () => {
     const result = await run(window.api.requestChatModels()).catch(() => null);
     if (requested !== generation) return;
-    catalog = result ?? { ...catalog, state: 'unavailable', error: 'Model discovery could not start.' };
+    catalog = result ?? { ...catalog, state: 'unavailable', error: '모델 목록 확인을 시작하지 못했습니다.' };
     for (const [modelId, effortId] of pairs) paintPair(modelId, effortId);
     paintComposerContext(); paintStatus();
   })();

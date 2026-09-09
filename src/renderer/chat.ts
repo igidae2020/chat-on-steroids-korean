@@ -150,7 +150,7 @@ function paintComposerImages(): void {
   images.forEach((image, index) => {
     const tile = 'dataUrl' in image ? el('div', 'composer-image') : attachmentCard(image, true);
     if ('dataUrl' in image) { const preview = document.createElement('img'); preview.src = image.dataUrl; preview.alt = image.name; tile.append(preview); }
-    const remove = el('button', 'image-remove', '×'); remove.setAttribute('type', 'button'); remove.setAttribute('aria-label', `Remove ${image.name}`);
+    const remove = el('button', 'image-remove', '×'); remove.setAttribute('type', 'button'); remove.setAttribute('aria-label', `${image.name} 제거`);
     remove.addEventListener('click', () => { imageDrafts.set(key, images.filter((_entry, at) => at !== index)); paintComposerImages(); });
     tile.append(remove); box.append(tile);
   });
@@ -221,18 +221,18 @@ interface Badge {
 
 /** Live word per worker state, in the user's vocabulary rather than the protocol's. */
 const AGENT_BADGE: Record<AgentState, Badge> = {
-  invited: { text: 'opening', tone: 'is-active' },
-  active: { text: 'active', tone: 'is-active' },
+  invited: { text: '열기 중', tone: 'is-active' },
+  active: { text: '작업 중', tone: 'is-active' },
   // Still working, as far as this app knows — only its browser tab is gone. Said as
   // "no tab" rather than "detached" because that is the part a user can act on.
-  detached: { text: 'no tab', tone: 'is-active' },
+  detached: { text: '탭 없음', tone: 'is-active' },
   // Between jobs, not over. Its chat is intact and the prime can put it back to work in it,
   // so the word has to read as a pause rather than as an ending — a user who reads "finished"
   // here closes the tab, which is the one thing that costs nothing and helps nothing.
-  sleeping: { text: 'sleeping', tone: '' },
-  waking: { text: 'waking', tone: 'is-active' },
-  finished: { text: 'finished', tone: 'is-finished' },
-  failed: { text: 'failed', tone: 'is-failed' }
+  sleeping: { text: '대기 중', tone: '' },
+  waking: { text: '재개 중', tone: 'is-active' },
+  finished: { text: '종료됨', tone: 'is-finished' },
+  failed: { text: '실패', tone: 'is-failed' }
 };
 
 /**
@@ -314,15 +314,15 @@ function sessionBadges(summary: SessionSummary): Badge[] {
   // as a chat that mysteriously lost its name.
   if (summary.conversationId === null) {
     return unattributedBlocked()
-      ? [{ text: 'blocked', tone: 'is-failed' }, { text: 'not a chat', tone: '' }]
-      : [{ text: 'not a chat', tone: '' }];
+      ? [{ text: '차단됨', tone: 'is-failed' }, { text: '대화 아님', tone: '' }]
+      : [{ text: '대화 아님', tone: '' }];
   }
   // First, and in the failure tone: a blocked chat is the one state on this row that says the
   // app is actively refusing work, and the user came to the list to find it at a glance.
-  if (blockedChats.has(summary.conversationId)) badges.push({ text: 'blocked', tone: 'is-failed' });
+  if (blockedChats.has(summary.conversationId)) badges.push({ text: '차단됨', tone: 'is-failed' });
   if (origin?.kind === 'worker') badges.push({ text: origin.agentId ?? 'worker', tone: '' });
-  else if (origin?.kind === 'resume') badges.push({ text: 'resumed', tone: '' });
-  else if (summary.agents.includes('prime')) badges.push({ text: 'prime', tone: '' });
+  else if (origin?.kind === 'resume') badges.push({ text: '이어가기', tone: '' });
+  else if (summary.agents.includes('prime')) badges.push({ text: '주 에이전트', tone: '' });
 
   // Agent ids are reused across runs (`worker-1`, `worker-2`, ...). Matching only by that
   // short id made old worker sessions inherit the *current* run's live badge, so a worker
@@ -361,10 +361,10 @@ function sessionRow(summary: SessionSummary): HTMLElement {
   if (summary.id === activeId && summary.endedAt === null) row.classList.add('is-live');
 
   const top = el('div', 'sess-top');
-  const title = el('b', '', summary.title || 'Untitled session');
+  const title = el('b', '', summary.title || '제목 없는 세션');
   top.append(title);
   const badges = sessionBadges(summary);
-  row.title = [summary.title || 'Untitled session', ...badges.map((badge) => badge.text), ago(summary.updatedAt)].join(' · ');
+  row.title = [summary.title || '제목 없는 세션', ...badges.map((badge) => badge.text), ago(summary.updatedAt)].join(' · ');
   const showTip = () => {
     document.getElementById('sessionTooltip')?.remove();
     const tip = el('div', 'session-tooltip', row.title);
@@ -389,7 +389,7 @@ function sessionRow(summary: SessionSummary): HTMLElement {
   const remove = document.createElement('button');
   remove.className = 'btn sess-action sess-del';
   remove.type = 'button';
-  remove.title = 'Delete this recorded session';
+  remove.title = '이 세션 기록 삭제';
   remove.append(icon('i-trash'));
   remove.addEventListener('click', (event) => {
     event.stopPropagation();
@@ -406,8 +406,8 @@ function sessionRow(summary: SessionSummary): HTMLElement {
     block.className = `btn sess-action sess-block${blocked ? ' is-blocked' : ''}`;
     block.type = 'button';
     block.title = blocked
-      ? 'Allow unattributed calls: self-contained calls run again even when the app cannot prove which chat sent them'
-      : 'Block unattributed calls: every call the app cannot attribute to a chat is refused and the chat is told to stop';
+      ? '대화 미확인 호출 허용: 대화를 증명하지 못해도 독립적인 호출을 다시 허용합니다.'
+      : '대화 미확인 호출 차단: 대화를 확인하지 못한 호출을 거부하고 중단을 요청합니다.';
     block.append(icon(blocked ? 'i-play' : 'i-ban'));
     block.addEventListener('click', (event) => {
       event.stopPropagation();
@@ -428,8 +428,8 @@ function sessionRow(summary: SessionSummary): HTMLElement {
     block.className = `btn sess-action sess-block${blocked ? ' is-blocked' : ''}`;
     block.type = 'button';
     block.title = blocked
-      ? 'Release this chat: its tool calls run again'
-      : 'Block this chat: every tool call it makes is refused and it is told to stop';
+      ? '대화 차단 해제: 도구 호출을 다시 허용합니다.'
+      : '대화 차단: 모든 도구 호출을 거부하고 중단을 요청합니다.';
     block.append(icon(blocked ? 'i-play' : 'i-ban'));
     block.addEventListener('click', (event) => {
       event.stopPropagation();
@@ -440,7 +440,7 @@ function sessionRow(summary: SessionSummary): HTMLElement {
     const open = document.createElement('button');
     open.className = 'btn sess-action sess-open';
     open.type = 'button';
-    open.title = 'Open this chat in Chrome';
+    open.title = 'Chrome에서 대화 열기';
     open.append(icon('i-out'));
     open.addEventListener('click', (event) => {
       event.stopPropagation();
@@ -491,7 +491,7 @@ async function deleteSession(id: string): Promise<void> {
     detailLoadGeneration++;
     handoffLoadGeneration++;
   }
-  toast('Session deleted');
+  toast('세션 기록을 삭제했습니다.');
   await loadSessions();
 }
 
@@ -591,7 +591,7 @@ function paintSessions(): void {
   const group = (key: string, workers: SessionSummary[], parentRow?: HTMLElement, target = rows): void => {
     const button = el('button', 'worker-toggle');
     button.append(icon('i-chev'));
-    button.title = `${workers.length} sub-agents · ${workers.filter(sessionWorking).length} active`;
+    button.title = `보조 에이전트 ${workers.length}개 · ${workers.filter(sessionWorking).length}개 실행 중`;
     button.setAttribute('aria-label', `${expandedWorkers.has(key) ? 'Collapse' : 'Expand'} ${workers.length} sub-agents`);
     button.setAttribute('type', 'button'); button.setAttribute('aria-expanded', String(expandedWorkers.has(key)));
     button.addEventListener('click', (event) => { event.stopPropagation(); expandedWorkers.has(key) ? expandedWorkers.delete(key) : expandedWorkers.add(key); paintSessions(); });
@@ -614,7 +614,7 @@ function paintSessions(): void {
   if (otherWorkers.length) {
     const history = document.createElement('details'); history.className = 'session-diagnostics';
     history.open = expandedWorkers.has('other-workers');
-    history.append(el('summary', '', `Sub-agent history · ${otherWorkers.length}`));
+    history.append(el('summary', '', `보조 에이전트 기록 · ${otherWorkers.length}개`));
     history.append(...otherWorkers.map(sessionRow));
     history.addEventListener('toggle', () => { if (history.isConnected) history.open ? expandedWorkers.add('other-workers') : expandedWorkers.delete('other-workers'); });
     rows.push(history);
@@ -626,13 +626,13 @@ function paintSessions(): void {
     const section = document.createElement('details'); section.className = 'project-group'; section.dataset.projectId = id;
     section.open = !collapsedProjects.has(id);
     const heading = el('summary', 'project-heading');
-    const label = el('span', 'project-name', project?.name ?? 'Unavailable project');
-    heading.title = project?.path ?? 'Unavailable project';
+    const label = el('span', 'project-name', project?.name ?? '사용할 수 없는 프로젝트');
+    heading.title = project?.path ?? '사용할 수 없는 프로젝트';
     heading.append(icon('i-folder'), label); section.append(heading);
     section.addEventListener('toggle', () => { if (section.isConnected) section.open ? collapsedProjects.delete(id) : collapsedProjects.add(id); });
     if (project) {
       const create = el('button', 'btn project-new'); create.append(icon('i-plus')); create.setAttribute('type', 'button'); create.dataset.newProject = id;
-      create.title = 'New chat in this project'; create.setAttribute('aria-label', create.title);
+      create.title = '이 프로젝트에서 새 대화'; create.setAttribute('aria-label', create.title);
       create.addEventListener('click', event => { event.preventDefault(); event.stopPropagation(); selectNewChat(id); }); heading.append(create);
     }
     const tasks = projectRows.get(id) ?? [];
@@ -640,8 +640,8 @@ function paintSessions(): void {
     const shown = tasks.filter((task, index) => index < count || task.selected);
     section.append(...shown.flatMap(task => task.rows));
     if (shown.length < tasks.length) {
-      const more = el('button', 'btn project-show-more', 'Show more') as HTMLButtonElement;
-      more.type = 'button'; more.setAttribute('aria-label', `Show more tasks in ${project?.name ?? 'this project'}`);
+      const more = el('button', 'btn project-show-more', '더 보기') as HTMLButtonElement;
+      more.type = 'button'; more.setAttribute('aria-label', `${project?.name ?? '이 프로젝트'}의 작업 더 보기`);
       more.addEventListener('click', () => { projectVisibleCounts.set(id, count + PROJECT_TASK_PAGE_SIZE); paintSessions(); });
       section.append(more);
     }
@@ -651,7 +651,7 @@ function paintSessions(): void {
     const disclosure = document.createElement('details');
     disclosure.className = 'session-diagnostics';
     disclosure.open = diagnosticsExpanded;
-    disclosure.append(el('summary', '', `Unattributed activity · ${diagnostics.length}`));
+    disclosure.append(el('summary', '', `대화 미확인 활동 · ${diagnostics.length}개`));
     disclosure.append(...diagnostics.map(sessionRow));
     disclosure.addEventListener('toggle', () => { diagnosticsExpanded = disclosure.open; });
     rows.push(disclosure);
@@ -745,13 +745,13 @@ function paintGoalProgress(): void {
   let text = progress?.text ?? '', error = progress?.error;
   if (entry) { phase = entry.state; error = entry.error ?? undefined; }
   if (draft && (!off || finishDraft) && (finishDraft || !['saving', 'failed'].includes(phase))) { phase = draft.stage; text = draft.text; error = draft.error ?? undefined; }
-  const labels: Record<string, string> = { saving: 'Saving task…', saved: 'Task saved · waiting for the next completed answer',
-    preparing: 'Preparing the opening message…', generating: 'Generating the opening message…', ready: 'Message ready · awaiting ChatGPT delivery',
-    sending: 'Preparing a continuation…', answering: 'Generating a continuation…', queued: 'Opening message queued',
-    browser: 'Sending opening message to ChatGPT…', sent: 'Opening message sent', tool: 'Opening message delivered to the active turn',
-    failed: 'Task could not continue', cancelled: 'Opening message cancelled', paused: 'Automation paused · task text preserved', 'no-reply': 'Goal reached' };
+  const labels: Record<string, string> = { saving: '작업 저장 중…', saved: '작업 저장됨 · 다음 답변 완료 대기',
+    preparing: '첫 메시지 준비 중…', generating: '첫 메시지 생성 중…', ready: '메시지 준비됨 · ChatGPT 전달 대기',
+    sending: '후속 지시 준비 중…', answering: '후속 지시 생성 중…', queued: '첫 메시지 대기열에 추가됨',
+    browser: '첫 메시지를 ChatGPT에 전달 중…', sent: '첫 메시지 전송됨', tool: '첫 메시지를 현재 턴에 전달함',
+    failed: '작업을 계속하지 못했습니다', cancelled: '첫 메시지 취소됨', paused: '자동 진행 일시정지 · 작업 내용 유지', 'no-reply': '목표 달성' };
   if (phase === 'retrying') { text = ''; error = undefined; }
-  labels.retrying = `Provider busy · retry ${progress?.attempt ?? ''}${progress?.retryAt ? ' at ' + new Date(progress.retryAt).toLocaleTimeString() : ''}`;
+  labels.retrying = `공급자 응답 대기 · 재시도 ${progress?.attempt ?? ''}${progress?.retryAt ? ' 예정 ' + new Date(progress.retryAt).toLocaleTimeString() : ''}`;
   row.hidden = !phase; if (!phase) return;
   const busy = ['saving', 'preparing', 'generating', 'retrying', 'sending', 'answering', 'browser', 'queued', 'ready'].includes(phase) && !error;
   row.setAttribute('aria-busy', String(busy));
@@ -774,14 +774,14 @@ function paintDeliveryControls(): void {
   const queueAtFinish = selectedId !== null && controlledSessionId === selectedId && controlledSelection === selectionGeneration && controlledQueueAtFinish;
   const canInject = selectedId !== null && controlledSessionId === selectedId && controlledSelection === selectionGeneration && controlledCanInject;
   $('queueAtFinish').hidden = !queueAtFinish;
-  $('afterTurnLabel').textContent = queueAtFinish ? 'Queue at Session finish' : 'After this turn';
+  $('afterTurnLabel').textContent = queueAtFinish ? '종료 시점에 예약' : '현재 턴이 끝난 뒤';
   const generate = $<HTMLButtonElement>('generateFinishGoal');
   const queued = [...startingInputs.values(), ...pendingComposerInputs].some(entry =>
     (entry.sessionId ?? entry.deliveredSessionId) === selectedId && ['queued', 'browser', 'tool'].includes(entry.state));
   generate.hidden = !working || !controlledFinishWaiting || queued || controlledStopPending || !!finishGoalDraftView;
   generate.disabled = generate.dataset.busy === `${selectedId}:${controlledTurnId}`;
   const sendOption = $<HTMLSelectElement>('sendMode').querySelector('option[value="auto"]');
-  if (sendOption) sendOption.textContent = canInject ? 'Inject now' : 'Send';
+  if (sendOption) sendOption.textContent = canInject ? '지금 전달' : '보내기';
   if (!canInject && !queueAtFinish) $<HTMLSelectElement>('sendMode').value = 'auto';
   const pending = pendingComposerInput();
   const stop = (working || !!pending) && !$<HTMLTextAreaElement>('chatInput').value.trim() && !(imageDrafts.get(draftKey())?.length);
@@ -791,12 +791,12 @@ function paintDeliveryControls(): void {
   const send = $<HTMLButtonElement>('chatSend');
   send.disabled = !!preparedPlan && (preparedPlan.sending || preparedPlan.stages.some(stage => !stage.trim()));
   send.dataset.action = stop ? 'stop' : 'send';
-  send.setAttribute('aria-label', stop ? (controlledStopPending ? 'Stop requested' : 'Stop turn') : 'Send message');
-  if (stop && !working && pending) send.setAttribute('aria-label', 'Cancel delivery');
-  if (preparedPlan && !stop) send.setAttribute('aria-label', 'Start full plan');
-  else if (planMode && !stop) send.setAttribute('aria-label', 'Generate plan');
+  send.setAttribute('aria-label', stop ? (controlledStopPending ? '중지 요청됨' : '응답 중지') : '메시지 보내기');
+  if (stop && !working && pending) send.setAttribute('aria-label', '전달 취소');
+  if (preparedPlan && !stop) send.setAttribute('aria-label', '전체 계획 시작');
+  else if (planMode && !stop) send.setAttribute('aria-label', '계획 생성');
   send.classList.toggle('is-plan-ready', !!preparedPlan && !stop);
-  send.title = stop && !working && pending ? 'Cancel delivery' : preparedPlan && !stop ? 'Start full plan' : planMode && !stop ? 'Click to generate plan' : '';
+  send.title = stop && !working && pending ? '전달 취소' : preparedPlan && !stop ? '전체 계획 시작' : planMode && !stop ? '클릭하여 계획 생성' : '';
   send.classList.toggle('is-stop', stop);
   for (const button of $('sendOptions').querySelectorAll<HTMLElement>('[data-delivery]')) {
     button.setAttribute('aria-checked', String(button.dataset.delivery === $<HTMLSelectElement>('sendMode').value));
@@ -813,11 +813,11 @@ function paintActiveGoal(): void {
   row.hidden = !selectedId || mode === 'off';
   if (row.hidden) { row.replaceChildren(); return; }
   const objective = $<HTMLTextAreaElement>('sessionObjective').value.trim();
-  const label = el('span', 'queue-label', `${mode === 'loop' ? 'Loop' : 'Pursuing goal'}${objective ? ' · ' + objective : ''}`);
+  const label = el('span', 'queue-label', `${mode === 'loop' ? 'Loop' : '목표 진행 중'}${objective ? ' · ' + objective : ''}`);
   label.title = objective;
   row.replaceChildren(icon('i-pulse'), label,
-    dockAction('Pause automation', 'i-power', () => { const select = $<HTMLSelectElement>('chatAutomation'); select.value = 'off'; select.dispatchEvent(new Event('change')); }),
-    dockAction('Edit task', 'i-pencil', () => { $<HTMLDetailsElement>('composerSettings').open = true; $<HTMLTextAreaElement>('sessionObjective').focus(); }));
+    dockAction('자동 진행 끄기', 'i-power', () => { const select = $<HTMLSelectElement>('chatAutomation'); select.value = 'off'; select.dispatchEvent(new Event('change')); }),
+    dockAction('작업 편집', 'i-pencil', () => { $<HTMLDetailsElement>('composerSettings').open = true; $<HTMLTextAreaElement>('sessionObjective').focus(); }));
 }
 let planGeneration = 0;
 let planMode = false;
@@ -831,26 +831,26 @@ function cancelTaskPlan(): void {
   $('taskPlanPreview').hidden = true; $('taskPlanPreview').replaceChildren();
   const button = $<HTMLButtonElement>('createPlan');
   delete button.dataset.busy; button.removeAttribute('aria-busy');
-  $<HTMLTextAreaElement>('chatInput').placeholder = 'Ask anything…';
+  $<HTMLTextAreaElement>('chatInput').placeholder = '메시지를 입력하세요…';
   paintTaskActions();
   paintDeliveryControls();
 }
 async function createTaskPlan(backend: 'api' | 'chatgpt'): Promise<void> {
   const input = $<HTMLTextAreaElement>('chatInput'), text = input.value.trim();
   planMode = true; paintTaskActions(); paintDeliveryControls();
-  if (!text) { input.placeholder = 'Describe the task to turn into a plan…'; input.focus(); return; }
+  if (!text) { input.placeholder = '계획으로 만들 작업을 입력하세요…'; input.focus(); return; }
   const generation = ++planGeneration, selection = selectionGeneration;
   const preview = $('taskPlanPreview'); preview.hidden = false;
-  preview.replaceChildren(el('span', 'muted', 'Creating plan…'));
+  preview.replaceChildren(el('span', 'muted', '계획 생성 중…'));
   const button = $<HTMLButtonElement>('createPlan');
   const caption = button.querySelector('span')!; const previous = caption.textContent;
-  button.dataset.busy = 'true'; button.setAttribute('aria-busy', 'true'); caption.textContent = 'Creating plan…'; paintTaskActions();
+  button.dataset.busy = 'true'; button.setAttribute('aria-busy', 'true'); caption.textContent = '계획 생성 중…'; paintTaskActions();
   const requestId = crypto.randomUUID();
   if (planRequestId) void api.cancelTaskRequest?.(planRequestId);
   planRequestId = requestId;
   const unsubscribe = api.onTaskProgress?.(progress => {
     if (progress.requestId !== requestId || generation !== planGeneration || selection !== selectionGeneration) return;
-    const label = progress.phase === 'retrying' ? `Provider busy · retry ${progress.attempt ?? ''}${progress.retryAt ? ' at ' + new Date(progress.retryAt).toLocaleTimeString() : ''}` : progress.phase === 'cancelled' ? 'Plan cancelled' : progress.phase === 'preparing' ? 'Preparing plan…' : progress.phase === 'ready' ? 'Plan ready' : progress.phase === 'failed' ? 'Plan failed' : 'Writing plan…';
+    const label = progress.phase === 'retrying' ? `공급자 응답 대기 · 재시도 ${progress.attempt ?? ''}${progress.retryAt ? ' 예정 ' + new Date(progress.retryAt).toLocaleTimeString() : ''}` : progress.phase === 'cancelled' ? '계획 취소됨' : progress.phase === 'preparing' ? '계획 준비 중…' : progress.phase === 'ready' ? '계획 준비됨' : progress.phase === 'failed' ? '계획 생성 실패' : '계획 작성 중…';
     preview.replaceChildren(el('span', 'muted', label));
     if (progress.text || progress.error) preview.append(el('pre', 'task-progress-text', progress.error || progress.text));
   });
@@ -859,14 +859,14 @@ async function createTaskPlan(backend: 'api' | 'chatgpt'): Promise<void> {
     const result = await api.draftTaskPlan(text, backend, requestId);
     stages = result.ok ? result.data : null;
     if (!result.ok && generation === planGeneration && selection === selectionGeneration) {
-      const error = el('div', 'muted', result.error === 'invalid_goal_decision_json' ? 'The planner response could not be read.' : result.error);
+      const error = el('div', 'muted', result.error === 'invalid_goal_decision_json' ? '계획 생성 응답을 읽지 못했습니다.' : result.error);
       error.title = result.error; preview.replaceChildren(error);
     }
   }
   finally { unsubscribe?.(); if (planRequestId === requestId) planRequestId = null; if (generation === planGeneration) { delete button.dataset.busy; button.removeAttribute('aria-busy'); caption.textContent = previous; paintTaskActions(); } }
   if (generation !== planGeneration || selection !== selectionGeneration) return;
-  if (!stages) { preview.hidden = false; preview.append(el('div', 'muted', 'Send again to retry, or cancel the plan.')); return; }
-  if (input.value.trim() !== text) { preview.hidden = true; toast('Your draft changed; generate a plan from the updated task.'); return; }
+  if (!stages) { preview.hidden = false; preview.append(el('div', 'muted', '다시 보내서 재시도하거나 계획을 취소하세요.')); return; }
+  if (input.value.trim() !== text) { preview.hidden = true; toast('작성 내용이 바뀌었습니다. 변경된 작업으로 계획을 다시 만드세요.'); return; }
   preparedPlan = { selection, text, stages, sending: false };
   paintPreparedPlan();
   paintDeliveryControls();
@@ -882,25 +882,25 @@ function paintPreparedPlan(): void {
   preview.replaceChildren(...plan.stages.map((stage, index) => {
     const row = el('div', 'plan-stage');
     const heading = el('div', 'plan-stage-heading');
-    const label = el('span', 'stage-number', String(index + 1)); label.setAttribute('aria-label', `Stage ${index + 1}`);
+    const label = el('span', 'stage-number', String(index + 1)); label.setAttribute('aria-label', `${index + 1}단계`);
     const text = el('span', 'queue-label', stage); text.title = stage;
     const field = document.createElement('textarea'); field.value = stage; field.maxLength = 16000; field.hidden = true;
-    field.setAttribute('aria-label', `Edit stage ${index + 1}`);
-    const error = el('span', 'stage-error', 'Enter text or delete this stage.'); error.id = `planStageError-${index}`; error.hidden = !!stage.trim();
+    field.setAttribute('aria-label', `${index + 1}단계 편집`);
+    const error = el('span', 'stage-error', '내용을 입력하거나 단계를 삭제하세요.'); error.id = `planStageError-${index}`; error.hidden = !!stage.trim();
     const validate = () => { error.hidden = !!field.value.trim(); field.setAttribute('aria-invalid', String(!error.hidden)); paintDeliveryControls(); };
     field.setAttribute('aria-describedby', error.id); field.setAttribute('aria-invalid', String(!error.hidden));
     field.oninput = () => { plan.stages[index] = field.value; text.textContent = field.value; text.title = field.value; validate(); };
-    const edit = dockAction(`Edit stage ${index + 1}`, 'i-pencil', () => {
+    const edit = dockAction(`${index + 1}단계 편집`, 'i-pencil', () => {
       field.hidden = !field.hidden; edit.setAttribute('aria-expanded', String(!field.hidden)); if (!field.hidden) field.focus();
     });
     edit.setAttribute('aria-expanded', 'false');
-    const remove = dockAction(`Delete stage ${index + 1}`, 'i-trash', () => {
+    const remove = dockAction(`${index + 1}단계 삭제`, 'i-trash', () => {
       if (plan.sending) return;
       plan.stages.splice(index, 1);
       if (plan.stages.length) { paintPreparedPlan(); paintDeliveryControls(); } else cancelTaskPlan();
     });
     edit.disabled = remove.disabled = field.disabled = plan.sending;
-    heading.title = index === 0 ? 'Send includes your complete request and the full plan. Later stages are queued as verification checkpoints.' : 'Included in the first message, then queued as a checkpoint at Session finish or after a completed answer when enabled.';
+    heading.title = index === 0 ? '원래 요청과 전체 계획을 함께 전송합니다. 이후 단계는 검증 항목으로 대기열에 추가됩니다.' : '첫 메시지에 포함하고, 설정에 따라 Session finish 또는 답변 완료 후 검증 단계로 전달합니다.';
     heading.append(label, text, edit, remove); row.append(heading, field, error); return row;
   }));
 }
@@ -909,7 +909,7 @@ async function sendPreparedPlan(): Promise<void> {
   if (!plan || plan.sending) return;
   if (plan.selection !== selectionGeneration || $<HTMLTextAreaElement>('chatInput').value.trim() !== plan.text) { cancelTaskPlan(); return; }
   const tasks = plan.stages.map(stage => stage.trim());
-  if (!tasks.length || tasks.some(task => !task) || JSON.stringify(tasks).length > 12000) { toast('Keep every stage nonempty and the plan below 12,000 characters.'); return; }
+  if (!tasks.length || tasks.some(task => !task) || JSON.stringify(tasks).length > 12000) { toast('빈 단계를 채우고 전체 계획을 12,000자 이내로 작성하세요.'); return; }
   plan.sending = true; paintPreparedPlan();
   try {
     const sent = await sendComposer(undefined, tasks);
@@ -927,14 +927,14 @@ function paintTaskActions(): void {
   save.hidden = off;
   const saved = objective.dataset.saved === objective.value && !!objective.value.trim();
   save.disabled = objective.disabled || !objective.value.trim() || save.dataset.busy === 'true' || saved;
-  save.querySelector('span')!.textContent = save.dataset.busy === 'true' ? 'Saving…' : saved ? 'Saved' : 'Save task';
+  save.querySelector('span')!.textContent = save.dataset.busy === 'true' ? '저장 중…' : saved ? '저장됨' : '작업 저장';
   const text = $<HTMLTextAreaElement>('chatInput').value.trim();
   for (const id of ['createPlan']) {
     const button = $<HTMLButtonElement>(id);
     button.disabled = false;
     button.setAttribute('aria-pressed', String(planMode));
-    button.querySelector('span')!.textContent = planMode ? 'Cancel plan' : 'Create plan';
-    button.title = planMode ? 'Return to a normal message; keep your draft' : text ? 'Split your message into editable stages' : 'Write a message in the composer first';
+    button.querySelector('span')!.textContent = planMode ? '계획 취소' : '계획 만들기';
+    button.title = planMode ? '작성 내용을 유지하고 일반 메시지로 돌아가기' : text ? '메시지를 편집 가능한 단계로 나누기' : '먼저 메시지를 입력하세요';
   }
 }
 function paintAutomationSwitch(): void {
@@ -947,8 +947,8 @@ function paintAutomationSwitch(): void {
   }
   $<HTMLSelectElement>('sessionObjectiveMode').value = select.value === 'loop' ? 'loop' : 'goal';
   const loop = select.value === 'loop';
-  document.querySelector('label[for="sessionObjective"]')!.textContent = loop ? 'Loop instructions' : 'Goal';
-  $<HTMLTextAreaElement>('sessionObjective').placeholder = loop ? 'What should each continuation focus on?' : 'What should this chat achieve?';
+  document.querySelector('label[for="sessionObjective"]')!.textContent = loop ? 'Loop 지시문' : 'Goal';
+  $<HTMLTextAreaElement>('sessionObjective').placeholder = loop ? '매번 이어서 수행할 작업을 입력하세요.' : '이 대화의 목표를 입력하세요.';
   paintTaskActions();
 }
 async function refreshSessionControls(): Promise<void> {
@@ -991,7 +991,7 @@ async function refreshSessionControls(): Promise<void> {
   paintAutomationSwitch();
   $<HTMLButtonElement>('compactSession').disabled = !!controls.blocked || !!controls.job?.busy;
   $('cancelCompaction').hidden = !controls.job?.busy;
-  $('sessionControlStatus').textContent = controls.blocked === 'worker' ? 'This sub-agent is managed by its prime.' : controls.blocked === 'blocked' ? 'This chat is blocked.' : controls.job?.busy ? 'Compaction is running in ChatGPT.' : '';
+  $('sessionControlStatus').textContent = controls.blocked === 'worker' ? '이 보조 에이전트는 주 에이전트가 관리합니다.' : controls.blocked === 'blocked' ? '이 대화는 차단되어 있습니다.' : controls.job?.busy ? 'ChatGPT에서 요약 후 이어가기가 진행 중입니다.' : '';
 }
 
 async function navigateHistory(before: number | null, prepend = false): Promise<void> {
@@ -1091,7 +1091,7 @@ async function loadHandoff(): Promise<void> {
 function textBlock(className: string, value: string, truncated: boolean, chars: number): HTMLElement {
   const node = el('p', className, value);
   if (truncated) {
-    node.append(el('span', 'cut', ` … cut, ${compactNumber(chars)} characters in the original`));
+    node.append(el('span', 'cut', ` … 생략됨, 원문 ${compactNumber(chars)}자`));
   }
   return node;
 }
@@ -1212,7 +1212,7 @@ export function renderedMarkdown(source: string, capture?: StoredText): HTMLElem
         if (safeExternalLink(url[2] ?? '')) link.setAttribute('href', url[2]!);
         return link.outerHTML;
       }
-      return citations.get(token.raw) ?? (token.raw.startsWith('\uE200filecite\uE202') ? '' : '<span title="The recording does not include this source URL">[source link unavailable]</span>');
+      return citations.get(token.raw) ?? (token.raw.startsWith('\uE200filecite\uE202') ? '' : '<span title="기록에 이 출처 URL이 없습니다">[출처 링크 없음]</span>');
     }
   }] });
   const html = parser.parse(text, { async: false });
@@ -1353,7 +1353,7 @@ function toolBody(event: Extract<SessionEvent, { kind: 'tool_call' }>, context?:
   const facts = el('p', 'raw-facts');
   facts.textContent =
     `${call.tool} · ${call.outcome} · ${Math.round(call.durationMs)} ms · ` +
-    `placed by ${ATTRIBUTION_LABELS[call.attribution] ?? call.attribution}`;
+    `분류: ${ATTRIBUTION_LABELS[call.attribution] ?? call.attribution}`;
   raw.append(facts);
 
   if (call.changes && call.changes.length > 0) {
@@ -1368,9 +1368,9 @@ function toolBody(event: Extract<SessionEvent, { kind: 'tool_call' }>, context?:
     raw.append(changes);
   }
 
-  raw.append(el('h4', '', 'Arguments'));
+  raw.append(el('h4', '', '입력값'));
   raw.append(textBlock('pre', call.args.text, call.args.truncated, call.args.chars));
-  raw.append(el('h4', '', 'Result'));
+  raw.append(el('h4', '', '결과'));
   const images = call.assets?.filter(asset => ['image/png', 'image/jpeg', 'image/webp'].includes(asset.mimeType)) ?? [];
   const readable = toolResultText(call.result.text, call.result.truncated, images.length > 0);
   if (readable) raw.append(textBlock('pre', readable, call.result.truncated && images.length === 0, call.result.chars));
@@ -1384,7 +1384,7 @@ function toolBody(event: Extract<SessionEvent, { kind: 'tool_call' }>, context?:
       for (const asset of images) {
         const data = await run(api.getSessionImage(id, asset.id));
         if (context ? !context.current() : id !== selectedId || generation !== selectionGeneration) return;
-        if (!data) { attachments.append(el('p', 'meta', 'Image unavailable')); continue; }
+        if (!data) { attachments.append(el('p', 'meta', '이미지를 불러올 수 없습니다')); continue; }
         const image = document.createElement('img');
         image.src = data; image.alt = `${call.tool} result`; image.loading = 'lazy';
         image.style.cssText = 'display:block;max-width:100%;max-height:600px;object-fit:contain;margin:8px 0';
@@ -1395,7 +1395,7 @@ function toolBody(event: Extract<SessionEvent, { kind: 'tool_call' }>, context?:
     raw.append(attachments);
     void load();
   }
-  if (call.result.assetId) raw.append(el('p', 'raw-facts', `Full recorded response: ${call.result.assetId}`));
+  if (call.result.assetId) raw.append(el('p', 'raw-facts', `전체 기록 응답: ${call.result.assetId}`));
 
   for (const asset of call.assets ?? []) {
     raw.append(el('p', 'raw-facts', `asset ${asset.id} · ${asset.mimeType} · ${compactNumber(asset.bytes)} bytes`));
@@ -1420,7 +1420,7 @@ function paintInputReceipt(row: HTMLElement, item: ReturnType<typeof timelineIte
 function eventBody(event: SessionEvent, context?: { id: string; current: () => boolean }): HTMLElement {
   switch (event.kind) {
     case 'session_start':
-      return el('p', 'meta', `Session started — ${event.title}`);
+      return el('p', 'meta', `세션 시작 — ${event.title}`);
     case 'user_message': {
       const box = el('div', 'said is-user');
       box.append(el('b', '', 'You'));
@@ -1433,7 +1433,7 @@ function eventBody(event: SessionEvent, context?: { id: string; current: () => b
       if (event.inputDelivery) {
         box.classList.add('has-input-receipt');
         const receipt = el('span', 'input-receipt');
-        const label = event.inputDelivery === 'offered' ? 'Sent to the active turn · awaiting receipt' : 'Delivery confirmed';
+        const label = event.inputDelivery === 'offered' ? '현재 턴에 전달됨 · 수신 확인 대기' : '전달 확인됨';
         receipt.title = label; receipt.setAttribute('aria-label', label);
         receipt.append(icon(event.inputDelivery === 'offered' ? 'i-clock' : 'i-check'));
         box.append(receipt);
@@ -1444,9 +1444,9 @@ function eventBody(event: SessionEvent, context?: { id: string; current: () => b
           for (const asset of assets) {
             const data = await run(api.getSessionImage(id, asset.id));
             if (context ? !context.current() : id !== selectedId || generation !== selectionGeneration) return;
-            if (!data) { attachments.append(el('p', 'meta', 'Image unavailable')); continue; }
+            if (!data) { attachments.append(el('p', 'meta', '이미지를 불러올 수 없습니다')); continue; }
             const image = document.createElement('img');
-            image.src = data; image.alt = 'User attachment'; image.loading = 'lazy';
+            image.src = data; image.alt = '사용자 첨부'; image.loading = 'lazy';
             attachments.append(image);
           }
         })();
@@ -1455,7 +1455,7 @@ function eventBody(event: SessionEvent, context?: { id: string; current: () => b
     }
     case 'assistant_message': {
       const box = el('div', 'said');
-      box.append(el('b', '', event.final ? 'ChatGPT' : 'ChatGPT (partial)'));
+      box.append(el('b', '', event.final ? 'ChatGPT' : 'ChatGPT (작성 중)'));
       box.append(renderedMarkdown(event.message.text, event.renderedHtml));
       return box;
     }
@@ -1467,19 +1467,19 @@ function eventBody(event: SessionEvent, context?: { id: string; current: () => b
       return line;
     }
     case 'turn_start':
-      return el('p', 'meta', event.detail ? `Turn reopened — ${event.detail}` : 'Turn started');
+      return el('p', 'meta', event.detail ? `턴 다시 열림 — ${event.detail}` : '응답 시작');
     case 'turn_end': {
       const line = el(
         'p',
         event.outcome === 'completed' ? 'meta' : 'meta is-warn',
-        `Turn ${TURN_OUTCOME_LABELS[event.outcome]}${event.detail ? ` — ${event.detail}` : ''}`
+        `턴 ${TURN_OUTCOME_LABELS[event.outcome]}${event.detail ? ` — ${event.detail}` : ''}`
       );
       return line;
     }
     case 'chat_error': {
       const notice = el('div', 'chat-error-notice');
       notice.setAttribute('role', 'status');
-      const title = el('strong', '', 'ChatGPT reported a problem');
+      const title = el('strong', '', 'ChatGPT에서 문제를 보고했습니다.');
       notice.append(title, textBlock('msg', event.message.text, event.message.truncated, event.message.chars));
       return notice;
     }
@@ -1488,10 +1488,10 @@ function eventBody(event: SessionEvent, context?: { id: string; current: () => b
     case 'note':
       return el('p', 'meta', event.message.text);
     /**
-     * Rendered rather than left to fall through to "Unknown event".
+     * Rendered rather than left to fall through to "알 수 없는 이벤트".
      *
      * The timeline is how the user checks what the agents actually said to each other, and
-     * a run of grey "Unknown event" rows in the middle of a multi-agent session reads as a
+     * a run of grey "알 수 없는 이벤트" rows in the middle of a multi-agent session reads as a
      * broken log — the one impression a session recorder cannot afford to give.
      */
     case 'agent_message': {
@@ -1501,8 +1501,8 @@ function eventBody(event: SessionEvent, context?: { id: string; current: () => b
       // once in the other agent's session, so without this a pair reads as two messages.
       box.title =
         event.delivery === 'sent'
-          ? `Sent by ${event.from}; recorded when the app accepted it`
-          : `Received by ${event.to}; recorded when it acknowledged delivery`;
+          ? `${event.from}에서 보냄 · 앱이 수신한 시점에 기록`
+          : `${event.to}에서 받음 · 전달 확인 시점에 기록`;
       const summary = el('summary');
       const worker = event.from === 'prime' ? event.to : event.from;
       const avatar = el('span', 'agent-avatar', worker.replace(/^worker-/, ''));
@@ -1518,9 +1518,9 @@ function eventBody(event: SessionEvent, context?: { id: string; current: () => b
         const matches = sessions.filter(entry => entry.origin?.kind === 'worker' && entry.origin.fromSessionId === selectedId && entry.origin.agentId === worker);
         if (matches.length === 1) {
           const open = el('button', 'btn agent-chat-open'); open.setAttribute('type', 'button');
-          open.setAttribute('aria-label', `Open ${worker} chat`);
+          open.setAttribute('aria-label', `${worker} 대화 열기`);
           const arrow = icon('i-out'); arrow.setAttribute('aria-hidden', 'true');
-          open.append(el('span', '', 'Open worker chat'), arrow);
+          open.append(el('span', '', '작업자 대화 열기'), arrow);
           open.onclick = () => void agentPanel?.open(matches[0]!.id); box.append(open);
         }
       }
@@ -1530,10 +1530,10 @@ function eventBody(event: SessionEvent, context?: { id: string; current: () => b
       return el(
         'p',
         'meta is-good',
-        `Handoff saved — ${compactNumber(event.chars)} characters (${event.reason})`
+        `이어가기 요약 저장됨 — ${compactNumber(event.chars)}자 (${event.reason})`
       );
     default:
-      return el('p', 'meta', 'Unknown event');
+      return el('p', 'meta', '알 수 없는 이벤트');
   }
 }
 
@@ -1557,7 +1557,7 @@ function eventRow(event: SessionEvent): HTMLElement {
       el(
         'p',
         'meta',
-        'From a chat that Compact & Resume had already replaced — ChatGPT kept running its stopped turn there. Refused by design; nothing to repair.'
+        '요약 후 이어가기로 교체된 이전 대화의 호출입니다. 이전 응답이 계속 실행되어 의도적으로 거부했습니다. 복구가 필요하지 않습니다.'
       )
     );
   }
@@ -1602,9 +1602,9 @@ function paintAgentFilter(): void {
     if (agentFilter === value) button.classList.add('is-sel');
     return button;
   };
-  buttons.push(chip(null, 'All'));
+  buttons.push(chip(null, '전체'));
   for (const agent of named) buttons.push(chip(agent, agent));
-  if (anyUnattributed) buttons.push(chip(UNATTRIBUTED, 'Unattributed'));
+  if (anyUnattributed) buttons.push(chip(UNATTRIBUTED, '대화 미확인'));
   box.replaceChildren(...buttons);
   box.hidden = false;
 }
@@ -1661,7 +1661,7 @@ function boundedTimeline(source: SessionEvent[]): { shown: SessionEvent[]; omitt
  * One Compact & Resume, folded out of the rows the recorder wrote for it.
  *
  * The recorder stores a compaction as it happened: the brief request typed into chat A, the
- * brief ChatGPT answered with, the app's own "handoff saved" line, and the bootstrap typed
+ * brief ChatGPT answered with, the app's own "이어가기 요약 저장됨" line, and the bootstrap typed
  * into chat B — four rows, three of them long, in an order that reflects when each was
  * observed rather than what they were. Read as a timeline they look like three separate
  * things going on; they are one thing with three steps, and this is that thing.
@@ -1806,23 +1806,23 @@ const ABANDONED_NOTE = /^Compact & Resume abandoned\s*[\u2014-]\s*/i;
  */
 function compactionState(block: CompactionBlock): { text: string; tone: CompactionTone } {
   const abandoned = [...block.notes].reverse().find((note) => ABANDONED_NOTE.test(note.message.text));
-  if (abandoned) return { text: `Failed — ${abandoned.message.text.replace(ABANDONED_NOTE, '')}`, tone: 'bad' };
+  if (abandoned) return { text: `실패 — ${abandoned.message.text.replace(ABANDONED_NOTE, '')}`, tone: 'bad' };
   const chars = block.handoff ? ` (${compactNumber(block.handoff.chars)} characters)` : '';
-  if (block.resume) return { text: `New chat opened at ${clockTime(block.resume.time)}${chars}`, tone: 'good' };
+  if (block.resume) return { text: `새 대화 열림: ${clockTime(block.resume.time)}${chars}`, tone: 'good' };
   if (block.handoff) {
     return block.moved
-      ? { text: `Summary saved${chars}, but no new chat was opened — the chat carried on here`, tone: 'bad' }
-      : { text: `Summary saved${chars} — opening the new chat…`, tone: 'wait' };
+      ? { text: `요약 저장됨${chars} · 새 대화를 열지 못해 기존 대화를 유지합니다`, tone: 'bad' }
+      : { text: `요약 저장됨${chars} · 새 대화 열기 중…`, tone: 'wait' };
   }
   if (block.brief?.final) {
     return block.moved
-      ? { text: 'Summary written, but the app never saved it — the chat carried on here', tone: 'bad' }
-      : { text: 'Summary written — saving the handoff…', tone: 'wait' };
+      ? { text: '요약을 작성했지만 앱에 저장하지 못했습니다. 기존 대화를 유지합니다.', tone: 'bad' }
+      : { text: '요약 작성 완료 — 저장 중…', tone: 'wait' };
   }
-  if (block.brief) return { text: 'ChatGPT is writing the summary…', tone: 'wait' };
+  if (block.brief) return { text: 'ChatGPT가 요약 작성 중…', tone: 'wait' };
   return block.moved
-    ? { text: 'No summary was written — the chat carried on here', tone: 'bad' }
-    : { text: 'Summary requested — waiting for ChatGPT…', tone: 'wait' };
+    ? { text: '요약이 작성되지 않아 기존 대화를 유지합니다.', tone: 'bad' }
+    : { text: '요약 요청 완료 — ChatGPT 응답 대기 중…', tone: 'wait' };
 }
 
 function compactionRow(block: CompactionBlock): HTMLElement {
@@ -1839,24 +1839,24 @@ function compactionRow(block: CompactionBlock): HTMLElement {
 
   const head = document.createElement('summary');
   head.append(icon('i-steps', 'ico tool-ico'));
-  head.append(el('b', '', 'Compact & Resume:'));
+  head.append(el('b', '', '요약 후 이어가기:'));
   head.append(el('span', 'state', state.text));
   box.append(head);
 
   const raw = el('div', 'raw');
   if (block.prompt) {
-    raw.append(el('h4', '', 'Brief request'));
+    raw.append(el('h4', '', '요약 요청'));
     // The routing marker is the app's, not the user's; the card already says what this is.
     const request = block.prompt.message.text.replace(CONTINUATION_MARKER, '');
     raw.append(textBlock('pre', request, block.prompt.message.truncated, block.prompt.message.chars));
   }
   if (block.brief) {
-    raw.append(el('h4', '', block.brief.final ? 'Summary' : 'Summary (still writing)'));
+    raw.append(el('h4', '', block.brief.final ? 'Summary' : '요약 (작성 중)'));
     raw.append(renderedMarkdown(block.brief.message.text));
   }
   if (block.handoff) {
     raw.append(
-      el('p', 'raw-facts', `Handoff saved — ${compactNumber(block.handoff.chars)} characters (${block.handoff.reason})`)
+      el('p', 'raw-facts', `이어가기 요약 저장됨 — ${compactNumber(block.handoff.chars)}자 (${block.handoff.reason})`)
     );
   }
   if (block.resume) {
@@ -1864,7 +1864,7 @@ function compactionRow(block: CompactionBlock): HTMLElement {
       el(
         'p',
         'raw-facts',
-        `Bootstrap sent into the new chat — ${compactNumber(block.resume.message.chars)} characters at ${clockTime(block.resume.time)}`
+        `새 대화에 이어가기 메시지 전송 — ${compactNumber(block.resume.message.chars)}자 · ${clockTime(block.resume.time)}`
       )
     );
   }
@@ -1976,7 +1976,7 @@ function groupToolRows(rows: HTMLElement[], scope = selectedId, groups = toolGro
     const latestHead = latest.querySelector('.tool > summary, .agent-communication > summary, .thinking-line');
     const label = latestHead?.querySelector('b, span:not(.agent-avatar)')?.textContent || 'Activity';
     group.querySelector('.activity-title')!.textContent = label;
-    group.querySelector('summary')!.title = `${end - i} actions · ${label}`;
+    group.querySelector('summary')!.title = `작업 ${end - i}개 · ${label}`;
     const symbol = latestHead?.querySelector('svg, .agent-avatar');
     group.querySelector('.activity-symbol')!.replaceChildren(...(symbol ? [symbol.cloneNode(true)] : []));
     reconcileChildren(group.lastElementChild!, rows.slice(i, end));
@@ -1992,7 +1992,7 @@ function paintDetail(followBottom = true): void {
   applyComposerSessionModel(selectedId ? `${selectedId}:${selectionGeneration}` : null, summary?.selectedModel ?? null);
   const config = deps.state()?.config;
   if (config) paintContextMeter(summary, config, confirmedComposerModel());
-  $('chatTitle').textContent = summary ? summary.title || 'Untitled session' : 'New chat';
+  $('chatTitle').textContent = summary ? summary.title || '제목 없는 세션' : '새 대화';
 
   paintDeliveryControls();
   paintAgentFilter();
@@ -2007,7 +2007,7 @@ function paintDetail(followBottom = true): void {
   const timelineRows: HTMLElement[] = [];
   if (selectedId && historyBefore !== null) {
     const navigation = el('div', 'timeline-window-note');
-    const latest = el('button', 'btn small', 'Back to latest');
+    const latest = el('button', 'btn small', '최신 기록으로');
     latest.dataset.history = 'latest';
     latest.addEventListener('click', () => void navigateHistory(null));
     navigation.append(latest);
@@ -2022,7 +2022,7 @@ function paintDetail(followBottom = true): void {
   recoveryStatus.hidden = !recovery || Date.now() - recovery.time > 120000 || (!!recoverySession && dismissedRecoveryNotices.get(recoverySession) === recoveryRevision);
   recoveryStatus.replaceChildren();
   if (!recoveryStatus.hidden && recovery?.kind === 'progress') recoveryStatus.append(icon('i-pulse'), el('span', 'queue-label', recovery.message.text),
-    dockAction('Dismiss recovery notice', 'i-x', () => {
+    dockAction('복구 알림 닫기', 'i-x', () => {
       if (recoverySession) dismissedRecoveryNotices.set(recoverySession, recoveryRevision);
       recoveryStatus.hidden = true; recoveryStatus.replaceChildren();
     }));
@@ -2054,23 +2054,23 @@ function paintDetail(followBottom = true): void {
 
   const facts: string[] = [];
   if (summary) {
-    facts.push(`${totalEvents} event${totalEvents === 1 ? '' : 's'}`);
-    if (events.length < totalEvents) facts.push(`showing a bounded page of ${events.length}`);
+    facts.push(`이벤트 ${totalEvents}개`);
+    if (events.length < totalEvents) facts.push(`현재 페이지 ${events.length}개 표시`);
     if (agentFilter !== null) {
-      facts.push(`filtered to ${agentFilter === UNATTRIBUTED ? 'unattributed' : agentFilter} — ${filtered.length} matched`);
+      facts.push(`${agentFilter === UNATTRIBUTED ? '대화 미확인' : agentFilter} 필터 · ${filtered.length}개 일치`);
     }
-    if (windowed.omitted > 0) facts.push(`${shown.length} newest rendered`);
-    facts.push(`~${compactNumber(summary.contextTokens)} rough current-chat context tokens`);
+    if (windowed.omitted > 0) facts.push(`최신 ${shown.length}개 표시`);
+    facts.push(`현재 대화 맥락 약 ${compactNumber(summary.contextTokens)}토큰(추정)`);
     const level = pressureOf(summary.id);
     if (level && level.level !== 'ok') {
       facts.push(
         level.level === 'huge'
-          ? 'past the compaction threshold — compact before continuing'
-          : 'large — compaction is worth doing soon'
+          ? '요약 기준 초과 — 이어가기 전에 요약하세요.'
+          : '대화가 깁니다 — 곧 요약하는 것이 좋습니다.'
       );
     }
     if (summary.lastTurnOutcome && summary.lastTurnOutcome !== 'completed') {
-      facts.push(`last turn ${TURN_OUTCOME_LABELS[summary.lastTurnOutcome]}`);
+      facts.push(`최근 턴 ${TURN_OUTCOME_LABELS[summary.lastTurnOutcome]}`);
     }
   }
   $('chatFoot').textContent = facts.join(' · ');
@@ -2092,7 +2092,7 @@ function paintHandoff(): void {
   if (handoff) {
     const parts: HTMLElement[] = [];
     const head = el('p', 'hint');
-    head.textContent = `${compactNumber(handoff.text.length)} characters · from ${handoff.sourceEvents} events (~${compactNumber(handoff.sourceTokens)} tokens) · ${ago(handoff.createdAt)}`;
+    head.textContent = `${compactNumber(handoff.text.length)}자 · 이벤트 ${handoff.sourceEvents}개 기반(약 ${compactNumber(handoff.sourceTokens)}토큰) · ${ago(handoff.createdAt)}`;
     parts.push(head);
     for (const note of handoff.notes) parts.push(el('p', 'hint is-warn', note));
     parts.push(el('pre', 'pre', handoff.text));
@@ -2121,8 +2121,8 @@ function paintStateLine(): void {
   const { text, tone } = stateLine();
   note.textContent = text;
   note.className = `subhead-note${tone ? ` ${tone}` : ''}`;
-  note.classList.toggle('is-working', text.startsWith('Working'));
-  if (visible && text.startsWith('Working for ')) durationTimer = window.setTimeout(paintStateLine, 1000);
+  note.classList.toggle('is-working', text.startsWith('작업 중'));
+  if (visible && text.startsWith('작업 중 · ')) durationTimer = window.setTimeout(paintStateLine, 1000);
   repaintBadges();
 }
 
@@ -2154,10 +2154,10 @@ function stateLine(): { text: string; tone: '' | 'is-live' | 'is-bad' } {
     const startedAt = summary.finishTurn?.turnId === turnId ? summary.finishTurn.startedAt
       : events.find(event => event.kind === 'turn_start' && event.turnId === turnId)?.time;
     const endedAt = events.find(event => event.kind === 'turn_end' && event.turnId === turnId)?.time;
-    if (startedAt === undefined) return { text: active ? 'Working…' : '', tone: '' };
+    if (startedAt === undefined) return { text: active ? '작업 중…' : '', tone: '' };
     if (!active && endedAt === undefined) return { text: '', tone: '' };
     const seconds = Math.max(0, Math.floor(((active ? Date.now() : endedAt!) - startedAt) / 1000));
-    return { text: `${active ? 'Working' : 'Worked'} for ${seconds >= 60 ? `${Math.floor(seconds / 60)}m ` : ''}${seconds % 60}s`, tone: '' };
+    return { text: `${active ? '작업 중' : '작업함'} · ${seconds >= 60 ? `${Math.floor(seconds / 60)}분 ` : ''}${seconds % 60}초`, tone: '' };
   }
   // Recording follows the conversation the browser can see. A tool call arrives over the
   // connector carrying nothing that identifies its caller, so work driven from the phone,
@@ -2166,7 +2166,7 @@ function stateLine(): { text: string; tone: '' | 'is-live' | 'is-bad' } {
   const selected = sessions.find((entry) => entry.id === selectedId) ?? null;
   if (selected && selected.conversationId === null) {
     return {
-      text: 'Work this app could not place in a chat — driven from another device, or with no ChatGPT tab open',
+      text: '대화를 확인하지 못한 작업입니다. 다른 기기에서 실행했거나 ChatGPT 탭이 열려 있지 않을 수 있습니다.',
       tone: ''
     };
   }
@@ -2175,21 +2175,21 @@ function stateLine(): { text: string; tone: '' | 'is-live' | 'is-bad' } {
   if (workers.length === 0) return { text: '', tone: '' };
   const count = (state: AgentState): number => workers.filter((agent) => agent.state === state).length;
   const parts: string[] = [];
-  if (count('active') > 0) parts.push(`${count('active')} working`);
+  if (count('active') > 0) parts.push(`${count('active')}개 작업 중`);
   // "invited" is a worker whose ChatGPT tab has been asked for but has not joined yet.
-  if (count('invited') > 0) parts.push(`${count('invited')} opening`);
+  if (count('invited') > 0) parts.push(`${count('invited')}개 열기 중`);
   // Detached is a live worker with no tab: its turn is running on OpenAI's servers and its
   // tool calls still arrive here, so it is counted among the working rather than the lost.
-  if (count('detached') > 0) parts.push(`${count('detached')} working with no tab`);
-  if (count('waking') > 0) parts.push(`${count('waking')} waking up`);
+  if (count('detached') > 0) parts.push(`${count('detached')}개 탭 없이 작업 중`);
+  if (count('waking') > 0) parts.push(`${count('waking')}개 재개 중`);
   // Said as "waiting" rather than counted with the finished ones: these are the run's reusable
   // chats, and the number the user wants is how much of the run is still available to it.
-  if (count('sleeping') > 0) parts.push(`${count('sleeping')} sleeping`);
-  if (count('finished') > 0) parts.push(`${count('finished')} finished`);
-  if (count('failed') > 0) parts.push(`${count('failed')} failed`);
+  if (count('sleeping') > 0) parts.push(`${count('sleeping')}개 대기 중`);
+  if (count('finished') > 0) parts.push(`${count('finished')}개 종료됨`);
+  if (count('failed') > 0) parts.push(`${count('failed')}개 실패`);
   const live = count('invited') + count('active') + count('detached') + count('waking');
   return {
-    text: `${workers.length === 1 ? '1 worker' : `${workers.length} workers`} · ${parts.join(' · ')}`,
+    text: `작업자 ${workers.length}개 · ${parts.join(' · ')}`,
     tone: count('failed') > 0 ? 'is-bad' : live > 0 ? 'is-live' : ''
   };
 }
@@ -2210,11 +2210,11 @@ async function showExtensionPath(): Promise<void> {
   const dir = await run(api.extensionPath());
   const node = $('extensionPath');
   if (dir) {
-    node.textContent = `Extension folder: ${dir}`;
+    node.textContent = `확장 폴더: ${dir}`;
     node.classList.remove('is-warn');
   } else {
     node.textContent =
-      'The extension folder is missing from this installation. Reinstall the app, or use the extension/ folder from a source checkout.';
+      '설치된 확장 폴더가 없습니다. 앱을 재설치하거나 소스의 extension/ 폴더를 사용하세요.';
     node.classList.add('is-warn');
     $<HTMLButtonElement>('bridgeFolder').disabled = true;
   }
@@ -2233,8 +2233,8 @@ function paintSwarm(state: SwarmState): void {
         'p',
         'hint',
         state.retainedHistory
-          ? 'No workers are running. Reusable worker histories are parked and remain available to their prime chats; Clear swarm permanently removes them.'
-          : 'No agents. The prime agent creates workers with the agents tool’s spawn action.'
+          ? '실행 중인 작업자가 없습니다. 기존 작업자는 주 에이전트가 다시 사용할 수 있습니다. 그룹을 초기화하면 작업자 연결 기록이 영구 삭제됩니다.'
+          : '에이전트가 없습니다. 주 에이전트가 agents 도구의 spawn으로 작업자를 만듭니다.'
       )
     );
   } else {
@@ -2257,13 +2257,13 @@ function paintSwarm(state: SwarmState): void {
           if (agent.runId) clear.dataset.runId = agent.runId;
           clear.title =
             agent.role === 'prime'
-              ? 'Clear session — ends this run and every worker in it'
-              : `Clear session — ends ${agent.id} and frees its slot`;
+              ? '실행 초기화 — 이 실행과 모든 작업자를 종료합니다.'
+              : `실행 초기화 — ${agent.id} 종료 후 슬롯 반환`;
           top.append(clear);
         }
         const sub = el('div', 'model-sub');
         const bits = [`${agent.pending} pending`, `${agent.delivered} delivered`];
-        if (agent.conversationId) bits.push('chat bound');
+        if (agent.conversationId) bits.push('대화 연결됨');
         sub.textContent = bits.join(' · ');
         row.append(top, sub);
         if (agent.task) row.append(el('p', 'hint', agent.task));
@@ -2339,14 +2339,15 @@ export function chatSettingsPatch(current: Config): {
       helperModel: $<HTMLSelectElement>('helperModel').value || current.goal.helperModel || 'gpt-5.6-sol',
       helperReasoning: ($<HTMLSelectElement>('helperReasoning').value || current.goal.helperReasoning || 'high') as Config['goal']['helperReasoning'],
       provider: {
-        kind: ($<HTMLSelectElement>('goalProvider').value || current.goal.provider?.kind || 'openrouter') as Config['goal']['provider']['kind'],
+        kind: $<HTMLSelectElement>('goalProvider').value === 'opencodex' ? 'custom'
+          : ($<HTMLSelectElement>('goalProvider').value || current.goal.provider?.kind || 'openrouter') as Config['goal']['provider']['kind'],
         baseUrl: $<HTMLInputElement>('goalBaseUrl').value
       },
       // The api-backend model is picked from the catalogue and never typed, except on a
       // custom endpoint whose id is typed in its own field instead. `current` is the
       // fallback for the first save after a repaint.
       model:
-        $<HTMLSelectElement>('goalProvider').value === 'custom'
+        $<HTMLSelectElement>('goalProvider').value !== 'openrouter'
           ? $<HTMLInputElement>('goalCustomModel').value.trim() || current.goal.model
           : goalModel || current.goal.model,
       reasoning: $<HTMLSelectElement>('goalReasoning').value as Config['goal']['reasoning'],
@@ -2373,6 +2374,12 @@ export function chatSettingsPatch(current: Config): {
  * `<select>` would have to hold several hundred options nobody asked for.
  */
 let goalModel = DEFAULT_GOAL_MODEL;
+const OPENCODEX_BASE_URL = 'http://127.0.0.1:10100/v1';
+/** A presentation preset for the official custom endpoint, never a third provider kind. */
+function goalProviderChoice(goal: Config['goal']): 'openrouter' | 'custom' | 'opencodex' {
+  if (goal.provider?.kind !== 'custom') return 'openrouter';
+  return goal.provider.baseUrl.trim().replace(/\/+$/, '') === OPENCODEX_BASE_URL ? 'opencodex' : 'custom';
+}
 /** The catalogue as far as it has been paged in, and how long it actually is. */
 let goalModels: Array<{ id: string; name: string; created: number; contextLength: number }> = [];
 let goalTotal = 0;
@@ -2380,7 +2387,7 @@ let goalLoading = false;
 
 /** The release date OpenRouter publishes, as a person would date a model. */
 function releasedOn(created: number): string {
-  if (!created) return 'release date not published';
+  if (!created) return '출시일 미공개';
   return new Date(created * 1000).toLocaleDateString(undefined, { year: 'numeric', month: 'short', day: 'numeric' });
 }
 
@@ -2397,14 +2404,14 @@ async function loadGoalModels(reset: boolean): Promise<void> {
     goalModels = [];
     goalTotal = 0;
   }
-  $('goalModelsState').textContent = 'Loading models from OpenRouter…';
+  $('goalModelsState').textContent = '선택한 공급자의 모델을 불러오는 중…';
   $<HTMLButtonElement>('goalMore').disabled = true;
   const page = await run(api.listGoalModels(goalModels.length));
   goalLoading = false;
   if (!page) {
     // `run` has already shown the reason. Say what it means *here*: the list is empty and
     // the model in use has not changed.
-    $('goalModelsState').textContent = 'OpenRouter could not be reached. The model in use is unchanged.';
+    $('goalModelsState').textContent = '선택한 공급자에 연결하지 못했습니다. 기존 모델 선택은 유지됩니다.';
     $<HTMLButtonElement>('goalMore').disabled = goalModels.length === 0;
     return;
   }
@@ -2435,7 +2442,7 @@ function paintGoalModels(): void {
   }
   const shown = goalModels.length;
   $('goalModelsState').textContent =
-    shown === 0 ? 'No models came back.' : `Showing the ${shown} newest of ${goalTotal}, newest release first.`;
+    shown === 0 ? '조회된 모델이 없습니다.' : `전체 ${goalTotal}개 중 최신 ${shown}개 표시 · 출시일 내림차순`;
   $<HTMLButtonElement>('goalMore').disabled = shown >= goalTotal;
   $<HTMLButtonElement>('goalMore').hidden = shown >= goalTotal;
   list.scrollTop = keep;
@@ -2447,7 +2454,7 @@ function paintGoalModels(): void {
 /**
  * Pages the catalogue in as the list is scrolled.
  *
- * "Load 20 more" is the deliberate way to ask; scrolling to the bottom is the way people
+ * "20개 더 보기" is the deliberate way to ask; scrolling to the bottom is the way people
  * actually ask. It fires a screenful early rather than at the exact bottom, so the next
  * twenty are usually already in place by the time the scroll arrives where they go.
  */
@@ -2483,7 +2490,7 @@ function applyGoal(state: AppState, previous?: Config): void {
   applyChatChecked($<HTMLInputElement>('goalIncludeToolCalls'), config.goal.includeToolCalls === true, previous?.goal.includeToolCalls);
   const automation = $<HTMLSelectElement>('chatAutomation');
   automation.disabled = !config.sessions.record;
-  automation.title = config.sessions.record ? 'Continue this chat automatically' : 'Enable session recording to use Goal or Loop';
+  automation.title = config.sessions.record ? '이 대화를 자동으로 계속 진행' : 'Goal·Loop를 사용하려면 대화 기록을 켜세요';
   paintAutomationSwitch();
   const secureStorageAvailable = state.secureStorage?.available ?? true;
   // This picker owns the last known OpenRouter selection. A custom deployment uses
@@ -2507,7 +2514,7 @@ function applyGoal(state: AppState, previous?: Config): void {
   // OpenRouter: a custom endpoint is often keyless, so a missing key never means custom.
   const customProvider = config.goal.provider?.kind === 'custom';
   const providerBaseUrl = config.goal.provider?.baseUrl ?? '';
-  applyChatValue($<HTMLSelectElement>('goalProvider'), customProvider ? 'custom' : 'openrouter', previous?.goal.provider?.kind);
+  applyChatValue($<HTMLSelectElement>('goalProvider'), goalProviderChoice(config.goal), previous ? goalProviderChoice(previous.goal) : undefined);
   applyChatValue($<HTMLInputElement>('goalBaseUrl'), providerBaseUrl, previous?.goal.provider?.baseUrl);
   applyChatValue($<HTMLInputElement>('goalCustomModel'), config.goal.model, previous?.goal.model);
   $('goalCustomPanel').hidden = !customProvider;
@@ -2516,23 +2523,23 @@ function applyGoal(state: AppState, previous?: Config): void {
   $('goalKeyField').hidden = customProvider;
   $('goalModelName').textContent = config.goal.model;
   const goalKey = $<HTMLInputElement>('goalKey');
-  goalKey.placeholder = state.hasGoalKey ? '•••••••• stored' : 'sk-or-v1-…';
+  goalKey.placeholder = state.hasGoalKey ? '•••••••• 저장됨' : 'sk-or-v1-…';
   goalKey.disabled = !secureStorageAvailable;
   $('goalKeyState').textContent = !secureStorageAvailable
-    ? (state.secureStorage?.detail ?? 'Secure credential storage is unavailable.')
+    ? (state.secureStorage?.detail ?? '운영체제의 보안 자격 증명 저장소를 사용할 수 없습니다.')
     : state.hasGoalKey
-      ? 'A key is stored with secure OS credential storage. Type a new one to replace it.'
-      : 'Stored with secure OS credential storage. It never leaves this app, and the browser is only ever handed the reply.';
+      ? '운영체제 보안 저장소에 키가 저장되어 있습니다. 새 키를 입력하면 교체됩니다.'
+      : '운영체제 보안 저장소에 저장하며 공급자 인증에만 사용합니다. 브라우저에는 생성된 답변만 전달합니다.';
   $('goalKeyState').classList.toggle('is-warn', !secureStorageAvailable);
   $<HTMLButtonElement>('goalKeyRemove').disabled = !state.hasGoalKey || !secureStorageAvailable;
   const goalCustomKey = $<HTMLInputElement>('goalCustomKey');
-  goalCustomKey.placeholder = state.hasCustomProviderKey ? '•••••••• stored' : 'leave empty for a keyless local server';
+  goalCustomKey.placeholder = state.hasCustomProviderKey ? '•••••••• 저장됨' : '키가 필요 없는 로컬 서버는 비워 두세요';
   goalCustomKey.disabled = !secureStorageAvailable;
   $('goalCustomKeyState').textContent = !secureStorageAvailable
-    ? (state.secureStorage?.detail ?? 'Secure credential storage is unavailable.')
+    ? (state.secureStorage?.detail ?? '운영체제의 보안 자격 증명 저장소를 사용할 수 없습니다.')
     : state.hasCustomProviderKey
-      ? 'A key is stored with secure OS credential storage. Type a new one to replace it.'
-      : 'Optional. Stored with secure OS credential storage and sent only by the app to your configured API endpoint. The browser receives only the reply.';
+      ? '운영체제 보안 저장소에 키가 저장되어 있습니다. 새 키를 입력하면 교체됩니다.'
+      : '선택 사항입니다. 보안 저장소에 저장하고 설정한 API 주소로만 전송합니다. 브라우저에는 생성된 답변만 전달합니다.';
   $('goalCustomKeyState').classList.toggle('is-warn', !secureStorageAvailable);
   $<HTMLButtonElement>('goalCustomKeyRemove').disabled = !state.hasCustomProviderKey || !secureStorageAvailable;
   if (goalModels.length > 0) paintGoalModels();
@@ -2543,44 +2550,44 @@ function wireGoal(save: () => Promise<void>): void {
   $('goalPromptEdit').addEventListener('click', () => {
     const panel = $('goalPromptPanel');
     panel.hidden = !panel.hidden;
-    $('goalPromptEdit').textContent = panel.hidden ? 'Edit prompt' : 'Close prompt';
+    $('goalPromptEdit').textContent = panel.hidden ? '지시문 편집' : '지시문 닫기';
     if (!panel.hidden) $<HTMLTextAreaElement>('goalPrompt').focus();
   });
   $('goalPromptReset').addEventListener('click', async () => {
     $<HTMLTextAreaElement>('goalPrompt').value = DEFAULT_GOAL_SYSTEM_PROMPT;
     await save();
-    toast('Goal prompt (no task) restored to default');
+    toast('별도 작업 없는 목표 지시문을 기본값으로 복원했습니다.');
   });
   $<HTMLTextAreaElement>('goalObjectivePrompt').maxLength = MAX_GOAL_SYSTEM_PROMPT_CHARS;
   $('goalObjectivePromptEdit').addEventListener('click', () => {
     const panel = $('goalObjectivePromptPanel');
     panel.hidden = !panel.hidden;
-    $('goalObjectivePromptEdit').textContent = panel.hidden ? 'Edit prompt' : 'Close prompt';
+    $('goalObjectivePromptEdit').textContent = panel.hidden ? '지시문 편집' : '지시문 닫기';
     if (!panel.hidden) $<HTMLTextAreaElement>('goalObjectivePrompt').focus();
   });
   $('goalObjectivePromptReset').addEventListener('click', async () => {
     $<HTMLTextAreaElement>('goalObjectivePrompt').value = DEFAULT_GOAL_OBJECTIVE_SYSTEM_PROMPT;
     await save();
-    toast('Goal prompt (with a task) restored to default');
+    toast('작업 지정 목표 지시문을 기본값으로 복원했습니다.');
   });
   $<HTMLTextAreaElement>('goalLoopPrompt').maxLength = MAX_GOAL_SYSTEM_PROMPT_CHARS;
   $('goalLoopPromptEdit').addEventListener('click', () => {
     const panel = $('goalLoopPromptPanel');
     panel.hidden = !panel.hidden;
-    $('goalLoopPromptEdit').textContent = panel.hidden ? 'Edit prompt' : 'Close prompt';
+    $('goalLoopPromptEdit').textContent = panel.hidden ? '지시문 편집' : '지시문 닫기';
     if (!panel.hidden) $<HTMLTextAreaElement>('goalLoopPrompt').focus();
   });
   $('goalLoopPromptReset').addEventListener('click', async () => {
     $<HTMLTextAreaElement>('goalLoopPrompt').value = DEFAULT_GOAL_LOOP_SYSTEM_PROMPT;
     await save();
-    toast('Loop prompt restored to default');
+    toast('반복 지시문을 기본값으로 복원했습니다.');
   });
   // The catalogue is fetched on the first press and kept afterwards: the picker closing is
   // not a reason to spend another round trip on a list that changes weekly.
   $('goalPick').addEventListener('click', () => {
     const panel = $('goalModels');
     panel.hidden = !panel.hidden;
-    $('goalPick').textContent = panel.hidden ? 'Select model' : 'Close';
+    $('goalPick').textContent = panel.hidden ? '모델 선택' : '닫기';
     if (!panel.hidden && goalModels.length === 0) void loadGoalModels(true);
   });
   $('goalMore').addEventListener('click', () => void loadGoalModels(false));
@@ -2592,7 +2599,7 @@ function wireGoal(save: () => Promise<void>): void {
     $('goalModelName').textContent = goalModel;
     paintGoalModels();
     void save();
-    toast(`Goal model set to ${goalModel}`);
+    toast(`목표·반복 모델: ${goalModel}`);
   });
   // On blur, like every other key in this app: not saved keystroke by keystroke, and the
   // field is emptied the moment it has been handed over.
@@ -2609,14 +2616,14 @@ function wireGoal(save: () => Promise<void>): void {
       // Clear only the exact value that successfully crossed the secret-store boundary.
       if (input.value === submitted) input.value = '';
       applyGoal(next);
-      toast('OpenRouter key stored');
+      toast('OpenRouter 키를 저장했습니다.');
     }
   });
   $('goalKeyRemove').addEventListener('click', async () => {
     const next = await run(api.setGoalKey(''));
     if (next) {
       applyGoal(next);
-      toast('OpenRouter key removed');
+      toast('OpenRouter 키를 삭제했습니다.');
     }
   });
   // Same blur-to-save discipline as the OpenRouter key above. Empty submits nothing:
@@ -2630,14 +2637,14 @@ function wireGoal(save: () => Promise<void>): void {
     if (next) {
       if (input.value === submitted) input.value = '';
       applyGoal(next);
-      toast('Custom provider key stored');
+      toast('직접 설정한 API 키를 저장했습니다.');
     }
   });
   $('goalCustomKeyRemove').addEventListener('click', async () => {
     const next = await run(api.setCustomProviderKey(''));
     if (next) {
       applyGoal(next);
-      toast('Custom provider key removed');
+      toast('직접 설정한 API 키를 삭제했습니다.');
     }
   });
 }
@@ -2648,8 +2655,8 @@ function wireGoal(save: () => Promise<void>): void {
  */
 function applyAutoCompactHint(config: Config): void {
   $('autoCompactHint').textContent = config.compaction.auto
-    ? 'Interrupts an active answer at this many tokens, writes a handoff, and opens a fresh chat.'
-    : 'Off — only the Compact & resume button in the ChatGPT tab compacts.';
+    ? '이 토큰 수에 도달하면 진행 중 응답을 멈추고 요약을 작성한 뒤 새 대화에서 이어갑니다.'
+    : '꺼짐 — ChatGPT 탭의 ‘요약 후 이어가기’ 버튼으로만 실행합니다.';
 }
 
 /**
@@ -2728,18 +2735,18 @@ export function chatApply(state: AppState, previous?: Config): void {
   $<HTMLButtonElement>('bridgeUnpair').disabled = !bridge.paired;
   const secureStorageAvailable = state.secureStorage?.available ?? true;
   $('bridgeState').textContent = !browserRequired
-    ? 'Browser-backed features are off. The extension is not needed right now.'
+    ? '브라우저 연동 기능이 꺼져 있어 지금은 확장이 필요하지 않습니다.'
     : !secureStorageAvailable
-      ? (state.secureStorage?.detail ?? 'Secure credential storage is unavailable, so the extension cannot pair safely.')
+      ? (state.secureStorage?.detail ?? '보안 자격 증명 저장소를 사용할 수 없어 확장을 안전하게 연결할 수 없습니다.')
     : !bridge.running
-      ? 'The local bridge is off even though recording or multi-agent mode needs it.'
+      ? '기록 또는 보조 에이전트에 필요한 로컬 브리지가 꺼져 있습니다.'
       : bridge.present
-        ? `Connected. Listening on 127.0.0.1:${bridge.port ?? '?'} · last message ${ago(bridge.lastSeenAt)}.`
+        ? `연결됨 · 127.0.0.1:${bridge.port ?? '?'} · 최근 수신 ${ago(bridge.lastSeenAt)}`
         : bridge.paired
-          ? `Authorized, but the browser extension is not currently connected. ${
-              bridge.lastSeenAt === null ? 'It has not checked in since this app started.' : `Last seen ${ago(bridge.lastSeenAt)}.`
+          ? `승인됨 · 현재 브라우저 확장은 연결되지 않았습니다. ${
+              bridge.lastSeenAt === null ? '앱 시작 이후 확장의 접속이 없습니다.' : `최근 접속 ${ago(bridge.lastSeenAt)}.`
             }`
-          : `Listening on 127.0.0.1:${bridge.port ?? '?'} · no browser is authorized or connected yet.`;
+          : `127.0.0.1:${bridge.port ?? '?'}에서 대기 중 · 승인·접속한 브라우저 없음`;
   $('bridgeState').classList.toggle('is-warn', browserRequired && (!bridge.present || !secureStorageAvailable));
   void showExtensionPath();
 
@@ -2821,7 +2828,7 @@ async function refreshInputQueue(): Promise<void> {
     ids.splice(ids.indexOf(from), 1);
     ids.splice(ids.indexOf(to) + Number(after), 0, from);
     const saved = await run(api.reorderQueuedInputs(queueSession, ids));
-    if (saved === false) toast('The queue changed during the move. Try again.');
+    if (saved === false) toast('이동 중 대기열이 변경됐습니다. 다시 확인하세요.');
     void refreshInputQueue();
   };
   const taskList = $('finishQueue'); taskList.hidden = queuedTasks.length === 0;
@@ -2832,18 +2839,18 @@ async function refreshInputQueue(): Promise<void> {
     if (dragging && existing) return existing;
     if (entry.state === 'queued' && existing?.classList.contains('is-editing')) return existing;
     const card = el('div', 'queued-input'); card.dataset.inputId = entry.id;
-    if (projectedIds.has(entry.id)) card.setAttribute('aria-label', 'Plan stage · waiting for the first message to be sent');
-    const label = el('span', 'queue-label', entry.text); label.title = `${entry.state === 'queued' ? (entry.mode === 'after-turn' ? 'After the next completed answer' : 'At Session finish or after a completed answer') : 'Awaiting receipt'} · ${entry.text}`;
+    if (projectedIds.has(entry.id)) card.setAttribute('aria-label', '계획 단계 · 첫 메시지 전송 대기');
+    const label = el('span', 'queue-label', entry.text); label.title = `${entry.state === 'queued' ? (entry.mode === 'after-turn' ? '다음 답변 완료 후' : 'Session finish 또는 답변 완료 후') : '수신 확인 대기'} · ${entry.text}`;
     card.append(icon('i-clock'), label);
     if (entry.state === 'queued') {
       const queueSessionSummary = sessions.find(row => row.id === selectedId);
       const modelSelection = queueSessionSummary?.selectedModel;
       if (entry.mode === 'finish' && modelSelection?.conversationId === queueSessionSummary?.conversationId && isAstraModel(modelSelection?.model, modelSelection?.reasoningEffort)) {
-        const delivery = el('button', 'btn queue-delivery', entry.afterTurn === true ? 'Also after turn' : 'Finish only') as HTMLButtonElement;
+        const delivery = el('button', 'btn queue-delivery', entry.afterTurn === true ? '답변 완료 후에도 전달' : '종료 도구에서만 전달') as HTMLButtonElement;
         delivery.type = 'button';
-        delivery.setAttribute('aria-label', 'Also send this task as a new message after Astra finishes its turn');
+        delivery.setAttribute('aria-label', 'Astra 답변 완료 후에도 이 작업을 새 메시지로 전달');
         delivery.setAttribute('aria-pressed', String(entry.afterTurn === true));
-        delivery.title = entry.afterTurn === true ? 'At Session Finish, or as a new message after verified turn completion' : 'Only inside the Session Finish tool result; never start a new turn';
+        delivery.title = entry.afterTurn === true ? 'Session Finish 또는 답변 완료가 확인된 뒤 새 메시지로 전달' : 'Session Finish 도구 결과 안에서만 전달하며 새 턴을 시작하지 않음';
         delivery.onclick = async () => {
           delivery.disabled = true;
           await run(api.editQueuedInput(entry.id, entry.text, entry.afterTurn !== true));
@@ -2853,7 +2860,7 @@ async function refreshInputQueue(): Promise<void> {
       }
       label.draggable = true;
       label.tabIndex = 0;
-      label.title = 'Drag to reorder. Alt + Up/Down also moves this task.';
+      label.title = '끌어서 순서를 바꾸거나 Alt + 위/아래를 누르세요.';
       label.ondragstart = event => {
         card.classList.add('is-dragging');
         event.dataTransfer?.setData('application/x-cos-queued-input', `${queueSession}:${entry.id}`);
@@ -2878,15 +2885,15 @@ async function refreshInputQueue(): Promise<void> {
         const next = ids[ids.indexOf(entry.id) + (event.key === 'ArrowDown' ? 1 : -1)];
         if (next) void reorder(entry.id, next, event.key === 'ArrowDown');
       };
-      const edit = dockAction('Edit queued task', 'i-pencil', () => {});
+      const edit = dockAction('대기 작업 편집', 'i-pencil', () => {});
       edit.onclick = () => {
-        const field = document.createElement('textarea'); field.value = entry.text; field.maxLength = 16000; field.setAttribute('aria-label', 'Queued task');
+        const field = document.createElement('textarea'); field.value = entry.text; field.maxLength = 16000; field.setAttribute('aria-label', '대기 작업');
         const contents = [...card.childNodes];
-        const save = el('button', 'btn', 'Save') as HTMLButtonElement; save.type = 'button';
+        const save = el('button', 'btn', '저장') as HTMLButtonElement; save.type = 'button';
         save.onclick = async () => {
           if (save.disabled) return;
           const value = field.value;
-          save.disabled = true; save.textContent = 'Saving…'; field.readOnly = true;
+          save.disabled = true; save.textContent = '저장 중…'; field.readOnly = true;
           try {
             const saved = await run(api.editQueuedInput(entry.id, value));
             if (!card.isConnected || selection !== selectionGeneration) return;
@@ -2896,13 +2903,13 @@ async function refreshInputQueue(): Promise<void> {
               entry.text = value.trim(); label.textContent = entry.text;
               card.classList.remove('is-editing'); card.replaceChildren(...contents);
               void refreshInputQueue();
-            } else if (saved === false) toast('This task is no longer queued and could not be edited.');
-          } catch (error) { toast(error instanceof Error ? error.message : 'Could not save this task.'); }
-          finally { save.disabled = false; save.textContent = 'Save'; field.readOnly = false; }
+            } else if (saved === false) toast('이미 대기열에서 처리된 작업이므로 편집하지 못했습니다.');
+          } catch (error) { toast(error instanceof Error ? error.message : '작업을 저장하지 못했습니다.'); }
+          finally { save.disabled = false; save.textContent = '저장'; field.readOnly = false; }
         };
         card.classList.add('is-editing'); card.replaceChildren(field, save); field.focus();
       };
-      const cancel = dockAction('Remove queued task', 'i-trash', () => {}); cancel.onclick = async () => { await run(api.cancelInput(entry.id)); void refreshInputQueue(); };
+      const cancel = dockAction('대기 작업 제거', 'i-trash', () => {}); cancel.onclick = async () => { await run(api.cancelInput(entry.id)); void refreshInputQueue(); };
       card.append(edit, cancel);
     }
     return card;
@@ -2924,7 +2931,7 @@ async function refreshInputQueue(): Promise<void> {
     if (!visibleInputIds.has(entry.id)) row.classList.add('is-entering');
     visibleInputIds.add(entry.id);
     if (visibleInputIds.size > 100) visibleInputIds.delete(visibleInputIds.values().next().value!);
-    const status = entry.error || (entry.state === 'failed' ? 'Delivery not confirmed' : entry.state === 'decision' ? 'Preparing follow-up' : entry.state === 'browser' ? 'Delivery confirmation pending' : entry.state === 'tool' ? 'Sent to the active turn · awaiting receipt' : entry.dueAt > Date.now() ? `Scheduled ${new Date(entry.dueAt).toLocaleString()}` : 'Queued');
+    const status = entry.error || (entry.state === 'failed' ? '전달 미확인' : entry.state === 'decision' ? '후속 지시 준비 중' : entry.state === 'browser' ? '전달 확인 대기 중' : entry.state === 'tool' ? '현재 턴에 전달됨 · 수신 확인 대기' : entry.dueAt > Date.now() ? `예약: ${new Date(entry.dueAt).toLocaleString()}` : 'Queued');
     const files = el('div', 'message-attachments');
     if (entry.attachments?.length) files.append(...entry.attachments.map(file => attachmentCard(file)));
     for (const image of entry.images ?? []) { const preview = document.createElement('img'); preview.src = image.dataUrl; preview.alt = image.name; files.append(preview); }
@@ -2939,13 +2946,13 @@ async function refreshInputQueue(): Promise<void> {
     receipt.hidden = !entry.error && ['sent', 'tool'].includes(entry.state) && hasLaterModelActivity(entry.deliveredAt ?? entry.offeredAt ?? entry.createdAt);
     row.append(receipt);
     if (notice(entry)) {
-      row.append(dockAction('Dismiss delivery notice', 'i-x', () => dismissInputNotice(entry.id)));
-      const retry = dockAction('Retry delivery', 'i-retry', () => {});
+      row.append(dockAction('전달 알림 닫기', 'i-x', () => dismissInputNotice(entry.id)));
+      const retry = dockAction('전달 다시 준비', 'i-retry', () => {});
       retry.classList.add('delivery-retry');
-      retry.title = 'Restore this message to the composer for review and sending';
+      retry.title = '메시지를 입력창으로 복원한 뒤 검토하고 전송';
       retry.onclick = () => {
         const input = $<HTMLTextAreaElement>('chatInput');
-        if (input.value.trim() || imageDrafts.get(draftKey())?.length) { toast('Send or clear your current draft before retrying this message.'); return; }
+        if (input.value.trim() || imageDrafts.get(draftKey())?.length) { toast('현재 작성 중인 메시지를 보내거나 지운 뒤 다시 시도하세요.'); return; }
         input.value = entry.text;
         if (entry.images?.length) imageDrafts.set(draftKey(), [...entry.images]);
         if (entry.attachments?.length) imageDrafts.set(draftKey(), [...(entry.images ?? []), ...entry.attachments]);
@@ -2955,7 +2962,7 @@ async function refreshInputQueue(): Promise<void> {
       row.append(retry);
     }
     if (['queued', 'browser'].includes(entry.state)) {
-      const cancel = dockAction('Cancel delivery', 'i-x', () => {});
+      const cancel = dockAction('전달 취소', 'i-x', () => {});
       cancel.onclick = async () => {
         cancel.disabled = true;
         const result = await run(api.cancelInput(entry.id));
@@ -2965,7 +2972,7 @@ async function refreshInputQueue(): Promise<void> {
       row.append(cancel);
     }
     if (entry.state === 'queued' && entry.error?.startsWith('Message queued. Browser startup failed:')) {
-      const retry = dockAction('Retry browser', 'i-retry', () => {});
+      const retry = dockAction('브라우저 다시 시도', 'i-retry', () => {});
       retry.classList.add('delivery-retry');
       retry.onclick = async () => { retry.setAttribute('disabled', ''); await run(api.retryInputBrowser(entry.id)); void refreshInputQueue(); };
       row.append(retry);
@@ -2976,14 +2983,14 @@ async function refreshInputQueue(): Promise<void> {
   for (const helper of pausedHelpers ?? []) {
     if (helper.sourceSessionId !== selectedId) continue;
     const row = el('div', 'queued-input');
-    row.append(el('span', '', 'Helper delivery was not confirmed. Its old chat may still be running.'));
-    const retry = el('button', 'btn', 'Start a new helper');
+    row.append(el('span', '', '보조 대화의 전달이 확인되지 않았습니다. 기존 대화가 아직 실행 중일 수 있습니다.'));
+    const retry = el('button', 'btn', '새 보조 대화 시작');
     retry.setAttribute('type', 'button');
     retry.onclick = async () => {
       retry.setAttribute('disabled', '');
       const accepted = await run(api.retryHelper(helper.id, helper.sourceSessionId));
-      if (accepted) toast('New helper authorized for this chat');
-      else toast('This helper has changed. Refreshing its status.');
+      if (accepted) toast('이 대화의 새 판단용 보조 대화가 승인되었습니다.');
+      else toast('보조 대화 상태가 바뀌어 다시 확인합니다.');
       void refreshInputQueue();
     };
     row.append(retry);
@@ -3003,7 +3010,7 @@ async function sendComposer(delivery?: 'finish', plan?: string[]): Promise<boole
   const key = draftKey();
   const projectId = selectedId ? sessions.find(row => row.id === selectedId)?.projectId ?? null : selectedProjectId;
   const images = imageDrafts.get(key) ?? [];
-  const text = plan?.[0] ?? (input.value.trim() || (images.length ? 'Please look at the attached files.' : ''));
+  const text = plan?.[0] ?? (input.value.trim() || (images.length ? '첨부 파일을 확인해 주세요.' : ''));
   if ($<HTMLButtonElement>('chatSend').disabled) return;
   if (!text) {
     const target = selectedId, selection = selectionGeneration;
@@ -3041,7 +3048,7 @@ async function sendComposer(delivery?: 'finish', plan?: string[]): Promise<boole
   if (discoveryGeneration !== composerDiscoveryGeneration || discoverySelection !== selectionGeneration || discoverySession !== selectedId ||
       input.value !== discoveryDraft || (imageDrafts.get(key) ?? []).some((image, index) => image !== images[index]) ||
       (imageDrafts.get(key)?.length ?? 0) !== images.length) return false;
-  if (!modelSettings) { toast('Model discovery could not confirm your selection. Choose an available model and thinking effort, then send again.'); return false; }
+  if (!modelSettings) { toast('선택한 모델을 확인하지 못했습니다. 사용 가능한 모델·추론 강도를 선택한 뒤 다시 전송하세요.'); return false; }
   const sessionId = selectedId;
   const generation = selectionGeneration;
   const chosenMode = delivery ?? $<HTMLSelectElement>('sendMode').value;
@@ -3120,7 +3127,7 @@ function selectSession(id: string): void {
   if (parent) expandedWorkers.add(parent);
   selectedProjectId = (parent ? sessions.find(row => row.id === parent)?.projectId : selected?.projectId) ?? null;
   if (selectedProjectId) collapsedProjects.delete(selectedProjectId);
-  $<HTMLTextAreaElement>('chatInput').placeholder = 'Ask anything…';
+  $<HTMLTextAreaElement>('chatInput').placeholder = '메시지를 입력하세요…';
   restoreDraft();
   detailFor = null;
   detailCursor = null;
@@ -3142,7 +3149,7 @@ function selectNewChat(projectId: string | null = null): void {
   if (!window.matchMedia?.('(prefers-reduced-motion: reduce)').matches) {
     $('composer').animate?.([{ opacity: 0.45 }, { opacity: 1 }], { duration: 150, easing: 'ease-out' });
   }
-  $<HTMLTextAreaElement>('chatInput').placeholder = projectId ? `Message in ${projects.find(project => project.id === projectId)?.name ?? 'project'}…` : 'Ask anything…';
+  $<HTMLTextAreaElement>('chatInput').placeholder = projectId ? `${projects.find(project => project.id === projectId)?.name ?? '프로젝트'}에 메시지 보내기…` : '메시지를 입력하세요…';
   $<HTMLTextAreaElement>('chatInput').focus();
 }
 
@@ -3150,7 +3157,7 @@ export function initChat(next: Deps): void {
   deps = next;
   const agentToggle = el('button', 'btn btn-icon', '◫') as HTMLButtonElement;
   agentToggle.id = 'agentPanelToggle'; agentToggle.type = 'button'; agentToggle.hidden = true;
-  agentToggle.setAttribute('aria-label', 'Toggle sub-agent side panel'); agentToggle.setAttribute('aria-expanded', 'false');
+  agentToggle.setAttribute('aria-label', '보조 에이전트 패널 표시 전환'); agentToggle.setAttribute('aria-expanded', 'false');
   $('themeBtn').before(agentToggle);
   const agentToolGroups = new Map<string, HTMLDetailsElement>();
   agentPanel = createAgentPanel({
@@ -3223,7 +3230,7 @@ export function initChat(next: Deps): void {
         const draft = objective.value, mode = $<HTMLSelectElement>('sessionObjectiveMode').value as 'goal' | 'loop';
         if (!draft.trim()) return;
         const settings = confirmedComposerModel();
-        if (!settings) { toast('Reload model choices and select an available model and thinking effort before sending.'); return; }
+        if (!settings) { toast('모델 목록을 새로고침하고 사용 가능한 모델·추론 강도를 선택한 뒤 전송하세요.'); return; }
         const selection = selectionGeneration, intent = goalIntentGeneration, requestId = crypto.randomUUID();
         const projectId = selectedProjectId;
         const { model, reasoningEffort } = settings;
@@ -3238,7 +3245,7 @@ export function initChat(next: Deps): void {
           const opening = result.ok ? result.data : null;
           if (!result.ok && current() && goalProgress?.requestId === requestId) goalProgress.error = result.error;
           if (!current()) { if (goalProgress?.requestId === requestId) { goalProgress.phase = 'paused'; paintGoalProgress(); } return; }
-          if (!opening) { if (goalProgress?.requestId === requestId) { goalProgress.phase = 'failed'; goalProgress.error ||= 'Opening message generation failed'; paintGoalProgress(); } return; }
+          if (!opening) { if (goalProgress?.requestId === requestId) { goalProgress.phase = 'failed'; goalProgress.error ||= '첫 메시지 생성 실패'; paintGoalProgress(); } return; }
           const dueAt = Date.now(), inputId = crypto.randomUUID();
           const entry: InputEntry = { id: inputId, sessionId: null, projectId, text: opening.reply, objective: draft.trim(), automation: mode,
             mode: 'auto', dueAt, model, reasoningEffort, state: 'queued', owner: null, createdAt: dueAt, conversationId: null };
@@ -3252,7 +3259,7 @@ export function initChat(next: Deps): void {
               if (selectionGeneration === selection && pendingNewInput?.id === inputId && automation.value !== mode)
                 await run(api.setInputAutomation(inputId, automation.value as InputAutomation));
               if (current()) objective.dataset.saved = draft;
-            } else if (goalProgress?.requestId === requestId) { goalProgress.phase = 'failed'; goalProgress.error = 'Opening message could not be queued'; }
+            } else if (goalProgress?.requestId === requestId) { goalProgress.phase = 'failed'; goalProgress.error = '첫 메시지를 대기열에 추가하지 못했습니다'; }
           } finally { startingInputs.delete(inputId); paintDeliveryControls(); void refreshInputQueue(); }
         } finally { delete button.dataset.busy; paintTaskActions(); }
         return;
@@ -3266,7 +3273,7 @@ export function initChat(next: Deps): void {
       const requestId = crypto.randomUUID(); goalProgress = { requestId, selection, phase: 'saving', text: '' }; paintGoalProgress();
       try {
         const saved = await run(api.setSessionObjective(id, text, mode));
-        if (goalProgress?.requestId === requestId) { goalProgress.phase = saved ? 'saved' : 'failed'; if (!saved) goalProgress.error = 'Task could not be saved'; paintGoalProgress(); }
+        if (goalProgress?.requestId === requestId) { goalProgress.phase = saved ? 'saved' : 'failed'; if (!saved) goalProgress.error = '작업을 저장하지 못했습니다'; paintGoalProgress(); }
         if (saved && selectedId === id && selectionGeneration === selection && objective.value === draft &&
             $<HTMLSelectElement>('sessionObjectiveMode').value === mode) { delete objective.dataset.edited; objective.dataset.saved = objective.value; }
       } finally {
@@ -3286,7 +3293,7 @@ export function initChat(next: Deps): void {
   const appendImages = (key: string, chosen: InputAttachment[] | null | undefined): void => {
     if (!chosen?.length) return;
     const combined = [...(imageDrafts.get(key) ?? []), ...chosen];
-    if (combined.length > 20 || combined.reduce((sum, file) => sum + ('size' in file ? file.size : 0), 0) > 512 * 1024 * 1024) { toast('Attach up to 20 files and 512 MB per message'); return; }
+    if (combined.length > 20 || combined.reduce((sum, file) => sum + ('size' in file ? file.size : 0), 0) > 512 * 1024 * 1024) { toast('메시지당 최대 20개 파일·512MB까지 첨부할 수 있습니다'); return; }
     imageDrafts.set(key, combined); if (draftKey() === key) paintComposerImages();
   };
   $('attachImages').addEventListener('click', async () => {
@@ -3314,7 +3321,7 @@ export function initChat(next: Deps): void {
     event.preventDefault();
     const files = Array.from(event.dataTransfer.files), key = draftKey();
     if (!files.length) { const text = event.dataTransfer.getData('text/plain'); if (text) { const file = await run(api.attachText(text)); if (file) appendImages(key, [file]); } return; }
-    if (files.length + (imageDrafts.get(key)?.length ?? 0) > 20) { toast('Attach up to 20 files per message'); return; }
+    if (files.length + (imageDrafts.get(key)?.length ?? 0) > 20) { toast('메시지당 최대 20개 파일까지 첨부할 수 있습니다'); return; }
     appendImages(key, await run(api.dropFiles(files)));
   });
   $('chatInput').addEventListener('paste', async event => {
@@ -3322,7 +3329,7 @@ export function initChat(next: Deps): void {
     if (!files.length) return;
     event.preventDefault();
     const key = draftKey();
-    if (files.length + (imageDrafts.get(key)?.length ?? 0) > 20) { toast('Attach up to 20 files per message'); return; }
+    if (files.length + (imageDrafts.get(key)?.length ?? 0) > 20) { toast('메시지당 최대 20개 파일까지 첨부할 수 있습니다'); return; }
     appendImages(key, await run(api.dropFiles(files)));
   });
   api.onWriteSession?.(id => { selectSession(id); $<HTMLTextAreaElement>('chatInput').focus(); });
@@ -3433,14 +3440,14 @@ export function initChat(next: Deps): void {
   $('copyHandoff').addEventListener('click', async () => {
     if (!handoff) return;
     const copied = await run(api.writeClipboard(handoff.text));
-    if (copied) toast('Handoff copied');
+    if (copied) toast('이어가기 요약을 복사했습니다.');
   });
 
   $('swarmReset').addEventListener('click', async () => {
     const state = await run(api.resetSwarm());
     if (state) {
       paintSwarm(state);
-      toast('Swarm cleared');
+      toast('에이전트 그룹을 초기화했습니다.');
     }
   });
 
@@ -3456,26 +3463,33 @@ export function initChat(next: Deps): void {
     paintSwarm(outcome.swarm);
     toast(
       outcome.cleared === 'run'
-        ? 'Run cleared — every worker ended'
+        ? '실행을 초기화하고 모든 작업자를 종료했습니다.'
         : outcome.cleared === 'worker'
-          ? `${id} cleared — its slot is free`
+          ? `${id} 초기화됨 — 실행 슬롯 반환`
           : outcome.reason
     );
   });
 
   for (const id of CHAT_INPUTS) {
-    $(id).addEventListener('change', () => void deps.save());
+    $(id).addEventListener('change', () => {
+      if (id === 'goalProvider' && $<HTMLSelectElement>('goalProvider').value === 'opencodex') {
+        $<HTMLInputElement>('goalBaseUrl').value = OPENCODEX_BASE_URL;
+        $<HTMLInputElement>('goalCustomModel').value = 'gpt-6-astra';
+        $<HTMLSelectElement>('goalReasoning').value = 'high';
+      }
+      void deps.save();
+    });
   }
 
   wireGoal(() => deps.save());
 
   $('bridgeUnpair').addEventListener('click', async () => {
     const state = await run(api.unpairExtension());
-    if (state) toast('Browser disconnected');
+    if (state) toast('브라우저 연결을 해제했습니다.');
   });
   $('bridgeFolder').addEventListener('click', async () => {
     const dir = await run(api.openExtensionFolder());
-    if (dir) toast('Extension folder opened');
+    if (dir) toast('확장 폴더를 열었습니다.');
   });
 
   api.onSessionChanged(scheduleReload);

@@ -9813,6 +9813,57 @@ describe('the Compact & resume control', () => {
     expect(compacts.some((message) => message.cancel === true)).toBe(false);
     expect(live.document.querySelector('.clf-pill-text')!.textContent).toContain('clear the message box');
   });
+  it.each(['recovers', 'still fails', 'user draft', 'dispatched'])(
+    'retries a transient empty-composer insertion only once before Send: %s', async (outcome) => {
+      let pendingJob: Record<string, any> | null = null;
+      let insertions = 0;
+      const job = {
+        sessionId: 's-auto-transient-insert', stage: 'handoff-pending', automatic: true,
+        busy: true, handoffId: null, error: null,
+        sourceSend: { state: 'not-attempted', messageId: null }
+      };
+      live = await harness(undefined, {
+        activity: () => ({ ok: true, data: {
+          entries: [], stream: [], nextSince: 0, pendingTools: 0, job: pendingJob
+        } }),
+        compact: (message) => {
+          if (message.sourceAttempt) return { ok: true, data: { allowed: true } };
+          if (message.sourceDispatch) {
+            job.sourceSend.state = 'dispatched-unresolved';
+            return { ok: true, data: { armed: true } };
+          }
+          pendingJob = job;
+          return { ok: true, data: {
+            started: true, token: 'tok-transient-insert', prompt: 'write the handoff brief', job
+          } };
+        }
+      });
+      live.hook.injectControl();
+      const document = live.document as Document & { execCommand: (...args: any[]) => boolean };
+      const originalExec = document.execCommand.bind(document);
+      document.execCommand = (...args: any[]) => {
+        if (args[0] === 'insertText' && (++insertions === 1 || outcome === 'still fails')) return false;
+        return originalExec(...args);
+      };
+      const sends = watchSend(document);
+      await live.hook.startCompact(true);
+      await settle();
+      expect(insertions).toBe(1);
+      expect(sends()).toBe(0);
+      if (outcome === 'user draft') document.querySelector('#prompt-textarea')!.textContent = 'my draft';
+      if (outcome === 'dispatched') job.sourceSend.state = 'dispatched-unresolved';
+      for (let poll = 0; poll < 4; poll++) {
+        live.advance(10_000);
+        await live.hook.pullActivity();
+        await settle();
+      }
+      expect(insertions).toBe(outcome === 'recovers' || outcome === 'still fails' ? 2 : 1);
+      expect(sends()).toBe(outcome === 'recovers' ? 1 : 0);
+      expect(live.sent.filter(message => message.type === 'compact' && message.sourceDispatch)).toHaveLength(outcome === 'recovers' ? 1 : 0);
+      expect(live.sent.some(message => message.type === 'compact' && (message.cancel || message.sourceLost))).toBe(false);
+      if (outcome === 'user draft') expect(composerText(document)).toBe('my draft');
+    }
+  );
 
   it('preserves a stale COS handoff draft including user edits and retires the unsent ticket', async () => {
     const pendingJob = {
@@ -12362,7 +12413,7 @@ describe('one live isolated-world recorder per document', () => {
 
     await expect(live.runtimeMessage({ type: 'clf-recorder-ping' })).resolves.toEqual({
       ok: true,
-      recorderVersion: 13
+      recorderVersion: 14
     });
   });
 

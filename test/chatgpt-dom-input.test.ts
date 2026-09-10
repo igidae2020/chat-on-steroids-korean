@@ -4,6 +4,7 @@ import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
 
 const source = readFileSync(new URL('../extension/chatgpt-dom.js', import.meta.url), 'utf8');
 interface DomApi {
+  insertPrompt(value: string, mode?: boolean | 'append'): boolean;
   composerActions(): { host: HTMLElement; before: HTMLElement | null } | null;
   generating(): boolean;
   sendButton(): HTMLButtonElement | null;
@@ -45,6 +46,32 @@ function user(text: string) {
   message.textContent = text;
   section.append(message); document.body.append(section);
 }
+
+describe('native composer insertion', () => {
+  it('places the native editing selection inside an empty editor before insertion', () => {
+    box.innerHTML = '<p><br></p>';
+    const outside = document.createElement('p'); outside.textContent = 'Earlier answer'; document.body.append(outside);
+    const selection = document.getSelection()!;
+    selection.selectAllChildren(outside);
+    box.focus = () => undefined; // Focus need not relocate the document selection.
+    document.execCommand = (_command, _ui, value) => {
+      if (!box.contains(selection.anchorNode)) return false;
+      box.textContent = value ?? ''; return true;
+    };
+    expect(api.insertPrompt('Exact handoff request')).toBe(true);
+    expect(box.textContent).toBe('Exact handoff request');
+    expect(outside.textContent).toBe('Earlier answer');
+  });
+
+  it('preserves an occupied draft and refuses disabled editors', () => {
+    const edit = vi.fn(); document.execCommand = edit;
+    expect(api.insertPrompt('handoff')).toBe(false);
+    expect(box.textContent).toBe('Exact app prompt');
+    box.textContent = ''; box.setAttribute('contenteditable', 'false');
+    expect(api.insertPrompt('handoff')).toBe(false);
+    expect(edit).not.toHaveBeenCalled();
+  });
+});
 
 describe('one native Send and bounded acceptance observation', () => {
   it.each([false, true])('retires only the unchanged accepted composer text (new draft: %s)', async edited => {

@@ -41,7 +41,7 @@
   //
   // So: publish a handle instead of a flag and let a replacement supersede a dead one. A
   // *healthy* incumbent still wins, so the ordinary static/recovery race is unchanged.
-  const RECORDER_VERSION = 13;
+  const RECORDER_VERSION = 14;
   const recorderHandle = {
     version: RECORDER_VERSION,
     healthy: () => false,
@@ -1532,6 +1532,7 @@
     commandJournalGate = false;
     nativeBusy = false;
     nativePhase = '';
+    nativePromptRetry = null;
     pressedAt = 0;
     localError = '';
     retirementHandledFor = null;
@@ -6418,6 +6419,8 @@
   /** Local phase of a ChatGPT-native compaction this tab is driving. '' when idle. */
   let nativePhase = '';
   /** Guards the whole native run: one press, one interrupt, one injected prompt. */
+  /** One reversible insertion retry per token/document, driven by the existing activity poll. */
+  let nativePromptRetry = null;
   let nativeBusy = false;
   /**
    * Which native run is the live one. Bumped by a press and by a cancel.
@@ -7954,9 +7957,18 @@
    */
   async function maybeResumePendingCompaction(forId = conversationId, forEpoch = epoch) {
     const source = job && job.stage === 'handoff-pending' ? job.sourceSend : null;
-    if (!source || nativeBusy || localError) return;
+    if (!source || nativeBusy) return;
     if (source.state !== 'not-attempted' && source.state !== 'attempted-unresolved') return;
     if (!alive || conversationId !== forId || epoch !== forEpoch || CLF_DOM.conversationId() !== forId) return;
+    if (localError) {
+      const retry = nativePromptRetry;
+      if (!retry || retry.used || retry.run !== nativeRun || Date.now() < retry.after ||
+          !CLF_DOM.composerSubmitReady()) return;
+      // An insertion that left the editor empty never crossed Send. Permit one later poll
+      // to collect that same durable ticket; repeated failures keep the app's existing,
+      // bounded pickup budget instead of spinning or requiring a document reload to retry.
+      retry.used = true;
+    }
     const automatic = job.automatic === true;
     // An automatic ticket is the app's decision about a chat nobody is necessarily looking at,
     // and a hidden tab is a throttled one: on 2026-09-03 the source page froze solid while the
@@ -8054,12 +8066,15 @@
       CLF_DOM.conversationId() === forId;
     let attemptCrossed = false;
     const automaticTicket = job && job.automatic === true;
-    const abandonBeforeSend = async (why, retireAutomatic = false) => {
+    const abandonBeforeSend = async (why, retireAutomatic = false, retryInsertion = false) => {
       if (!current()) return;
       nativeBusy = false;
       nativePhase = '';
       pressedAt = 0;
       localError = why;
+      if (automaticTicket && retryInsertion && nativePromptRetry?.token !== token) {
+        nativePromptRetry = { token, run: forRun, after: Date.now() + ACTIVITY_MS, used: false };
+      }
       // A transient page/DOM failure is not a verdict on an automatic ticket. Keep it on the
       // continuation WAL so the app's next pickup reload can collect the same work. A composer
       // already holding another draft is different: ChatGPT restores that draft across reloads,
@@ -8103,7 +8118,8 @@
           // hit this same refusal forever. Retire only this provably pre-Send ticket; the draft
           // itself stays untouched. Missing/replaced composer failures remain recoverable on the
           // existing WAL.
-          occupiedByOtherDraft
+          occupiedByOtherDraft,
+          !occupiedByOtherDraft && !(CLF_DOM.composer()?.textContent || '').trim()
         ));
       }
       await Promise.resolve();
@@ -9015,6 +9031,7 @@
     // be typing it into a transaction the next line is about to abort, which the app can only
     // read as a fresh continuation — so the one thing Cancel is for would have started another.
     nativeRun++;
+    nativePromptRetry = null;
     pressedAt = 0;
     nativeBusy = false;
     nativePhase = '';

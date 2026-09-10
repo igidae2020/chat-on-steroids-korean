@@ -1580,7 +1580,7 @@ describe('extension command delivery', () => {
   it('keeps a healthy current recorder and leaves Fiber repair to its on-demand path', async () => {
     const worker = loadWorker({ local: new FakeStorageArea(paired), session: new FakeStorageArea() });
     worker.tabsQuery.mockResolvedValueOnce([{ id: 41 }]);
-    worker.tabsSendMessage.mockResolvedValueOnce({ ok: true, recorderVersion: 13 });
+    worker.tabsSendMessage.mockResolvedValueOnce({ ok: true, recorderVersion: 14 });
     await worker.installed('update');
     expect(worker.tabsSendMessage).toHaveBeenCalledWith(41, { type: 'clf-recorder-ping' });
     expect(worker.scriptingExecuteScript).not.toHaveBeenCalled();
@@ -1691,7 +1691,7 @@ describe('extension command delivery', () => {
       if (scenario === 'disabled') box.disabled = true;
       if (scenario === 'missing-dom') delete page.CLF_DOM;
       if (scenario === 'navigation') page.location.href = 'https://chatgpt.com/';
-      if (scenario === 'healthy') page.__CLF_CONTENT_RECORDER__ = { version: 13, healthy: () => true };
+      if (scenario === 'healthy') page.__CLF_CONTENT_RECORDER__ = { version: 14, healthy: () => true };
       inspect(url, 12, Date.now() + (scenario === 'expired' ? -1 : 3000), true);
       expect(reload).toHaveBeenCalledTimes(scenario === 'idle' ? 1 : 0);
     });
@@ -1855,7 +1855,7 @@ describe('extension revival delivery', () => {
 
   const liveRecorder = async (_tabId: number, message: Record<string, unknown>) =>
     message.type === 'clf-recorder-ping'
-      ? { ok: true, recorderVersion: 13 }
+      ? { ok: true, recorderVersion: 14 }
       : { ok: true, claimed: true };
 
   it('scans before opening and routes to the oldest exact worker tab', async () => {

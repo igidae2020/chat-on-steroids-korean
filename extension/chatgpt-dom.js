@@ -1586,7 +1586,8 @@ var CLF_DOM = (() => {
   function insertPrompt(value, mode = false) {
     return safe(() => {
       const box = composer();
-      if (!box) return false;
+      if (!box || !box.isConnected || box.getAttribute('contenteditable') === 'false' ||
+          box.getAttribute('aria-disabled') === 'true') return false;
       const existing = (box.textContent || '').trim();
       if (existing !== '') {
         if (mode === false) return false;
@@ -1604,6 +1605,12 @@ var CLF_DOM = (() => {
         }
       }
       box.focus();
+      // Focus alone does not move a selection left in the transcript after Stop or
+      // a React remount. Native insertText acts on that selection, not on `box`.
+      const selection = document.getSelection();
+      if (!selection || composer() !== box || !box.isConnected) return false;
+      selection.selectAllChildren(box);
+      selection.collapseToEnd();
       // execCommand still produces the native editing path ChatGPT listens for. Newer
       // composer builds occasionally ignore its return value, so verify the DOM and
       // also emit input so React cannot miss the mutation.

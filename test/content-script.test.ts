@@ -1443,7 +1443,7 @@ async function replyFiber(
     );
     window.dispatchEvent(
       new window.MessageEvent('message', {
-        data: { source: 'clf-fiber-reply', nonce: event.data.nonce, scanToken, v: 10, scanOk: true, rows, turns: indexedTurns },
+        data: { source: 'clf-fiber-reply', nonce: event.data.nonce, scanToken, v: 11, scanOk: true, rows, turns: indexedTurns },
         source: window
       })
     );
@@ -1907,7 +1907,7 @@ describe('naming the agent behind a row', () => {
     }));
     await replyFiber([
       {
-        v: 10,
+        v: 11,
         index: 0,
         tool: 'run_command',
         path: null,
@@ -1946,7 +1946,7 @@ describe('naming the agent behind a row', () => {
  */
 describe('the calls a row folded away', () => {
   const FOLDED = {
-    v: 10,
+    v: 11,
     index: 0,
     tool: 'run_command',
     path: '/TobisComputer/mcp/run_command',
@@ -5917,7 +5917,7 @@ describe('a stop button that goes missing while the turn is still running', () =
           source: 'clf-fiber-reply',
           nonce: event.data.nonce,
           scanToken: event.data.nonce,
-          v: 10,
+          v: 11,
           scanOk: true,
           rows: [],
           turns: [{
@@ -7539,7 +7539,7 @@ describe('a page leaving the screen', () => {
  */
 describe('evidence from the page context', () => {
   const GOOD = {
-    v: 10,
+    v: 11,
     index: 0,
     tool: 'agent_status',
     path: '/TobisComputer/mcp/agent_status',
@@ -8496,7 +8496,7 @@ describe('evidence from the page context', () => {
             source: 'clf-fiber-reply',
             nonce: event.data.nonce,
             scanToken: event.data.nonce,
-            v: 10,
+            v: 11,
             scanOk: true,
             rows: [],
             turns: [
@@ -8603,7 +8603,7 @@ describe('evidence from the page context', () => {
             source: 'clf-fiber-reply',
             nonce: event.data.nonce,
             scanToken: event.data.nonce,
-            v: 10,
+            v: 11,
             scanOk: true,
             rows: [{ ...GOOD, tool: 'read' }],
             turns: []
@@ -12062,6 +12062,47 @@ app-owned prompt`,
     ]);
   });
 
+  it.each(['workingTurnId', 'turnExchangeId'] as const)('rejects an old audit final after a handoff with a different %s', async field => {
+    live = await harness(`https://chatgpt.com/c/${CHAT}`, {
+      activity: activityReply,
+      compact: () => ({ ok: true, data: { bound: true, stored: true, job: null } })
+    });
+    const [prompt, answer] = splitMarkedTurns();
+    const user = (prompt.messages as Record<string, unknown>[])[0]!;
+    const terminal = (answer.messages as Record<string, unknown>[])[0]!;
+    user[field] = 'new-handoff-exchange';
+    terminal[field] = 'previous-audit-exchange';
+    terminal.rawText = 'The previous audit could not complete. '.repeat(50);
+    await bindFiberTurns([
+      { section: assistantTurn(live.document, 'turn-prompt', []), turn: prompt },
+      { section: assistantTurn(live.document, 'turn-answer', []), turn: answer }
+    ]);
+    expect(live.sent.some(message => message.type === 'compact' && typeof message.summary === 'string')).toBe(false);
+  });
+
+  it('captures the matching handoff exchange after a stale audit response', async () => {
+    live = await harness(`https://chatgpt.com/c/${CHAT}`, {
+      activity: activityReply,
+      compact: () => ({ ok: true, data: { bound: true, stored: true, job: null } })
+    });
+    const [prompt, answer] = splitMarkedTurns();
+    const user = (prompt.messages as Record<string, unknown>[])[0]!;
+    const terminal = (answer.messages as Record<string, unknown>[])[0]!;
+    user.workingTurnId = user.turnExchangeId = 'handoff-exchange';
+    terminal.workingTurnId = terminal.turnExchangeId = 'handoff-exchange';
+    const stale = { ...answer, turnId: 'old-audit', endMessageId: 'old-final', messages: [{
+      ...terminal, messageId: 'old-final', rawMessageId: 'old-final',
+      workingTurnId: 'old-exchange', turnExchangeId: 'old-exchange', rawText: 'Unrelated audit result. '.repeat(70)
+    }] };
+    await bindFiberTurns([
+      { section: assistantTurn(live.document, 'turn-prompt', []), turn: prompt },
+      { section: assistantTurn(live.document, 'old-audit', []), turn: stale },
+      { section: assistantTurn(live.document, 'turn-answer', []), turn: answer }
+    ]);
+    expect(live.sent.filter(message => typeof message.summary === 'string').map(message => message.summary))
+      .toEqual(['TASK — continue the work.\nNEXT — run verification.']);
+  });
+
   it('waits while the turn after the marked prompt is still being written', async () => {
     live = await harness(`https://chatgpt.com/c/${CHAT}`, {
       activity: activityReply,
@@ -12321,7 +12362,7 @@ describe('one live isolated-world recorder per document', () => {
 
     await expect(live.runtimeMessage({ type: 'clf-recorder-ping' })).resolves.toEqual({
       ok: true,
-      recorderVersion: 12
+      recorderVersion: 13
     });
   });
 
@@ -14193,7 +14234,7 @@ describe('the goal loop', () => {
             source: 'clf-fiber-reply',
             nonce: event.data.nonce,
             scanToken,
-            v: 10,
+            v: 11,
             scanOk: true,
             rows: [],
             turns: [{
@@ -14276,7 +14317,7 @@ describe('the goal loop', () => {
             source: 'clf-fiber-reply',
             nonce: event.data.nonce,
             scanToken,
-            v: 10,
+            v: 11,
             scanOk: true,
             rows: [],
             turns: [{
@@ -15380,7 +15421,7 @@ describe('app Stop command uses current native turn proof', () => {
       if (event.data?.source !== 'clf-fiber-ask') return;
       section.setAttribute('data-clf-fiber-turn', `${event.data.nonce}:0`);
       window.dispatchEvent(new window.MessageEvent('message', { source: window, data: {
-        source: 'clf-fiber-reply', nonce: event.data.nonce, scanToken: event.data.nonce, v: 10, scanOk: true, rows: [],
+        source: 'clf-fiber-reply', nonce: event.data.nonce, scanToken: event.data.nonce, v: 11, scanOk: true, rows: [],
         turns: [{ ...terminal, index: 0, conversationId: 'aaaaaaaa-bbbb-cccc-dddd-eeeeeeeeeeee', messages: [{
           messageId: 'late-final-message', stable: true, rawText: 'First words and the complete final answer.', renderedHtml: '<p>First words and the complete final answer.</p>'
         }] }]
@@ -15419,7 +15460,7 @@ describe('app Stop command uses current native turn proof', () => {
       }
       section.setAttribute('data-clf-fiber-turn', `${event.data.nonce}:0`);
       window.dispatchEvent(new window.MessageEvent('message', { source: window, data: {
-        source: 'clf-fiber-reply', nonce: event.data.nonce, scanToken: event.data.nonce, v: 10, scanOk: true, rows: [],
+        source: 'clf-fiber-reply', nonce: event.data.nonce, scanToken: event.data.nonce, v: 11, scanOk: true, rows: [],
         turns: [{ ...terminal, index: 0, conversationId: 'aaaaaaaa-bbbb-cccc-dddd-eeeeeeeeeeee', endMessageId: next === 'retry' ? null : terminal.endMessageId }]
       } }));
     };

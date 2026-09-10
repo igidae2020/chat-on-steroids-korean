@@ -40,7 +40,7 @@
   'use strict';
 
   /** Bumped when the descriptor shape changes, so a stale pair cannot half-understand. */
-  const VERSION = 10;
+  const VERSION = 11;
   // The MAIN world survives an extension reload because the ChatGPT document survives it.
   // Recovery may therefore execute this file again in a page that still has an older helper
   // listener. Keep at most one listener for this protocol version; content.js rejects older
@@ -505,7 +505,9 @@
         stable,
         rawText,
         order: index,
-        createTime
+        createTime,
+        workingTurnId,
+        turnExchangeId
       });
       logicalIds.add(logicalId);
     }
@@ -536,6 +538,7 @@
       if (!id || !rawText) continue;
       if (seen.has(id)) continue;
       seen.add(id);
+      const meta = message.metadata && typeof message.metadata === 'object' ? message.metadata : null;
       out.push({
         id,
         messageId: id,
@@ -543,7 +546,9 @@
         stable: true,
         rawText,
         order: index,
-        createTime: authoredTime(message)
+        createTime: authoredTime(message),
+        workingTurnId: meta ? str(meta.working_turn_id) : null,
+        turnExchangeId: meta ? str(meta.turn_exchange_id) : null
       });
     }
     return out;
@@ -709,6 +714,9 @@
     }
 
     // One canonical record per model message whether or not HTML could be attached.
+    // A prior generation can finish below a newer user prompt after a remount. Carry the
+    // model's request exchange identity so the recorder need not infer reply ownership
+    // from DOM order or freshly assigned presentation turn ids.
     const out = [];
     for (let c = 0; c < assistantCandidates.length; c++) {
       out.push({
@@ -718,6 +726,8 @@
         stable: assistantCandidates[c].stable,
         order: assistantCandidates[c].order,
         createTime: assistantCandidates[c].createTime,
+        workingTurnId: assistantCandidates[c].workingTurnId,
+        turnExchangeId: assistantCandidates[c].turnExchangeId,
         rawText: assistantCandidates[c].rawText,
         renderedHtml: ''
       });
@@ -730,6 +740,8 @@
         stable: true,
         order: userCandidates[c].order,
         createTime: userCandidates[c].createTime,
+        workingTurnId: userCandidates[c].workingTurnId,
+        turnExchangeId: userCandidates[c].turnExchangeId,
         rawText: userCandidates[c].rawText,
         renderedHtml: ''
       });

@@ -41,7 +41,7 @@
   //
   // So: publish a handle instead of a flag and let a replacement supersede a dead one. A
   // *healthy* incumbent still wins, so the ordinary static/recovery race is unchanged.
-  const RECORDER_VERSION = 12;
+  const RECORDER_VERSION = 13;
   const recorderHandle = {
     version: RECORDER_VERSION,
     healthy: () => false,
@@ -2790,7 +2790,7 @@
   // 6: adds request-id ownership evidence used by deterministic MCP attribution.
   // 7: keys streaming commentary and native activity by ChatGPT thought/message identity,
   //    so React row replacement, raw text UUID rotation and refresh cannot mint duplicates.
-  const FIBER_VERSION = 10;
+  const FIBER_VERSION = 11;
   const FIBER_TIMEOUT_MS = 1500;
   const FIBER_MAX_ROWS = 400;
   /** Assistant turns whose per-call evidence is accepted from one scan. */
@@ -2969,6 +2969,8 @@
       const message = {
         messageId,
         rawMessageId: cap(entry.rawMessageId, 200),
+        workingTurnId: cap(entry.workingTurnId, 200),
+        turnExchangeId: cap(entry.turnExchangeId, 200),
         role: entry.role === 'user' ? 'user' : 'assistant',
         stable: entry.stable === true,
         order:
@@ -2993,7 +2995,8 @@
         continue;
       }
       const prior = messages[priorAt];
-      if (prior.rawText === rawText && prior.renderedHtml === renderedHtml) {
+      if (prior.rawText === rawText && prior.renderedHtml === renderedHtml &&
+          prior.workingTurnId === message.workingTurnId && prior.turnExchangeId === message.turnExchangeId) {
         if (message.stable) prior.stable = true;
         continue;
       }
@@ -8222,14 +8225,27 @@
    * *user* message means the reply this prompt opened is not on screen, which fails closed
    * rather than adopting somebody else's answer as the brief.
    */
-  function answerTurnFor(turns, index) {
+  function answerTurnFor(turns, index, prompt) {
+    // DOM order changes when an interrupted Pro response finishes after a queued user
+    // message. Provider exchange identity, when present, must agree with that prompt.
+    const belongs = (candidate) => {
+      const messages = (candidate.messages || []).filter(message => message.role === 'assistant');
+      const terminal = messages.find(message => message.rawMessageId === candidate.endMessageId ||
+        message.messageId === candidate.endMessageId);
+      const evidence = terminal ? [terminal] : messages;
+      return evidence.length > 0 && evidence.every(message =>
+        ['workingTurnId', 'turnExchangeId'].every(field => !prompt[field] || message[field] === prompt[field]));
+    };
     const turn = turns[index];
-    if (turn.endMessageId) return turn;
+    if (turn.endMessageId && belongs(turn)) return turn;
     for (let at = index + 1; at < turns.length; at++) {
       const next = turns[at];
       const messages = next.messages || [];
       if (messages.some((message) => message.role === 'user')) return null;
-      if (messages.some((message) => message.role === 'assistant') || (next.calls || []).length > 0) return next;
+      if (belongs(next)) return next;
+      // Older page models lack exchange metadata. Keep their historical positional
+      // association, but never use it to override a known prompt exchange.
+      if (!prompt.workingTurnId && !prompt.turnExchangeId && (next.calls || []).length > 0) return next;
     }
     return null;
   }
@@ -8248,7 +8264,7 @@
           kind: match[1],
           token: match[2],
           turn,
-          answer: answerTurnFor(turns, index),
+          answer: answerTurnFor(turns, index, message),
           messageId: message.rawMessageId || message.messageId
         };
         found.set(key, found.has(key) ? null : marked);

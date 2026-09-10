@@ -256,6 +256,8 @@ interface TurnEvidence {
     stable: boolean;
     order: number;
     createTime?: number | null;
+    workingTurnId?: string | null;
+    turnExchangeId?: string | null;
     rawText: string;
     renderedHtml: string;
   }>;
@@ -392,8 +394,8 @@ describe('reading a row out of the page', () => {
 
   it('keeps the version it was built for on the reply', async () => {
     const { version, rows } = await scan([row([request('req-1', 'read_file')])]);
-    expect(version).toBe(10);
-    expect(rows[0]!.v).toBe(10);
+    expect(version).toBe(11);
+    expect(rows[0]!.v).toBe(11);
   });
   it('counts only TobisComputer requests in the complete turn, not api_tool metadata calls', async () => {
     const mine1 = request('req-1', 'read_file');
@@ -628,6 +630,8 @@ describe('the calls a turn says it made', () => {
         stable: false,
         order: 3,
         createTime: null,
+        workingTurnId: null,
+        turnExchangeId: null,
         rawText: publicText,
         renderedHtml: ''
       }
@@ -648,6 +652,8 @@ describe('the calls a turn says it made', () => {
         stable: false,
         order: 0,
         createTime: null,
+        workingTurnId: null,
+        turnExchangeId: null,
         rawText: 'A plain live update.',
         renderedHtml: 'A plain live update.',
         sectionIndex: 0
@@ -776,6 +782,47 @@ describe('the calls a turn says it made', () => {
     expect(turns[0]!.messages[1]!.stable).toBe(false);
   });
 
+  it('preserves request exchange identity when an older answer renders after a new handoff prompt', async () => {
+    const priorExchange = '722314ef-09ed-4fc4-9330-d1dd2347c493';
+    const handoffExchange = '097bcac9-a32c-40d8-be39-8384aa050db0';
+    const prompt = authored('handoff-user', '[[CLF-HANDOFF:0123456789abcdef]]\nWrite the brief.', {
+      workingTurnId: handoffExchange, turnExchangeId: handoffExchange
+    });
+    prompt.author.role = 'user';
+    const oldAnswer = authored('audit-final', 'Audit completed.', {
+      workingTurnId: priorExchange, turnExchangeId: priorExchange,
+      status: 'finished_successfully', endTurn: true
+    });
+    const privateReasoning = authored('private-analysis', 'Private reasoning must not cross worlds.', {
+      channel: 'analysis', workingTurnId: priorExchange, turnExchangeId: priorExchange
+    });
+    const { turns } = await scan([], [
+      { id: 'new-handoff-dom-turn', messages: [prompt] },
+      { id: 'freshly-remounted-audit-dom-turn', messages: [privateReasoning, oldAnswer] }
+    ]);
+
+    expect(turns.map(turn => turn.messages.map(message => ({
+      role: message.role, workingTurnId: message.workingTurnId, turnExchangeId: message.turnExchangeId
+    })))).toEqual([
+      [{ role: 'user', workingTurnId: handoffExchange, turnExchangeId: handoffExchange }],
+      [{ role: 'assistant', workingTurnId: priorExchange, turnExchangeId: priorExchange }]
+    ]);
+    expect(JSON.stringify(turns)).not.toContain('Private reasoning');
+  });
+
+  it('does not coerce malformed request exchange metadata into identity evidence', async () => {
+    const user = authored('user-malformed', 'Write the brief.');
+    user.author.role = 'user';
+    const assistant = authored('assistant-malformed', 'Final answer.');
+    for (const message of [user, assistant]) {
+      message.metadata!.working_turn_id = { value: 'not-an-id' };
+      message.metadata!.turn_exchange_id = 42;
+    }
+    const { turns } = await scan([], [{ id: 'turn-malformed-exchange', messages: [user, assistant] }]);
+    expect(turns[0]!.messages.map(message => [message.workingTurnId, message.turnExchangeId]))
+      .toEqual([[null, null], [null, null]]);
+  });
+
   it('captures the opening user message from the page model before the DOM exposes a message id', async () => {
     const opening: Message = {
       id: 'user-opening-model-id',
@@ -794,6 +841,8 @@ describe('the calls a turn says it made', () => {
         stable: true,
         order: 0,
         createTime: 1_787_165_000_125,
+        workingTurnId: null,
+        turnExchangeId: null,
         rawText: 'first prompt before DOM identity',
         renderedHtml: ''
       }

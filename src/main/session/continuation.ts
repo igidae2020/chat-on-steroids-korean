@@ -88,7 +88,7 @@ import {
 export const CONTINUATION_TTL_MS = 10 * 60_000;
 
 /**
- * How long an automatic handover may run once it has actually been asked for.
+ * How long any handover may run once it has actually been asked for.
  *
  * An auto-compaction ticket has no clock while it is only intended: the chat may be mid-turn
  * for hours before it is safe to ask for the brief. But from the moment the brief request is
@@ -173,7 +173,7 @@ interface Continuation {
   from: string;
   openedAt: number;
   /**
-   * Last sign that this handoff is still being worked, which is what the manual deadline runs on.
+   * Last sign of progress; the manual pre-dispatch deadline runs on this stamp.
    *
    * The ten-minute clock is a limit on *waiting*, and it used to be measured from `openedAt` — so
    * a brief that ChatGPT was still writing was indistinguishable from one nobody had touched. On a
@@ -181,14 +181,14 @@ interface Continuation {
    * happened next: the running generation was declared dead and auto-compaction then treated the
    * compaction itself as an eligible turn, stopped it, and started another one.
    *
-   * Renewed only by real forward progress. A token that has genuinely gone quiet for a full TTL
-   * still expires, so this lengthens nothing for a stalled handoff.
+   * Renewed only by real forward progress. After dispatch, askedAt owns expiration instead:
+   * neither output growth nor a reload can extend the six-hour handover limit.
    */
   touchedAt: number;
   sourceProgress: number;
   /** Auto-compaction ticket: survives page/retry clocks until commit or explicit Off/cancel. */
   automatic: boolean;
-  /** When the brief request first went on its way; the automatic clock starts here. */
+  /** When the brief request first went on its way; every dispatched handover starts its clock here. */
   askedAt: number | null;
   state: ContinuationState;
   /** The brief, once captured. Handed to whoever opens chat B, and to nothing else. */
@@ -439,14 +439,15 @@ const handoffAsked = (entry: Pick<ContinuationRecord, 'state' | 'sourceSend'>): 
   entry.sourceSend?.state === 'sent';
 
 /**
- * Whether a nonterminal continuation has outlived its wait. A manual one gets
- * CONTINUATION_TTL_MS from opening; an automatic one has no clock until it is asked for and
- * AUTOMATIC_HANDOVER_TTL_MS from then.
+ * Whether a nonterminal continuation has outlived its wait. Before dispatch, a manual
+ * request gets CONTINUATION_TTL_MS from progress and an automatic ticket has no clock.
+ * Once dispatched, both use the immutable askedAt handover deadline: Pro may reason for
+ * more than ten minutes without publishing any public text to renew touchedAt.
  */
 const expired = (entry: Continuation, now = Date.now()): boolean =>
-  entry.automatic
-    ? entry.askedAt !== null && now - entry.askedAt >= AUTOMATIC_HANDOVER_TTL_MS
-    : now - entry.touchedAt >= CONTINUATION_TTL_MS;
+  entry.askedAt !== null
+    ? now - entry.askedAt >= AUTOMATIC_HANDOVER_TTL_MS
+    : !entry.automatic && now - entry.touchedAt >= CONTINUATION_TTL_MS;
 
 const isOpen = (entry: Continuation): boolean =>
   entry.state !== 'committed' && entry.state !== 'aborted' && !expired(entry);
@@ -853,8 +854,8 @@ export async function bindContinuationSourceMessageNow(token: string, messageId:
     if (!entry || !isOpen(entry) || entry.state !== 'awaiting-summary') return false;
     if (entry.sourceSend.state === 'sent') {
       if (entry.sourceSend.messageId !== messageId) return false;
-      // Only growth of this exact marked response renews the manual waiting deadline.
-      // Persist at most twice a minute; unchanged snapshots and a spinner alone buy no time.
+      // Keep exact response progress without extending the immutable dispatch deadline.
+      // Persist at most twice a minute; unchanged snapshots and a spinner add no evidence.
       if (!entry.automatic && Number.isSafeInteger(progress) && progress! > entry.sourceProgress &&
           progress! <= 4_000_000 && Date.now() - entry.touchedAt >= 30_000) {
         await transitionNow(entry, current => ({ ...current, sourceProgress: progress! }));
@@ -1479,8 +1480,7 @@ export async function restoreContinuations(snapshot: ContinuationSnapshot | null
       raw.from.length === 0 || raw.from.length > 256 ||
       !validStates.has(raw.state) ||
       !Number.isFinite(raw.openedAt) ||
-      ((raw.state === 'committed' || raw.state === 'aborted') && now - (Number.isFinite(raw.touchedAt) && raw.touchedAt! <= now ? raw.touchedAt! : raw.openedAt) >= CONTINUATION_TTL_MS * 2) ||
-      (raw.automatic !== true && now - (Number.isFinite(raw.touchedAt) && raw.touchedAt! <= now ? raw.touchedAt! : raw.openedAt) >= CONTINUATION_TTL_MS * 2)
+      ((raw.state === 'committed' || raw.state === 'aborted') && now - (Number.isFinite(raw.touchedAt) && raw.touchedAt! <= now ? raw.touchedAt! : raw.openedAt) >= CONTINUATION_TTL_MS * 2)
     ) {
       continue;
     }

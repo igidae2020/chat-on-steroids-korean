@@ -973,10 +973,10 @@ describe('the swarm handover', () => {
 });
 
 describe('restart lifetime recovery', () => {
-  it('persists the automatic handover deadline in the dispatch WAL and preserves it after restart', async () => {
+  it.each([true, false])('persists the dispatched handover deadline across restart (automatic=%s)', async (automatic) => {
     vi.useFakeTimers();
     const summary = await createSession({ title: 'dispatch deadline survives restart', conversationId: CHAT_A });
-    const opened = await openContinuationNow(summary.id, CHAT_A, true);
+    const opened = await openContinuationNow(summary.id, CHAT_A, automatic);
     expect((await beginContinuationSourceSendNow(opened.token))?.allowed).toBe(true);
     const durable = await import('../src/main/durable.js');
     const writes = vi.spyOn(durable, 'writeDurableNow');
@@ -988,6 +988,9 @@ describe('restart lifetime recovery', () => {
     const saved = structuredClone(writes.mock.calls.findLast(([name]) => name === 'continuations')![1]) as
       ReturnType<typeof snapshotContinuations>;
     expect(saved.entries.find(entry => entry.token === opened.token)?.askedAt).toBe(askedAt);
+
+    vi.setSystemTime(askedAt + 11 * 60_000);
+    expect(compactingConversation(CHAT_A)?.token).toBe(opened.token);
 
     vi.setSystemTime(askedAt + 2 * 60 * 60_000);
     resetContinuationsForTests();
@@ -1004,6 +1007,22 @@ describe('restart lifetime recovery', () => {
     vi.setSystemTime(askedAt + AUTOMATIC_HANDOVER_TTL_MS);
     expect(compactingConversation(CHAT_A)).toBeNull();
     expect(continuationForSession(summary.id)).toBeNull();
+  });
+
+  it('does not revive an explicitly cancelled manual handover within its dispatch lifetime', async () => {
+    vi.useFakeTimers();
+    const session = await createSession({ title: 'cancelled manual handover', conversationId: CHAT_A });
+    const opened = await openContinuationNow(session.id, CHAT_A);
+    await beginContinuationSourceSendNow(opened.token);
+    await dispatchContinuationSourceSendNow(opened.token);
+    await bindContinuationSourceMessageNow(opened.token, 'cancelled-handoff-user');
+    abortContinuation(opened.token, 'user cancelled');
+    const saved = snapshotContinuations();
+    resetContinuationsForTests();
+    await restoreContinuations(saved);
+    expect(continuationByToken(opened.token)?.state).toBe('aborted');
+    expect(await bindContinuationSourceMessageNow(opened.token, 'cancelled-handoff-user')).toBe(false);
+    expect(compactingConversation(CHAT_A)).toBeNull();
   });
 
   it('gives up an automatic handover that never lands, so the source chat gets its tools back', async () => {
@@ -1084,7 +1103,9 @@ describe('restart lifetime recovery', () => {
           sessionId: summary.id,
           from: CHAT_A,
           to: CHAT_B,
-          openedAt: now - CONTINUATION_TTL_MS - 1,
+          openedAt: now - AUTOMATIC_HANDOVER_TTL_MS - 1,
+          askedAt: now - AUTOMATIC_HANDOVER_TTL_MS - 1,
+          touchedAt: now,
           state: 'committing',
           summary: SAMPLE_BRIEF,
           handoffId: null,
@@ -1588,17 +1609,18 @@ describe('the window in which a replacement chat is expected', () => {
  * auto-compaction treated the compaction itself as an eligible turn, stopped it, and started
  * another one on top.
  *
- * The renewal is deliberately not a longer timeout. A chat that has genuinely gone quiet still
- * expires on the original clock, which the second test here is for.
+ * Exact output remains useful progress evidence, but cannot extend the immutable dispatch
+ * deadline. Long reasoning without public output gets the same bounded lifetime as automatic work.
  */
 describe('an exact handoff response owns its waiting deadline', () => {
-  it('survives growing output and restart but expires after unchanged snapshots', async () => {
+  it('survives growing output and restart without extending its dispatch deadline', async () => {
     vi.useFakeTimers();
     try {
       const session = await createSession({ title: 'long handoff', conversationId: CHAT_A });
       const opened = await openContinuationNow(session.id, CHAT_A);
       await beginContinuationSourceSendNow(opened.token);
       await dispatchContinuationSourceSendNow(opened.token);
+      const askedAt = Date.now();
       await bindContinuationSourceMessageNow(opened.token, 'exact-user-message');
       vi.setSystemTime(Date.now() + CONTINUATION_TTL_MS - 60_000);
       expect(await bindContinuationSourceMessageNow(opened.token, 'wrong-message', 500)).toBe(false);
@@ -1611,7 +1633,7 @@ describe('an exact handoff response owns its waiting deadline', () => {
       await restoreContinuations(snapshot);
       expect(continuationByToken(opened.token)?.state).toBe('awaiting-summary');
       expect(await bindContinuationSourceMessageNow(opened.token, 'exact-user-message', 500)).toBe(true);
-      vi.setSystemTime(Date.now() + CONTINUATION_TTL_MS);
+      vi.setSystemTime(askedAt + AUTOMATIC_HANDOVER_TTL_MS);
       expect(continuationByToken(opened.token)?.state).toBe('aborted');
       expect(await bindContinuationSourceMessageNow(opened.token, 'exact-user-message', 1000)).toBe(false);
     } finally { vi.useRealTimers(); }

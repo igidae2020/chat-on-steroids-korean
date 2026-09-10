@@ -15,7 +15,7 @@
 import { RELEASE_REPOSITORY } from '../shared/types.js';
 
 export { RELEASE_REPOSITORY, DISTRIBUTION_LABEL } from '../shared/types.js';
-export const APP_VERSION = '2.0.8';
+export const APP_VERSION = '2.0.9';
 
 /**
  * Standalone extension recovery must stay on the app's own release. Using GitHub's moving
@@ -69,4 +69,6 @@ export function extensionDownloadUrl(version = APP_VERSION): string {
  */
 // 13 — native file attachments require exact claimed-input chunk delivery and final
 // draft ownership. A 12 companion would silently send text without these files.
-export const BRIDGE_PROTOCOL = 13;
+// 14 — sourceLost must durably abort an unsent compaction instead of being treated
+// as an ordinary compact request by a 13 app. Update the app and companion together.
+export const BRIDGE_PROTOCOL = 14;

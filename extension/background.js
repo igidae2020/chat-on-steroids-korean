@@ -40,7 +40,7 @@ const MODEL_REQUEST_TIMEOUT_MS = 190_000;
 /** The reason a deadline aborts with, so it is a fact the caller can act on rather than prose. */
 const TIMED_OUT = 'the app took too long to answer';
 /** Bumped only when the request/response shape changes; the app compares it. */
-const BRIDGE_PROTOCOL = 13;
+const BRIDGE_PROTOCOL = 14;
 
 /**
  * Journal caps. The byte figure is what actually matters — chrome.storage.session has a
@@ -3567,18 +3567,19 @@ function recoverDeferredRevivals() {
 /** Runs in the existing isolated world; it installs no recorder, observer or listener. */
 function idleRecorderDocument(expectedUrl, expectedVersion, deadlineAt, reload) {
   try {
+    const noReload = () => reload ? { reloaded: false, url: location.href } : null;
     if (Date.now() >= deadlineAt || location.href !== expectedUrl || document.readyState !== 'complete' ||
-        typeof CLF_DOM === 'undefined') return null;
+        typeof CLF_DOM === 'undefined') return noReload();
     const incumbent = globalThis.__CLF_CONTENT_RECORDER__;
-    if (incumbent && incumbent.version >= expectedVersion && incumbent.healthy?.() === true) return null;
+    if (incumbent && incumbent.version >= expectedVersion && incumbent.healthy?.() === true) return noReload();
     const box = CLF_DOM.composer();
     if (!box || !box.isConnected || !CLF_DOM.composerVisible() || box.disabled || box.readOnly ||
         box.getAttribute('aria-disabled') === 'true' || box.getAttribute('contenteditable') === 'false' ||
         String(box.value || box.textContent || '').trim() || CLF_DOM.hasComposerAttachments() ||
-        CLF_DOM.generating() || CLF_DOM.stopButton()) return null;
+        CLF_DOM.generating() || CLF_DOM.stopButton()) return noReload();
     // A queued script can execute after its worker-side timeout. Expiry and every
     // native-page precondition are checked in this same task before native reload.
-    if (Date.now() >= deadlineAt || location.href !== expectedUrl) return null;
+    if (Date.now() >= deadlineAt || location.href !== expectedUrl) return noReload();
     if (reload) location.reload();
     return { idle: true, url: expectedUrl };
   } catch { return null; }
@@ -3613,18 +3614,26 @@ async function restoreChatgptTab(id) {
     }));
     const proof = Array.isArray(results) && results.length === 1 ? results[0] : null;
     if (!proof || proof.frameId !== 0 || typeof proof.documentId !== 'string' || !proof.documentId ||
-        proof.result?.idle !== true || proof.result.url !== tab.url || recoveryReloads.get(id) === proof.documentId) return false;
+        proof.result?.idle !== true || proof.result.url !== tab.url || recoveryReloads.get(id)?.documentId === proof.documentId) return false;
     const current = await chrome.tabs.get(id);
     if (!current || current.pendingUrl || current.status !== 'complete' || current.url !== tab.url ||
+        recoveryReloads.get(id)?.documentId === proof.documentId ||
         (knownDocument && (tabDocuments[key] !== knownDocument || tabEpochs[key] !== knownEpoch)) ||
         (tabDocuments[key] && tabDocuments[key] !== proof.documentId)) return false;
-    recoveryReloads.set(id, proof.documentId);
-    await boundedRecoveryCall(() => chrome.scripting.executeScript({
+    const reservation = { documentId: proof.documentId };
+    recoveryReloads.set(id, reservation);
+    const outcome = await boundedRecoveryCall(() => chrome.scripting.executeScript({
       // tabs.reload has no document fence. Recheck and reload synchronously inside
       // only the proven document, so navigation/draft changes cannot consume proof.
       target: { tabId: id, documentIds: [proof.documentId] }, func: idleRecorderDocument,
       args: [tab.url, PAGE_RECORDER_VERSION, Date.now() + 3000, true]
     }));
+    const result = Array.isArray(outcome) && outcome.length === 1 ? outcome[0] : null;
+    // Only an exact synchronous no-action receipt releases this attempt. A timeout,
+    // rejected injection or unrelated/late document result stays spent, never replayable.
+    if (result?.frameId === 0 && result.documentId === proof.documentId &&
+        result.result?.reloaded === false && result.result.url === tab.url &&
+        recoveryReloads.get(id) === reservation) recoveryReloads.delete(id);
   } catch { /* Missing native idle proof leaves the user's exact tab untouched. */ }
   // Static manifest startup and the new document's registration own continuation.
   // A reload response is neither a live recorder nor a delivery receipt.

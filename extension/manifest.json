@@ -1,7 +1,7 @@
 {
   "manifest_version": 3,
   "name": "Chat On Steroids companion",
-  "version": "2.0.8",
+  "version": "2.0.9",
   "description": "ChatGPT 대화를 로컬 Chat On Steroids 앱에 기록하고 MCP 도구 호출의 실제 작업 내용을 표시합니다.",
   "minimum_chrome_version": "116",
   "permissions": [

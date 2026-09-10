@@ -1,5 +1,18 @@
 # Changelog
 
+## [2.0.9] — 2026-09-10
+
+**한국어 · OpenCodex 배포판 — 공식 2.0.8 기반**
+
+- 기존 ChatGPT 문서에 전체 코드를 다시 주입하는 복구 경로를 제거하고, 정확한 문서와 유휴 상태를 재확인하는 제한된 재로드로 교체.
+- 탭 응답 대기 제한, 이전 DOM 감시 해제, 전송 직전 입력창 검사와 React 원본 메시지 구조를 보존하는 접기 표시.
+- 응답 차례 ID와 요약 전송 시각을 유지하고, 미전송 요약만 취소하며 동일 차례의 실패한 자동 요약 반복을 방지.
+- 전송 허가와 취소의 체크포인트 대기열을 직렬화하고, 확정적으로 재로드하지 않은 문서만 복구 예약 해제.
+- 앱·확장 프로토콜 14로 갱신. 새 앱과 함께 제공되는 확장을 사용해야 함.
+- 한국어 UI와 OpenCodex 모델·추론 선택을 유지. 한국어판 배포 번호와 공식 기준 버전을 분리해 자동 동기화 시 버전 충돌을 방지.
+
+See [the release notes](docs/release-notes/v2.0.9.md). Existing 2.0.8 artifacts are unchanged.
+
 All notable changes to this project are documented here.
 
 This project is in **beta** despite its version number. Behavior may still change between

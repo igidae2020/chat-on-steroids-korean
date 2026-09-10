@@ -87,7 +87,7 @@ const {
   resetGoalStateForTests,
   setGoalObjective
 } = await import('../src/main/goal.js');
-const { makeTempDir, removeTempDir, SAMPLE_BRIEF } = await import('./helpers.js');
+const { faultGate, makeTempDir, removeTempDir, SAMPLE_BRIEF } = await import('./helpers.js');
 
 let dir: string;
 
@@ -144,6 +144,72 @@ async function readyContinuation(): Promise<{ sessionId: string; token: string }
 }
 
 describe('capturing the brief', () => {
+  it('serializes a source claim, pre-send abort and dispatch queued behind the same checkpoint', async () => {
+    const summary = await createSession({ title: 'source checkpoint queue', conversationId: CHAT_A });
+    const ticket = await openContinuationNow(summary.id, CHAT_A, true);
+    const durable = await import('../src/main/durable.js');
+    const write = durable.writeDurableNow;
+    const claimGate = faultGate();
+    vi.spyOn(durable, 'writeDurableNow').mockImplementationOnce(async (...args) => {
+      await claimGate.hold();
+      return write(...args);
+    });
+    const refuse = store.refuseAutomaticCompactionNow;
+    const abortGate = faultGate();
+    vi.spyOn(store, 'refuseAutomaticCompactionNow').mockImplementationOnce(async (...args) => {
+      await abortGate.hold();
+      return refuse(...args);
+    });
+    const claim = beginContinuationSourceSendNow(ticket.token);
+    await claimGate.entered;
+    const abort = abortContinuationSourceBeforeSendNow(ticket.token, 'handoff_never_sent');
+    const dispatch = dispatchContinuationSourceSendNow(ticket.token);
+    try {
+      claimGate.release();
+      expect((await claim)?.allowed).toBe(true);
+      await abortGate.entered;
+      // Both callers queued while claim owned the token. Dispatch must remain behind
+      // the entire abort, including its separate session-summary durability await.
+      abortGate.release();
+      expect(await abort).toBe(true);
+      expect(await dispatch).toBe(false);
+      expect(continuationByToken(ticket.token)).toMatchObject({
+        state: 'aborted', sourceSend: { state: 'attempted-unresolved' }
+      });
+    } finally {
+      claimGate.release(); abortGate.release();
+      await Promise.allSettled([claim, abort, dispatch]);
+    }
+  });
+
+  it('continues a checkpoint queue after failure without blocking another token', async () => {
+    const first = await createSession({ title: 'failed claim', conversationId: CHAT_A });
+    const second = await createSession({ title: 'independent claim', conversationId: CHAT_B });
+    const a = await openContinuationNow(first.id, CHAT_A);
+    const b = await openContinuationNow(second.id, CHAT_B);
+    const durable = await import('../src/main/durable.js');
+    const gate = faultGate();
+    vi.spyOn(durable, 'writeDurableNow').mockImplementationOnce(async () => {
+      await gate.hold();
+      throw new Error('checkpoint disk failure');
+    });
+    const firstClaim = beginContinuationSourceSendNow(a.token);
+    const rejected = expect(firstClaim).rejects.toThrow('checkpoint disk failure');
+    await gate.entered;
+    const nextClaim = beginContinuationSourceSendNow(a.token);
+    try {
+      // Completion here while A is held proves serialization is token-local.
+      expect((await beginContinuationSourceSendNow(b.token))?.allowed).toBe(true);
+      gate.release();
+      await rejected;
+      expect((await nextClaim)?.allowed).toBe(true);
+      expect(await dispatchContinuationSourceSendNow(a.token)).toBe(true);
+    } finally {
+      gate.release();
+      await Promise.allSettled([firstClaim, nextClaim]);
+    }
+  });
+
   it('keeps a pre-send automatic refusal across restart, scoped to its original turn', async () => {
     const summary = await createSession({ title: 'refused turn', conversationId: CHAT_A });
     await store.appendEvent(summary.id, { time: 1, source: 'extension', kind: 'turn_start', turnId: 'refused' });

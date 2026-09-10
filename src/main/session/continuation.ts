@@ -756,9 +756,10 @@ export async function openContinuationNow(
 }
 
 async function withCheckpointLock<T>(token: string, work: () => Promise<T>): Promise<T> {
-  const prior = checkpointLocks.get(token);
-  if (prior) await prior.catch(() => undefined);
-  const current = work();
+  const prior = checkpointLocks.get(token) ?? Promise.resolve();
+  // Reserve the queue position before yielding. Awaiting the old owner first lets
+  // several waiters start together, allowing pre-send abort to race an approved Send.
+  const current = prior.then(work, work);
   checkpointLocks.set(token, current);
   try {
     return await current;

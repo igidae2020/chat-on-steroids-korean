@@ -39,8 +39,8 @@ describe('extension release metadata', () => {
     expect(lock.version).toBe(APP_VERSION);
     expect(lock.packages?.['']?.version).toBe(APP_VERSION);
     expect(manifest.version).toBe(APP_VERSION);
-    expect(BRIDGE_PROTOCOL).toBe(13);
-    expect(backgroundSource).toContain('const BRIDGE_PROTOCOL = 13;');
+    expect(BRIDGE_PROTOCOL).toBe(14);
+    expect(backgroundSource).toContain('const BRIDGE_PROTOCOL = 14;');
   });
 
   /**
@@ -1586,6 +1586,88 @@ describe('extension command delivery', () => {
     expect(worker.scriptingExecuteScript).not.toHaveBeenCalled();
     expect(worker.scriptingInsertCSS).not.toHaveBeenCalled();
     expect(worker.tabsReload).not.toHaveBeenCalled();
+  });
+
+  it('releases only a proven no-reload reservation after a final native draft race', async () => {
+    const url = 'https://chatgpt.com/c/aaaaaaaa-bbbb-4ccc-8ddd-eeeeeeeeeeee';
+    const reload = vi.fn();
+    const box = { isConnected: true, textContent: '', getAttribute: () => null };
+    const page = { CLF_DOM: { composer: () => box, composerVisible: () => true,
+      hasComposerAttachments: () => false, generating: () => false, stopButton: () => null },
+      document: { readyState: 'complete' }, location: { href: url, reload }, Date };
+    const code = backgroundSource.slice(backgroundSource.indexOf('function idleRecorderDocument('),
+      backgroundSource.indexOf('\nasync function boundedRecoveryCall('));
+    const inspect = vm.runInNewContext(`${code}\nidleRecorderDocument`, page);
+    const worker = loadWorker({ local: new FakeStorageArea(paired), session: new FakeStorageArea(),
+      tabsGet: async () => ({ id: 41, url, status: 'complete' }) });
+    worker.tabsQuery.mockResolvedValue([{ id: 41, url, status: 'complete' }]);
+    let first = true;
+    worker.scriptingExecuteScript.mockImplementation(async request => {
+      if (request.args.at(-1) && first) { first = false; box.textContent = 'user draft'; }
+      return [{ frameId: 0, documentId: 'old-document', result: inspect(...request.args) }];
+    });
+    await worker.installed('update');
+    expect(reload).not.toHaveBeenCalled();
+    expect(box.textContent).toBe('user draft');
+    box.textContent = '';
+    await worker.installed('update');
+    expect(reload).toHaveBeenCalledTimes(1);
+    expect(worker.scriptingExecuteScript).toHaveBeenCalledTimes(4);
+    expect(worker.tabsCreate).not.toHaveBeenCalled();
+  });
+
+  it.each(['rejected', 'lost', 'other-document', 'wrong-url', 'timeout'])(
+    'keeps the reload attempt spent after a final %s response', async scenario => {
+    let late: ((value: unknown) => void) | undefined;
+    try {
+      const url = 'https://chatgpt.com/c/aaaaaaaa-bbbb-4ccc-8ddd-eeeeeeeeeeee';
+      const worker = loadWorker({ local: new FakeStorageArea(paired), session: new FakeStorageArea(),
+        tabsGet: async () => ({ id: 41, url, status: 'complete' }) });
+      worker.tabsQuery.mockResolvedValue([{ id: 41, url, status: 'complete' }]);
+      let attempts = 0;
+      worker.scriptingExecuteScript.mockImplementation(async request => {
+        if (!request.args.at(-1)) return [{ frameId: 0, documentId: 'old-document', result: { idle: true, url } }];
+        attempts++;
+        if (scenario === 'rejected') throw new Error('injection rejected');
+        if (scenario === 'timeout') return new Promise(resolve => { late = resolve; });
+        if (scenario === 'lost') return null;
+        return [{ frameId: 0, documentId: scenario === 'other-document' ? 'other' : 'old-document',
+          result: { reloaded: false, url: scenario === 'wrong-url' ? 'https://chatgpt.com/' : url } }];
+      });
+      await worker.installed('update');
+      // onInstalled is a void listener; the fixture only drains immediate tasks.
+      // Let the actual bounded final call expire before supplying its late receipt.
+      if (scenario === 'timeout') await new Promise(resolve => setTimeout(resolve, 3100));
+      late?.([{ frameId: 0, documentId: 'old-document', result: { reloaded: false, url } }]);
+      await Promise.resolve();
+      await worker.installed('update');
+      expect(attempts).toBe(1);
+      expect(worker.tabsCreate).not.toHaveBeenCalled();
+      expect(worker.tabsReload).not.toHaveBeenCalled();
+    } finally { late?.([]); }
+  });
+
+  it('elects only one reload when concurrent recovery checks await the same current tab', async () => {
+    const url = 'https://chatgpt.com/c/aaaaaaaa-bbbb-4ccc-8ddd-eeeeeeeeeeee';
+    const tab = { id: 41, url, status: 'complete' };
+    const gates: Array<(value: typeof tab) => void> = [];
+    let checks = 0;
+    const executeScript = vi.fn(async _request => [{ frameId: 0, documentId: 'same-document',
+      result: { idle: true, url } }]);
+    const code = backgroundSource.slice(backgroundSource.indexOf('async function boundedRecoveryCall('),
+      backgroundSource.indexOf('\nasync function restoreOpenChatgptTabs('));
+    const restore = vm.runInNewContext(`${code}\nrestoreChatgptTab`, {
+      setTimeout, clearTimeout, Date, Map, PAGE_RECORDER_VERSION: 12,
+      tabDocuments: {}, tabEpochs: {}, idleRecorderDocument: () => {}, isChatGptUrl: () => true,
+      chrome: { tabs: { sendMessage: async () => null,
+        get: async () => ++checks <= 2 ? tab : new Promise(resolve => { gates.push(resolve); }) },
+        scripting: { executeScript } }
+    });
+    const first = restore(41), second = restore(41);
+    await vi.waitFor(() => expect(gates).toHaveLength(2));
+    for (const resolve of gates) resolve(tab);
+    await Promise.all([first, second]);
+    expect(executeScript.mock.calls.filter(([request]) => request.args.at(-1) === true)).toHaveLength(1);
   });
 
   it.each(['idle', 'draft', 'attachment', 'generating', 'stop', 'hidden', 'disabled', 'missing-dom', 'navigation', 'healthy', 'expired'])

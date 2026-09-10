@@ -143,6 +143,7 @@ import {
 import {
   abortContinuation,
   abortContinuationNow,
+  abortContinuationSourceBeforeSendNow,
   attachSummary,
   beginContinuationDestinationSendNow,
   beginContinuationSourceSendNow,
@@ -2112,7 +2113,10 @@ async function handle(req: http.IncomingMessage, res: http.ServerResponse): Prom
         // The generation this chat currently has open, if it has one. A content script that
         // has just been reloaded into a turn already in flight adopts this instead of
         // minting a second id for the same run. See liveConversations().
-        activeTurnId: hasActivityDeadline && !activityCurrent ? null : live.activeTurnId ?? null,
+        // Activity expiry is not a lifecycle end. The replacement page needs this durable
+        // identity even after restart/silence to report the exact final and close the turn;
+        // hiding it leaves /goal/draft waiting on an open turn the page cannot adopt.
+        activeTurnId: live.activeTurnId ?? null,
         // A revival names an existing worker conversation. The extension, which alone can
         // inspect Chrome's real tab set, routes it to that tab before it considers opening one.
         // Returning the same inert id here makes a live page the fast path; /status remains the
@@ -2221,6 +2225,29 @@ async function handle(req: http.IncomingMessage, res: http.ServerResponse): Prom
     }
     const id = conversationId(body['conversationId']);
     if (!id) return json(res, 400, { error: 'bad_conversation_id' }, origin);
+    if (body['sourceLost'] === true) {
+      const entry = continuationByToken(checkpointToken);
+      if (!entry || entry.from !== id) return json(res, 409, { error: 'no_such_continuation' }, origin);
+      let aborted = false;
+      try {
+        aborted = await abortContinuationSourceBeforeSendNow(checkpointToken, 'handoff_never_sent');
+      } catch (err) {
+        logWarn(
+          `bridge: could not durably abandon the unsent source handoff for ${entry.sessionId} — ${err instanceof Error ? err.message : String(err)}`
+        );
+        return json(
+          res,
+          503,
+          { error: 'source_abort_not_durable', retryable: true, sessionId: entry.sessionId, job: resumeJobFor(entry.sessionId) },
+          origin
+        );
+      }
+      if (!aborted) return json(res, 409, { error: 'source_send_not_releasable' }, origin);
+      compactionWatch.delete(id);
+      if (repairsInFlight.get(id)?.reason === 'compaction') repairsInFlight.delete(id);
+      changed();
+      return json(res, 200, { aborted: true, sessionId: entry.sessionId, job: resumeJobFor(entry.sessionId) }, origin);
+    }
     // The last durable write before the click, quoting the claim handed out above. A false
     // answer means this document was reclaimed while it was composing and must submit nothing.
     if (body['sourceDispatch'] === true) {
@@ -6052,7 +6079,7 @@ async function inspectOwedCompactions(now: number): Promise<boolean> {
       compactionWatch.delete(entry.from);
       if (repairsInFlight.get(entry.from)?.reason === 'compaction') repairsInFlight.delete(entry.from);
       try {
-        await abortContinuationNow(entry.token, 'handoff_never_sent');
+        if (!await abortContinuationSourceBeforeSendNow(entry.token, 'handoff_never_sent')) continue;
         logWarn(
           `bridge: compaction ticket ${entry.token.slice(0, 8)} for ${entry.from} was never sent after ${schedule.attempts} pickups — giving up`
         );

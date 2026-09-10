@@ -1552,6 +1552,128 @@ describe('automatic compaction', () => {
     expect(continuationForSession(session!.id)).toBeNull();
   });
 
+  it('durably ends an automatic ticket when the source page proves the handoff never reached Send', async () => {
+    await pair();
+    const conversationId = 'a1a1a1a1-0000-4000-8000-00000000ac08';
+    await request('POST', '/events', {
+      body: {
+        conversationId,
+        events: [{ kind: 'user_message', time: Date.now(), text: 'composer rejected the handoff', messageId: 'm-auto-lost' }]
+      }
+    });
+    const filed = await request('POST', '/compact', {
+      body: { conversationId, ticket: true, automatic: true }
+    });
+    const token = filed.body.token as string;
+    expect((await request('POST', '/compact', { body: { conversationId, token, sourceAttempt: true } })).body.allowed).toBe(true);
+
+    const lost = await request('POST', '/compact', { body: { conversationId, token, sourceLost: true } });
+    expect(lost.status).toBe(200);
+    expect(lost.body.aborted).toBe(true);
+    expect(continuationByToken(token)).toMatchObject({ state: 'aborted', error: 'handoff_never_sent' });
+    expect(continuationForSession(filed.body.sessionId as string)).toBeNull();
+    expect((await request('POST', '/compact', { body: { conversationId, token, sourceDispatch: true } })).status).toBe(409);
+  });
+
+  it('keeps custody of an uncertain source dispatch and rejects refusal from another conversation', async () => {
+    await pair();
+    const conversationId = 'a1a1a1a1-0000-4000-8000-00000000ac0a';
+    await request('POST', '/events', { body: { conversationId, events: [
+      { kind: 'user_message', time: Date.now(), text: 'handoff custody', messageId: 'm-custody' }
+    ] } });
+    const filed = await request('POST', '/compact', { body: { conversationId, ticket: true, automatic: true } });
+    const token = filed.body.token as string;
+    const foreign = await request('POST', '/compact', { body: {
+      conversationId: 'a1a1a1a1-0000-4000-8000-00000000ac0b', token, sourceLost: true
+    } });
+    expect(foreign.status).toBe(409);
+    expect((await request('POST', '/compact', { body: { conversationId, token, sourceAttempt: true } })).body.allowed).toBe(true);
+    expect((await request('POST', '/compact', { body: { conversationId, token, sourceDispatch: true } })).body.armed).toBe(true);
+
+    // No receipt within the page's observation window is not proof that no click landed.
+    const uncertain = await request('POST', '/compact', { body: { conversationId, token, sourceLost: true } });
+    expect(uncertain.status).toBe(409);
+    expect(uncertain.body.error).toBe('source_send_not_releasable');
+    expect(continuationByToken(token)).toMatchObject({
+      state: 'awaiting-summary', sourceSend: { state: 'dispatched-unresolved' }
+    });
+    expect((await request('POST', '/compact', { body: { conversationId, token, sourceAttempt: true } })).body.allowed).toBe(false);
+    const received = await request('POST', '/compact', { body: { conversationId, token, sourceMessageId: 'late-source-receipt' } });
+    expect(received.body.bound).toBe(true);
+  });
+
+  it('does not immediately refile a rejected automatic compaction in the same working turn', async () => {
+    await pair();
+    const conversationId = 'a1a1a1a1-0000-4000-8000-00000000ac09';
+    await withThreshold(10_000, async () => {
+      await request('POST', '/events', {
+        body: {
+          conversationId,
+          events: [{ kind: 'turn_start', time: Date.now(), turnId: 'turn-rejected-compact' }, ...over()]
+        }
+      });
+      await settled();
+      const activity = await request('GET', `/activity?conversationId=${conversationId}`);
+      const sessionId = activity.body.sessionId as string;
+      const first = continuationForSession(sessionId);
+      expect(first).toMatchObject({ automatic: true, state: 'awaiting-summary' });
+
+      const lost = await request('POST', '/compact', {
+        body: { conversationId, token: first!.token, sourceLost: true }
+      });
+      expect(lost.status).toBe(200);
+      expect(continuationForSession(sessionId)).toBeNull();
+
+      // More live evidence from this exact turn must not create a fresh token behind the
+      // persistent composer draft that just rejected the previous one.
+      await request('POST', '/events', {
+        body: {
+          conversationId,
+          events: [{
+            kind: 'assistant_message',
+            time: Date.now(),
+            turnId: 'turn-rejected-compact',
+            text: 'still working',
+            renderedHtml: '<p>still working</p>',
+            messageId: 'a-rejected-compact',
+            state: 'streaming',
+            activeNow: true
+          }]
+        }
+      });
+      await settled();
+      expect(continuationForSession(sessionId)).toBeNull();
+
+      // A genuine turn boundary spends the refusal. The next working turn can compact again.
+      await request('POST', '/events', {
+        body: {
+          conversationId,
+          events: [{ kind: 'turn_end', time: Date.now(), turnId: 'turn-rejected-compact', outcome: 'completed' }]
+        }
+      });
+      await request('POST', '/events', {
+        body: {
+          conversationId,
+          events: [
+            { kind: 'turn_start', time: Date.now(), turnId: 'turn-after-rejection' },
+            {
+              kind: 'assistant_message',
+              time: Date.now(),
+              turnId: 'turn-after-rejection',
+              text: 'new turn is working',
+              renderedHtml: '<p>new turn is working</p>',
+              messageId: 'a-after-rejection',
+              state: 'streaming',
+              activeNow: true
+            }
+          ]
+        }
+      });
+      await settled();
+      expect(continuationForSession(sessionId)).toMatchObject({ automatic: true, state: 'awaiting-summary' });
+    });
+  });
+
   /**
    * Before the prompt has reached ChatGPT the pickup is a two-minute clock with five raised
    * reloads, and a ticket that still has not been sent after them is abandoned: nothing was
@@ -6243,7 +6365,9 @@ describe('unattributed activity recovery', () => {
       await sweepStaleSwarm(Date.now());
       expect(goalPendingReplyFor(OTHER)).toBeNull();
       expect(await maintenance()).toBeNull();
-      expect((await request('GET', `/activity?conversationId=${OTHER}`)).body.activeTurnId).toBeNull();
+      // Idle presentation expires; browser reconciliation still needs the open identity.
+      expect((await request('GET', `/activity?conversationId=${OTHER}`)).body)
+        .toMatchObject({ generating: false, activeTurnId: 'pro-silent-' + model });
       expect((await sessionControlsFor(live.body.sessionId)).activeTurnId).toBeNull();
       const refused = await request('POST', '/goal/draft', { body: { conversationId: OTHER, turnId: 'pro-silent-' + model, clientId: 'tab-1' } });
       expect(refused.status).toBe(409);
@@ -6395,7 +6519,8 @@ describe('unattributed activity recovery', () => {
       expect((await sessionControlsFor(activity.body.sessionId)).activeTurnId).toBe('pro-recovery-off');
       await vi.advanceTimersByTimeAsync(2);
       await sweepStaleSwarm(Date.now());
-      expect((await request('GET', `/activity?conversationId=${OTHER}`)).body.activeTurnId).toBeNull();
+      expect((await request('GET', `/activity?conversationId=${OTHER}`)).body)
+        .toMatchObject({ generating: false, activeTurnId: 'pro-recovery-off' });
       expect((await sessionControlsFor(activity.body.sessionId)).activeTurnId).toBeNull();
       expect(await maintenance()).toBeNull();
     } finally { await saveConfig(previous); vi.useRealTimers(); }
@@ -7543,6 +7668,48 @@ describe('the goal loop over the bridge', () => {
       model: 'deepseek/deepseek-v4-flash',
       draft: null
     });
+  });
+
+  it('preserves an open turn identity without an activity grant so a reloaded page can finish it', async () => {
+    await pair();
+    const chat = 'cafe0059-0000-4000-8000-000000000059';
+    const turnId = 'g-restored-without-activity';
+    // Restore recorder history without a live activity grant, as after an app restart.
+    await recordChatObservations(chat, [
+      { kind: 'user_message', time: Date.now(), messageId: 'restore-user', text: 'finish this task' },
+      { kind: 'turn_start', time: Date.now(), turnId }
+    ]);
+    const feed = await request('GET', `/activity?conversationId=${chat}`);
+    expect(feed.status).toBe(200);
+    expect(feed.body.generating).toBe(false);
+    expect(feed.body.activeTurnId).toBe(turnId);
+
+    const blocked = await request('POST', '/goal/draft', { body: { conversationId: chat, turnId } });
+    expect(blocked.body.error).toBe('chat_still_working');
+    // The replacement document adopts that exact ID and supplies the provider's final.
+    const final = { kind: 'assistant_message', time: Date.now(), turnId: feed.body.activeTurnId,
+      messageId: 'restored-final', text: 'The requested work is finished.', state: 'final',
+      final: true, goalEligible: true };
+    await request('POST', '/events', { body: { conversationId: chat, events: [final] } });
+    await request('POST', '/events', { body: { conversationId: chat, events: [final] } });
+    const settled = await request('GET', `/activity?conversationId=${chat}`);
+    expect(settled.body.activeTurnId).toBeNull();
+    const ends = await readEvents(feed.body.sessionId, { kinds: ['turn_end'] });
+    expect(ends.filter(event => event.turnId === turnId)).toHaveLength(1);
+
+    const realFetch = globalThis.fetch;
+    const provider = vi.fn(async () => Response.json({
+      choices: [{ message: { content: JSON.stringify({ action: 'continue', reply: 'continue the task' }) } }]
+    }));
+    globalThis.fetch = provider as never;
+    try {
+      const drafted = await request('POST', '/goal/draft', { body: { conversationId: chat, turnId } });
+      expect(drafted.status).toBe(200);
+      expect(drafted.body.goal.turnId).toBe(turnId);
+      await vi.waitFor(() => expect(provider).toHaveBeenCalledTimes(1));
+    } finally {
+      globalThis.fetch = realFetch;
+    }
   });
 
   it('makes an accepted Goal turn durable before the provider can fail or the page can reload', async () => {

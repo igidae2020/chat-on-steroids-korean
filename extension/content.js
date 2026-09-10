@@ -41,7 +41,7 @@
   //
   // So: publish a handle instead of a flag and let a replacement supersede a dead one. A
   // *healthy* incumbent still wins, so the ordinary static/recovery race is unchanged.
-  const RECORDER_VERSION = 11;
+  const RECORDER_VERSION = 12;
   const recorderHandle = {
     version: RECORDER_VERSION,
     healthy: () => false,
@@ -2161,7 +2161,7 @@
                 : null;
             goalConfig = { ...(goalConfig || {}), ...(switched || {}), objective: stored };
           } else {
-            objectiveError = replyError(reply) || 'the goal could not be saved to this chat';
+            objectiveError = replyError(reply) || '이 대화에 목표를 저장하지 못했습니다';
           }
           injectStage();
         });
@@ -5859,6 +5859,10 @@
     }
 
     if (job && job.busy) {
+      if (job.stage === 'handoff-pending' && job.sourceSend?.state === 'dispatched-unresolved') {
+        return { mode: 'error', label: '전송 확인 필요',
+          hint: '요약 요청의 전송 여부를 확인하지 못했습니다. 대화에서 요청을 확인하고, 없다면 취소 후 다시 시작하세요.', action: 'cancel' };
+      }
       if (job.stage === 'opening') {
         return { mode: 'busy', label: '대화 여는 중…', hint: '요약 저장 완료 — 새 대화를 여는 중', action: 'cancel' };
       }
@@ -6743,7 +6747,7 @@
       if (where.state === 'moving') {
         // The route names a chat this tab has not observed yet. Neither id is safe to write
         // into, and the next observation is a tick away.
-        objectiveError = 'this chat is still opening — try again';
+        objectiveError = '대화를 여는 중입니다. 잠시 뒤 다시 시도하세요';
         return;
       }
       if (where.state === 'new') {
@@ -6761,7 +6765,7 @@
       }
       const reply = await ask({ type: 'goal_objective', conversationId: where.id, text: goal, mode: which });
       if (!reply || reply.ok !== true) {
-        objectiveError = replyError(reply) || 'the app did not answer';
+        objectiveError = replyError(reply) || '앱이 응답하지 않았습니다';
         return;
       }
       const stored = reply.data && typeof reply.data.objective === 'string' ? reply.data.objective : goal;
@@ -6860,7 +6864,7 @@
       // only thing that knows which instruction the opening message is being written under.
       reply = await ask({ type: 'goal_open', text: goal, mode: pendingObjectiveMode });
       if (!current() || (reply && reply.ok === true) || !openRetryable(reply)) break;
-      setGoalPhase('retrying', replyError(reply) || 'the app did not answer');
+      setGoalPhase('retrying', replyError(reply) || '앱이 응답하지 않았습니다');
       await sleep(GOAL_RETRY_MS);
       if (!current()) break;
       setGoalPhase('requesting');
@@ -6879,20 +6883,20 @@
       return;
     }
     if (!reply || reply.ok !== true) {
-      objectiveError = replyError(reply) || 'the app did not answer';
+      objectiveError = replyError(reply) || '앱이 응답하지 않았습니다';
       setGoalPhase('requesting', objectiveError);
       return;
     }
     const opening = reply.data && typeof reply.data.reply === 'string' ? reply.data.reply : '';
     if (reply.data && typeof reply.data.model === 'string') goalConfig.model = reply.data.model;
     if (!opening) {
-      setGoalPhase('requesting', 'the model wrote nothing to open with');
+      setGoalPhase('requesting', '모델이 첫 메시지를 작성하지 않았습니다');
       return;
     }
     setGoalPhase('sending');
     const previousComposer = CLF_DOM.composer()?.textContent || '';
     if (!CLF_DOM.insertPrompt(opening, true)) {
-      setGoalPhase('sending', 'ChatGPT would not replace the New Chat draft');
+      setGoalPhase('sending', 'ChatGPT에서 새 대화의 초안을 변경하지 못했습니다');
       return;
     }
     const preparedOpening = CLF_DOM.composer()?.textContent || '';
@@ -6914,7 +6918,7 @@
     if (!sendingTarget()) return;
     if (!sent) {
       pendingObjectiveSend = null;
-      setGoalPhase('sending', 'ChatGPT would not send the message');
+      setGoalPhase('sending', 'ChatGPT에서 메시지를 전송하지 못했습니다');
       return;
     }
     openingSend.accepted = true;
@@ -7360,43 +7364,53 @@
    * `bootstrap` comes from the session record rather than from this tab's memory of having
    * typed it, so it still holds when the chat is reopened days later.
    */
+  let bootstrapFold = null;
+  function clearBootstrapFold() {
+    if (!bootstrapFold) return;
+    bootstrapFold.button.remove();
+    bootstrapFold.node.removeAttribute('data-clf-bootstrap');
+    bootstrapFold.node.removeAttribute('data-clf-bootstrap-collapsed');
+    bootstrapFold = null;
+  }
+  rememberCleanup(clearBootstrapFold);
+
   function foldBootstrap() {
-    if (!bootstrap) return;
-    const node = CLF_DOM.firstUserMessage();
-    if (!node) return;
-    // Asks the DOM, not a flag. If React re-rendered this message and took our fold with
-    // it, a remembered "already done" would leave the wall of text back on screen forever.
-    if (node.querySelector(':scope > .clf-boot')) return;
-    // Only ever the first user message of a chat the app opened. `runCommand` refuses to
-    // run at all once a conversation exists, so by construction that message is ours.
-    const box = document.createElement('details');
-    box.className = 'clf-boot';
-    const head = document.createElement('summary');
-    head.className = 'clf-boot-head';
+    if (!alive) return;
+    const node = bootstrap && CLF_DOM.firstUserMessage();
+    if (bootstrapFold && (bootstrapFold.node !== node || !bootstrapFold.button.isConnected ||
+        bootstrapFold.button.parentElement !== node?.parentElement)) clearBootstrapFold();
+    if (!node?.parentElement) return;
+    if (bootstrapFold) return;
+    // React owns the message's children and expects their parent to survive until unmount.
+    // Moving them into <details> violated that contract on resumed-chat reloads. Collapse
+    // only with CSS; the control is a sibling and no authored node is moved or copied.
+    const button = document.createElement('button');
+    button.type = 'button';
+    button.className = 'clf-boot';
     const label = document.createElement('span');
     label.className = 'clf-boot-label';
     // Which worker this chat is, by the name the app gave it: the one fact a person opening
     // a row of near-identical worker tabs actually wants from the fold.
     label.textContent =
       bootstrap === 'worker'
-        ? `${bootstrapAgent || agent || '작업자'} — 사용자가 입력한 글이 아니라 앱이 작업자에게 전달한 지시입니다.`
-        : '사용자가 입력한 글이 아니라 앱이 이전 대화에서 가져온 이어가기 요약입니다.';
-    head.append(label);
-    // The first lines of the folded text, clamped. Not only a courtesy: ChatGPT sizes the user
-    // bubble to its content, so a summary that was one short sentence made the bubble narrow
-    // while closed and full-width while open, and the whole message jumped left on every
-    // click. A clamped block of the text itself is as wide closed as it is open.
-    const preview = document.createElement('span');
-    preview.className = 'clf-boot-preview';
-    preview.textContent = String(node.textContent || '').replace(/\s+/g, ' ').trim().slice(0, 240);
-    head.append(preview);
-    box.append(head);
-
+        ? `${bootstrapAgent || agent || '작업자'} 대화 — 앱이 작업자에게 전달한 지시입니다`
+        : '앱이 이전 대화에서 가져온 이어가기 요약입니다';
+    const action = document.createElement('span');
+    action.className = 'clf-boot-action';
+    button.append(label, action);
+    const update = (expanded) => {
+      button.setAttribute('aria-expanded', String(expanded));
+      action.textContent = expanded ? '접기' : '펼치기';
+      if (expanded) node.removeAttribute('data-clf-bootstrap-collapsed');
+      else node.setAttribute('data-clf-bootstrap-collapsed', '1');
+    };
+    button.addEventListener('click', () => {
+      if (alive && bootstrapFold?.button === button) update(button.getAttribute('aria-expanded') !== 'true');
+    });
     node.dataset.clfBootstrap = bootstrap;
-    // Moved into the fold rather than copied: two copies of a several-thousand-character
-    // brief in one page is the problem again, one of them merely hidden.
-    while (node.firstChild) box.append(node.firstChild);
-    node.append(box);
+    update(false);
+    node.parentElement.insertBefore(button, node);
+    bootstrapFold = { node, button };
   }
 
   /**
@@ -7414,6 +7428,11 @@
   function stageView(input) {
     const { job, goal, phase = nativePhase } = input;
     if (job && job.busy) {
+      if (job.stage === 'handoff-pending' && job.sourceSend?.state === 'dispatched-unresolved') {
+        return { stage: '요약 요청의 전송 확인이 필요합니다',
+          detail: '대화에 요약 요청이 없다면 취소 후 다시 시작하세요.', body: '', kind: 'compact',
+          steps: COMPACT_STEPS, at: 0, done: false };
+      }
       const stage =
         job.stage === 'opening'
           ? '새 대화 여는 중'
@@ -7447,15 +7466,15 @@
     const progress = input.progress;
     const frame = (stage, detail = '') => ({ stage, detail, body: '', kind: 'wait' });
     if (progress?.tools?.count > 0 && now - progress.tools.since >= 3000)
-      return frame(progress.tools.count === 1 ? 'Waiting for a local tool to finish' : `Waiting for ${progress.tools.count} local tools to finish`);
+      return frame(progress.tools.count === 1 ? '로컬 도구 실행 완료 대기 중' : `로컬 도구 ${progress.tools.count}개 실행 완료 대기 중`);
     const workers = progress?.workers;
     if (workers && (workers.active > 0 || workers.failed > 0)) {
-      const summary = `${workers.finished} finished · ${workers.active} running${workers.failed ? ` · ${workers.failed} failed` : ''}`;
+      const summary = `${workers.finished}개 완료 · ${workers.active}개 실행 중${workers.failed ? ` · ${workers.failed}개 실패` : ''}`;
       // Running siblings are not proof that the prime is blocked on them.
-      return frame(workers.active === 1 ? `Worker still running: ${workers.names?.[0] || 'Worker'}` : workers.active > 1
-        ? `${workers.active} workers still running` : 'A worker needs attention', summary);
+      return frame(workers.active === 1 ? `작업자 실행 중: ${workers.names?.[0] || '작업자'}` : workers.active > 1
+        ? `작업자 ${workers.active}개 실행 중` : '작업자 확인 필요', summary);
     }
-    return input.generating ? frame('Still waiting for the current operation to complete') : null;
+    return input.generating ? frame('현재 작업의 완료를 기다리는 중') : null;
   }
 
   /**
@@ -7825,7 +7844,7 @@
       pressedAt = 0;
       nativeBusy = false;
       nativePhase = '';
-      localError = replyError(policy) || 'Could not verify whether this chat may be compacted.';
+      localError = replyError(policy) || '이 대화의 요약 가능 여부를 확인하지 못했습니다.';
       renderControl();
       return;
     }
@@ -7856,7 +7875,7 @@
       pressedAt = 0;
       nativeBusy = false;
       nativePhase = '';
-      localError = replyError(filed) || 'The compaction ticket could not be stored.';
+      localError = replyError(filed) || '요약 요청을 저장하지 못했습니다.';
       renderControl();
       void pullActivity();
       return;
@@ -7894,7 +7913,7 @@
       pressedAt = 0;
       nativeBusy = false;
       nativePhase = '';
-      localError = replyError(reply) || 'The app did not answer.';
+      localError = replyError(reply) || '앱이 응답하지 않았습니다.';
       renderControl();
       void pullActivity();
       return;
@@ -7912,8 +7931,8 @@
       pressedAt = 0;
       localError =
         data.sourceSend && data.sourceSend.state === 'dispatched-unresolved'
-          ? 'The handoff instruction was already submitted here. It will finish on its own, or cancel it.'
-          : 'A compaction is already under way in this chat. Wait for it, or cancel it.';
+          ? '이어가기 지시가 이미 전송됐습니다. 완료를 기다리거나 직접 취소하세요.'
+          : '이 대화를 이미 요약 중입니다. 완료를 기다리거나 취소하세요.';
       renderControl();
       void pullActivity();
       return;
@@ -7963,7 +7982,7 @@
       conversationId === forId &&
       epoch === forEpoch &&
       CLF_DOM.conversationId() === forId;
-    if (!forId || !current()) return 'This chat changed before compaction could start.';
+    if (!forId || !current()) return '요약을 시작하기 전에 대화가 바뀌었습니다.';
     // INTERRUPTING — stop the turn rather than wait it out. That is the whole request, by
     // hand or automatically: this happens because the turn is long, not because it is
     // nearly done.
@@ -7974,8 +7993,8 @@
       if (stop) stop.click();
       userStopped = true;
       const stopped = await waitUntil(() => !current() || !CLF_DOM.generating(), INTERRUPT_WAIT_MS);
-      if (!current()) return 'This chat changed while compaction was stopping the turn.';
-      if (!stopped) return 'ChatGPT would not stop the current turn. Nothing was compacted.';
+      if (!current()) return '요약을 위해 응답을 중지하는 동안 대화가 바뀌었습니다.';
+      if (!stopped) return '현재 ChatGPT 응답을 중지하지 못해 요약하지 않았습니다.';
     }
 
     // SETTLING — bounded and fail-closed. A call that is still running at the deadline is
@@ -8012,12 +8031,12 @@
       pendingTools = count;
       return count === 0;
     }, TOOL_SETTLE_MS);
-    if (!current()) return 'This chat changed while compaction was waiting for local tools.';
+    if (!current()) return '로컬 도구 실행 완료를 기다리는 동안 대화가 바뀌었습니다.';
     if (unavailable) {
-      return 'Could not verify that local tools had stopped. Nothing was compacted.';
+      return '로컬 도구의 종료를 확인하지 못해 요약하지 않았습니다.';
     }
     if (!settled) {
-      return 'Local tools were still running after the settle timeout. Nothing was compacted.';
+      return '대기 시간이 지나도 로컬 도구가 실행 중이어서 요약하지 않았습니다.';
     }
     return '';
   }
@@ -8032,19 +8051,29 @@
       CLF_DOM.conversationId() === forId;
     let attemptCrossed = false;
     const automaticTicket = job && job.automatic === true;
-    const abandonBeforeSend = async (why) => {
+    const abandonBeforeSend = async (why, retireAutomatic = false) => {
       if (!current()) return;
       nativeBusy = false;
       nativePhase = '';
       pressedAt = 0;
       localError = why;
-      // A page/DOM failure is not a verdict on an automatic ticket. Keep it on the
-      // continuation WAL so the app's next pickup reload can collect the same work. A manual
-      // press keeps its historical immediate-abort behaviour; the user is still present and
-      // can retry it without leaving an invisible job behind.
+      // A transient page/DOM failure is not a verdict on an automatic ticket. Keep it on the
+      // continuation WAL so the app's next pickup reload can collect the same work. A composer
+      // already holding another draft is different: ChatGPT restores that draft across reloads,
+      // so the caller can retire this pre-Send ticket instead of scheduling the same refusal.
+      // A manual press keeps its historical immediate-abort behaviour; the user is still present
+      // and can retry it without leaving an invisible job behind.
       if (!automaticTicket) {
         job = null;
         await ask({ type: 'compact', conversationId: forId, cancel: true }).catch(() => undefined);
+      } else if (retireAutomatic) {
+        // This is not the user-facing Cancel path. The bridge accepts sourceLost only while its
+        // durable checkpoint still proves no Send happened (`not-attempted` or
+        // `attempted-unresolved`). If another page crossed sourceDispatch meanwhile, this refuses
+        // and the ambiguous attempt remains alive rather than being cancelled underneath it.
+        const lost = await ask({ type: 'compact', conversationId: forId, token, sourceLost: true }).catch(() => null);
+        if (lost && lost.ok === true && lost.data && lost.data.aborted === true) job = null;
+        else localError = replyError(lost) || 'The blocked handoff could not be safely retired; it was not sent twice.';
       }
       if (!current()) return;
       renderControl();
@@ -8060,9 +8089,18 @@
       renderControl();
       const squeeze = (value) => String(value || '').replace(/\s+/g, '');
       const existing = CLF_DOM.composer();
+      const occupiedByOtherDraft =
+        Boolean(existing && (existing.textContent || '').trim()) &&
+        squeeze(existing?.textContent) !== squeeze(prompt);
       if (squeeze(existing?.textContent) !== squeeze(prompt) && !CLF_DOM.insertPrompt(prompt)) {
         return void (await abandonBeforeSend(
-          'ChatGPT would not accept the handoff instruction — clear the message box and try again.'
+          'ChatGPT would not accept the handoff instruction — clear the message box and try again.',
+          // An occupied composer is durable state: ChatGPT restores drafts across reloads. Leaving
+          // an automatic ticket open here makes every compaction pickup reload the same draft and
+          // hit this same refusal forever. Retire only this provably pre-Send ticket; the draft
+          // itself stays untouched. Missing/replaced composer failures remain recoverable on the
+          // existing WAL.
+          occupiedByOtherDraft
         ));
       }
       await Promise.resolve();
@@ -8083,13 +8121,20 @@
         nativeBusy = false;
         nativePhase = 'waiting';
         pressedAt = 0;
-        localError = replyError(permit) || 'The durable handoff attempt is already owned; reconciling ChatGPT’s marked message.';
+        localError = replyError(permit) || '이미 진행 중인 이어가기 요청이 있습니다. ChatGPT의 해당 메시지를 확인합니다.';
         renderControl();
         return;
       }
       // The at-most-once cut, and the last thing before the click. Exactly one document takes
       // this transition; past it the prompt may be with ChatGPT already — send() clicks first
       // and only then watches for acceptance — so no page is ever offered it again.
+      // The claim await can outlive a Stop transition, disabled Send or a user edit. Keep
+      // those provably unsent attempts reversible instead of spending the dispatch fence.
+      const samePrompt = () => CLF_DOM.composer() === composer && squeeze(composer.textContent) === squeeze(prompt);
+      if (!samePrompt() || !CLF_DOM.canSend()) {
+        CLF_DOM.clearPromptExact(prompt);
+        return void (await abandonBeforeSend('요약 요청을 보내기 전에 입력창이나 전송 가능 상태가 바뀌었습니다.'));
+      }
       const armed = await ask({ type: 'compact', conversationId: forId, token, sourceDispatch: true });
       if (!current()) return;
       if (!armed || armed.ok !== true || !armed.data || armed.data.armed !== true) {
@@ -8099,18 +8144,27 @@
         pressedAt = 0;
         // True of both answers this can get: a refusal because another page armed it first,
         // and a lost reply. Neither one clicked anything here.
-        localError = 'Nothing was submitted: this handoff was not armed. Press it again.';
+        localError = '이어가기 요청이 준비되지 않아 전송하지 않았습니다. 다시 눌러 주세요.';
         renderControl();
         return;
       }
       attemptCrossed = true;
+      // Dispatch authorization also yields. It authorizes only this exact draft, never
+      // another message the user entered meanwhile; retain the uncertain fence on failure.
+      if (!samePrompt() || !CLF_DOM.canSend()) {
+        CLF_DOM.clearPromptExact(prompt);
+        nativePhase = 'waiting';
+        localError = '전송 승인 중 입력창이나 전송 가능 상태가 바뀌어 보내지 않았습니다. 취소 후 다시 시작하세요.';
+        renderControl();
+        return;
+      }
       rememberUserSend();
       if (!(await sendSubmittedText(current))) {
         CLF_DOM.clearPromptExact(prompt);
         nativeBusy = false;
         nativePhase = 'waiting';
         pressedAt = 0;
-        localError = 'The send result was ambiguous. Nothing will be sent twice; cancel explicitly if ChatGPT never accepted it.';
+        localError = '전송 결과를 확인하지 못했습니다. 중복 전송하지 않으므로 ChatGPT가 받지 않았다면 직접 취소해 주세요.';
         renderControl();
         return;
       }
@@ -8123,7 +8177,7 @@
       else {
         CLF_DOM.clearPromptExact(prompt);
         nativePhase = 'waiting';
-        localError = `${why}. The durable attempt will not be sent twice.`;
+        localError = `${why}. 같은 요청을 중복 전송하지 않습니다.`;
         renderControl();
       }
     } finally {
@@ -8628,13 +8682,13 @@
         // of them means the conversation moved on and there is nothing to report; these two
         // mean the loop gave up on a turn it was watching, and now say which.
         if (!text.trim()) {
-          setGoalPhase('settling', 'that answer had no text to continue from');
+          setGoalPhase('settling', '이어갈 응답 본문이 없습니다');
           return;
         }
         await requestGoalDraft(forTurn, current);
         return;
       }
-      setGoalPhase('settling', 'the answer never stopped changing, so nothing was written');
+      setGoalPhase('settling', '응답이 계속 바뀌어 후속 메시지를 작성하지 않았습니다');
     } finally {
       goalBusy = false;
       renderControl();
@@ -8704,14 +8758,16 @@
       // a failure, and not a released claim either: the obligation is filed app-side, and
       // this document keeps the turn and asks again on a fixed short wait until the app
       // says the chat has finished. The bar stays on the settling step meanwhile.
-      if (reply && reply.error === 'chat_still_working') {
-        setGoalPhase('settling', 'the app still sees this chat working');
+      // Authenticated bridge replies keep application errors inside data (background.call).
+      // Losing that code releases the durable claim and lets every activity wake retry it.
+      if (reply?.data?.error === 'chat_still_working') {
+        setGoalPhase('settling');
         void retryGoalDraft(forTurn, true);
         return;
       }
       // The phase is kept rather than collapsed into `failed`: it names the step that
       // stopped, so the bar draws the run where it ended instead of back at the beginning.
-      setGoalPhase('requesting', replyError(reply) || 'the app did not answer');
+      setGoalPhase('requesting', replyError(reply) || '앱이 응답하지 않았습니다');
       // The app never heard the question, so nothing durable moved and the turn is still owed
       // its answer. Release this document's claim on it: holding the claim after a dropped
       // message parked the obligation until the next reload, which is the one thing a
@@ -8829,7 +8885,7 @@
       if (!CLF_DOM.insertPrompt(draft.reply, 'append')) {
         if (Date.now() - goalTypingSince < GOAL_TYPING_WINDOW_MS) return;
         goalDraft = null;
-        setGoalPhase('sending', 'the message box was in use, so nothing was sent');
+        setGoalPhase('sending', '입력창을 사용 중이어서 전송하지 않았습니다');
         await ask({ type: 'goal_ack', conversationId, token: draft.token }).catch(() => undefined);
         return;
       }
@@ -8853,7 +8909,7 @@
       goalDraft = null;
       if (!sent) {
         await ask({ type: 'goal_ack', conversationId: target, token: draft.token }).catch(() => undefined);
-        setGoalPhase('sending', 'ChatGPT would not send the message');
+        setGoalPhase('sending', 'ChatGPT에서 메시지를 전송하지 못했습니다');
         return;
       }
       // Sending is the irreversible step. Record it before the fallible ACK hop so a lost
@@ -8949,7 +9005,7 @@
     const reply = await ask({ type: 'compact', conversationId: forId, cancel: true });
     if (!current()) return;
     if (reply && reply.ok === true && reply.data && reply.data.job) job = reply.data.job;
-    else if (!reply || reply.ok !== true) localError = replyError(reply) || 'Could not cancel compaction.';
+    else if (!reply || reply.ok !== true) localError = replyError(reply) || '요약을 취소하지 못했습니다.';
     renderControl();
     void pullActivity();
   }
@@ -8958,9 +9014,9 @@
     if (!reply) return '';
     const data = reply.data || {};
     if (data.message) return String(data.message).slice(0, 160);
-    if (data.error === 'session_not_recorded') return 'This chat has no recorded local session yet.';
-    if (data.error === 'compaction_running') return 'Another chat is compacting right now.';
-    if (data.error === 'turn_still_generating') return 'Wait for this ChatGPT turn to finish first.';
+    if (data.error === 'session_not_recorded') return '이 대화는 아직 앱에 기록되지 않았습니다.';
+    if (data.error === 'compaction_running') return '다른 대화를 요약 중입니다.';
+    if (data.error === 'turn_still_generating') return '현재 ChatGPT 응답이 끝날 때까지 기다려 주세요.';
     if (data.error) return String(data.error).slice(0, 160);
     if (reply.error === 'app_not_found') return '이 컴퓨터에서 Chat On Steroids가 실행 중이 아닙니다.';
     return reply.error ? String(reply.error).slice(0, 160) : '';

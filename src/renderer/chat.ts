@@ -172,7 +172,7 @@ function attachmentCard(file: InputAttachment, inComposer = false): HTMLElement 
   lines.setAttribute('fill', 'none'); lines.setAttribute('stroke', 'currentColor'); lines.setAttribute('stroke-width', '1.6'); lines.setAttribute('stroke-linecap', 'round');
   svg.append(lines); glyph.append(svg);
   const details = el('div', 'attachment-details');
-  details.append(el('div', 'attachment-name', file.name), el('div', 'attachment-kind', file.mimeType.startsWith('image/') ? 'Image' : 'File'));
+  details.append(el('div', 'attachment-name', file.name), el('div', 'attachment-kind', file.mimeType.startsWith('image/') ? '이미지' : '파일'));
   tile.append(glyph, details); return tile;
 }
 
@@ -1168,7 +1168,7 @@ function citationLabels(source: string, capture?: StoredText): Map<string, strin
       seen.add(href);
       const anchor = document.createElement('a'); anchor.href = href;
       anchor.textContent = new URL(href).hostname;
-      anchor.title = candidate.textContent?.trim().slice(0, 500) || 'Source';
+      anchor.title = candidate.textContent?.trim().slice(0, 500) || '출처';
       anchors.push(anchor.outerHTML);
     }
     if (anchors.length) links.set(marker, ` (${anchors.join(', ')})`);
@@ -1208,7 +1208,7 @@ export function renderedMarkdown(source: string, capture?: StoredText): HTMLElem
       if (url) {
         // Unlike opaque citation IDs, a native url token already carries its exact
         // authored label and destination. Captured React anchors may have no href.
-        const link = document.createElement('a'); link.textContent = url[1] || url[2] || 'Link';
+        const link = document.createElement('a'); link.textContent = url[1] || url[2] || '링크';
         if (safeExternalLink(url[2] ?? '')) link.setAttribute('href', url[2]!);
         return link.outerHTML;
       }
@@ -1423,7 +1423,7 @@ function eventBody(event: SessionEvent, context?: { id: string; current: () => b
       return el('p', 'meta', `세션 시작 — ${event.title}`);
     case 'user_message': {
       const box = el('div', 'said is-user');
-      box.append(el('b', '', 'You'));
+      box.append(el('b', '', '사용자'));
       const attachments = el('div', 'message-attachments');
       if (event.attachments?.length) attachments.append(...event.attachments.map(file => attachmentCard(file)));
       const assets = event.assets?.filter(asset => asset.mimeType === 'image/webp').slice(0, 4) ?? [];
@@ -1974,7 +1974,7 @@ function groupToolRows(rows: HTMLElement[], scope = selectedId, groups = toolGro
     }
     const latest = rows[end - 1]!;
     const latestHead = latest.querySelector('.tool > summary, .agent-communication > summary, .thinking-line');
-    const label = latestHead?.querySelector('b, span:not(.agent-avatar)')?.textContent || 'Activity';
+    const label = latestHead?.querySelector('b, span:not(.agent-avatar)')?.textContent || '활동';
     group.querySelector('.activity-title')!.textContent = label;
     group.querySelector('summary')!.title = `작업 ${end - i}개 · ${label}`;
     const symbol = latestHead?.querySelector('svg, .agent-avatar');

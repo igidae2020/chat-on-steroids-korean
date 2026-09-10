@@ -361,7 +361,7 @@ function paintGroups(): void {
     const box = root.querySelector<HTMLInputElement>('.sw input')!;
     root.classList.toggle('is-open', openGroup === id);
     root.classList.toggle('is-on', box.checked);
-    root.querySelector<HTMLElement>('.group-count')!.textContent = box.checked ? onText : 'off';
+    root.querySelector<HTMLElement>('.group-count')!.textContent = box.checked ? onText : '꺼짐';
   }
 }
 
@@ -378,7 +378,7 @@ function paintDesktopAccess(next: AppState): void {
   const missing: string[] = [];
   if (needsScreen && access.screen !== 'granted') missing.push(`화면 기록: ${access.screen}`);
   if (needsAccessibility && access.accessibility !== 'granted') {
-    missing.push(`Accessibility: ${access.accessibility}`);
+    missing.push(`손쉬운 사용: ${access.accessibility}`);
   }
   box.hidden = missing.length === 0;
   if (box.hidden) return;
@@ -539,7 +539,7 @@ function duration(seconds: number | null): string {
   if (seconds === null) return '—';
   if (seconds < 90) return `${Math.round(seconds)}s`;
   const minutes = Math.round(seconds / 60);
-  return minutes < 90 ? `${minutes}m` : `${Math.round(minutes / 60)}h`;
+  return minutes < 90 ? `${minutes}분` : `${Math.round(minutes / 60)}시간`;
 }
 
 /**
@@ -1032,9 +1032,9 @@ function apply(next: AppState): void {
         : unverified.length > 0
           ? // One connector working is not the whole setup. Naming the missing one is the
             // difference between "something is off" and knowing what to go and create.
-            `ChatGPT ran a tool ${ago(status.lastToolCallAt)}, but ${unverified
+            `ChatGPT 도구 실행: ${ago(status.lastToolCallAt)} · ${unverified
               .map((surface) => `“${surface.connectorName}”`)
-              .join(' and ')} has never been called — create it in ChatGPT to use it.`
+              .join(', ')} 연결에는 호출 기록이 없습니다. ChatGPT에 연결을 추가하세요.`
           : `ChatGPT 도구 실행: ${ago(status.lastToolCallAt)} — 연결 경로 확인됨`;
 
   const cards = $('connectorCards');
@@ -1196,7 +1196,7 @@ function connectorCards(next: AppState): HTMLElement[] {
     }
 
     if (surface.tools.length > 0) {
-      card.append(el('p', 'hint', `Tools: ${surface.tools.join(', ')}`));
+      card.append(el('p', 'hint', `도구: ${surface.tools.join(', ')}`));
     }
     return card;
     });

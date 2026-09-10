@@ -91,7 +91,7 @@ function showConnection(): void {
   copy('연결 이름', surface?.connectorName ?? 'Chat On Steroids Plugins');
   copy('설명', surface?.description ?? 'Tools from your enabled Chat On Steroids plugins.');
   const url = surface?.publicUrl ?? (config.tunnel.kind === 'manual' ? surface?.localUrl : null);
-  if (url) copy('MCP server URL', url);
+  if (url) copy('MCP 서버 URL', url);
   body.append(el('p', 'hint', config.tunnel.kind === 'openai'
     ? 'ChatGPT에서 Tunnel 방식으로 연결을 추가하고 Plugins 터널을 선택하세요. 플러그인 추가·변경 후 도구 목록을 새로고침하세요.'
     : 'ChatGPT에서 MCP 서버 URL로 연결을 추가하세요. 플러그인 추가·변경 후 도구 목록을 새로고침하세요.'));

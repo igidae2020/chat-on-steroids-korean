@@ -1557,45 +1557,100 @@ describe('extension command delivery', () => {
     expect(backgroundSource).not.toContain("call('/commands'");
   });
 
-  it('re-injects the recorder into already-open ChatGPT tabs after an extension reload', async () => {
-    const local = new FakeStorageArea(paired);
-    const session = new FakeStorageArea();
-    const worker = loadWorker({ local, session });
-    worker.tabsQuery.mockResolvedValueOnce([{ id: 41 }, { id: 42 }]);
+  it('recovers an invalidated idle document by native reload without hot-injecting runtime files', async () => {
+    const url = 'https://chatgpt.com/c/aaaaaaaa-bbbb-4ccc-8ddd-eeeeeeeeeeee';
+    const worker = loadWorker({ local: new FakeStorageArea(paired), session: new FakeStorageArea(),
+      tabsGet: async () => ({ id: 41, url, status: 'complete' }) });
+    worker.tabsQuery.mockResolvedValueOnce([{ id: 41, url, status: 'complete' }]);
+    worker.scriptingExecuteScript.mockResolvedValue([{ frameId: 0, documentId: 'old-document', result: { idle: true, url } }]);
 
     await worker.installed('update');
 
-    expect(worker.tabsQuery).toHaveBeenCalledWith({
-      url: ['https://chatgpt.com/*', 'https://chat.openai.com/*']
-    });
-    expect(worker.scriptingExecuteScript.mock.calls).toEqual([
-      [{ target: { tabId: 41 }, files: ['chatgpt-dom.js'] }],
-      [{ target: { tabId: 41 }, world: 'MAIN', files: ['fiber.js'] }],
-      [{ target: { tabId: 41 }, files: ['content.js'] }],
-      [{ target: { tabId: 42 }, files: ['chatgpt-dom.js'] }],
-      [{ target: { tabId: 42 }, world: 'MAIN', files: ['fiber.js'] }],
-      [{ target: { tabId: 42 }, files: ['content.js'] }]
-    ]);
-    expect(worker.scriptingInsertCSS.mock.calls).toEqual([
-      [{ target: { tabId: 41 }, files: ['overlay.css'] }],
-      [{ target: { tabId: 42 }, files: ['overlay.css'] }]
-    ]);
+    const injections = worker.scriptingExecuteScript.mock.calls.map(([request]) => request);
+    expect(injections).toHaveLength(2);
+    expect(injections.every(request => typeof request.func === 'function' && !request.files)).toBe(true);
+    expect(injections[1].target).toEqual({ tabId: 41, documentIds: ['old-document'] });
+    expect(injections[0].args.at(-1)).toBe(false);
+    expect(injections[1].args.at(-1)).toBe(true);
+    expect(worker.scriptingInsertCSS).not.toHaveBeenCalled();
+    expect(worker.tabsCreate).not.toHaveBeenCalled();
+    expect(worker.tabsReload).not.toHaveBeenCalled();
   });
 
-  it('keeps a live recorder but revalidates the idempotent MAIN-world Fiber helper', async () => {
-    const local = new FakeStorageArea(paired);
-    const session = new FakeStorageArea();
-    const worker = loadWorker({ local, session });
+  it('keeps a healthy current recorder and leaves Fiber repair to its on-demand path', async () => {
+    const worker = loadWorker({ local: new FakeStorageArea(paired), session: new FakeStorageArea() });
     worker.tabsQuery.mockResolvedValueOnce([{ id: 41 }]);
-    worker.tabsSendMessage.mockResolvedValueOnce({ ok: true, recorderVersion: 11 });
-
+    worker.tabsSendMessage.mockResolvedValueOnce({ ok: true, recorderVersion: 12 });
     await worker.installed('update');
-
     expect(worker.tabsSendMessage).toHaveBeenCalledWith(41, { type: 'clf-recorder-ping' });
-    expect(worker.scriptingExecuteScript.mock.calls).toEqual([
-      [{ target: { tabId: 41 }, world: 'MAIN', files: ['fiber.js'] }]
-    ]);
+    expect(worker.scriptingExecuteScript).not.toHaveBeenCalled();
     expect(worker.scriptingInsertCSS).not.toHaveBeenCalled();
+    expect(worker.tabsReload).not.toHaveBeenCalled();
+  });
+
+  it.each(['idle', 'draft', 'attachment', 'generating', 'stop', 'hidden', 'disabled', 'missing-dom', 'navigation', 'healthy', 'expired'])
+    ('native recovery rechecks %s state in the exact document immediately before reload', scenario => {
+      const url = 'https://chatgpt.com/c/aaaaaaaa-bbbb-4ccc-8ddd-eeeeeeeeeeee';
+      const reload = vi.fn();
+      const box = { isConnected: true, textContent: '', disabled: false, getAttribute: () => null };
+      const native: any = { composer: () => box, composerVisible: () => true, hasComposerAttachments: () => false,
+        generating: () => false, stopButton: () => null };
+      const page: any = { CLF_DOM: native, document: { readyState: 'complete' }, location: { href: url, reload }, Date };
+      const code = backgroundSource.slice(backgroundSource.indexOf('function idleRecorderDocument('),
+        backgroundSource.indexOf('\nasync function boundedRecoveryCall('));
+      const inspect = vm.runInNewContext(`${code}\nidleRecorderDocument`, page);
+      expect(inspect(url, 12, Date.now() + 3000, false)).toEqual({ idle: true, url });
+      expect(reload).not.toHaveBeenCalled();
+      if (scenario === 'draft') box.textContent = 'new user draft';
+      if (scenario === 'attachment') native.hasComposerAttachments = () => true;
+      if (scenario === 'generating') native.generating = () => true;
+      if (scenario === 'stop') native.stopButton = () => ({});
+      if (scenario === 'hidden') native.composerVisible = () => false;
+      if (scenario === 'disabled') box.disabled = true;
+      if (scenario === 'missing-dom') delete page.CLF_DOM;
+      if (scenario === 'navigation') page.location.href = 'https://chatgpt.com/';
+      if (scenario === 'healthy') page.__CLF_CONTENT_RECORDER__ = { version: 12, healthy: () => true };
+      inspect(url, 12, Date.now() + (scenario === 'expired' ? -1 : 3000), true);
+      expect(reload).toHaveBeenCalledTimes(scenario === 'idle' ? 1 : 0);
+    });
+
+  it.each(['url', 'pending', 'document'])('rejects a recovery proof if the tab %s changed before document-scoped reload', async change => {
+    const url = 'https://chatgpt.com/c/aaaaaaaa-bbbb-4ccc-8ddd-eeeeeeeeeeee';
+    let current = { id: 41, url, status: 'complete', pendingUrl: '' };
+    const worker = loadWorker({ local: new FakeStorageArea(paired), session: new FakeStorageArea(), tabsGet: async () => current });
+    await worker.registerTab(41, 'old-document');
+    worker.tabsQuery.mockResolvedValueOnce([current]);
+    worker.scriptingExecuteScript.mockImplementation(async () => {
+      if (change === 'url') current = { ...current, url: 'https://chatgpt.com/' };
+      if (change === 'pending') current = { ...current, pendingUrl: 'https://chatgpt.com/' };
+      if (change === 'document') await worker.registerTab(41, 'replacement');
+      return [{ frameId: 0, documentId: 'old-document', result: { idle: true, url } }];
+    });
+    await worker.installed('update');
+    expect(worker.scriptingExecuteScript).toHaveBeenCalledTimes(1);
+    expect(worker.tabsCreate).not.toHaveBeenCalled();
+    expect(worker.tabsReload).not.toHaveBeenCalled();
+  });
+
+  it('ignores a late idle recovery proof and never turns a timed-out probe into reload', async () => {
+    vi.useFakeTimers();
+    let resolveProof: ((value: any) => void) | undefined;
+    try {
+      const url = 'https://chatgpt.com/c/aaaaaaaa-bbbb-4ccc-8ddd-eeeeeeeeeeee';
+      const worker = loadWorker({ local: new FakeStorageArea(paired), session: new FakeStorageArea(),
+        tabsGet: async () => ({ id: 41, url, status: 'complete' }) });
+      worker.tabsQuery.mockResolvedValueOnce([{ id: 41, url, status: 'complete' }]);
+      worker.scriptingExecuteScript.mockImplementation(() => new Promise(resolve => { resolveProof = resolve; }));
+      const installed = worker.installed('update');
+      await vi.advanceTimersByTimeAsync(3000);
+      await installed;
+      expect(worker.scriptingExecuteScript).toHaveBeenCalledTimes(1);
+      resolveProof?.([{ frameId: 0, documentId: 'old-document', result: { idle: true, url } }]);
+      await vi.advanceTimersByTimeAsync(0);
+      expect(worker.scriptingExecuteScript).toHaveBeenCalledTimes(1);
+      expect(worker.tabsCreate).not.toHaveBeenCalled();
+      expect(worker.tabsReload).not.toHaveBeenCalled();
+    } finally { resolveProof?.([]); await vi.runOnlyPendingTimersAsync(); vi.useRealTimers(); }
   });
 
   it('repairs a missing MAIN-world Fiber helper on demand for the sending tab only', async () => {
@@ -1718,7 +1773,7 @@ describe('extension revival delivery', () => {
 
   const liveRecorder = async (_tabId: number, message: Record<string, unknown>) =>
     message.type === 'clf-recorder-ping'
-      ? { ok: true, recorderVersion: 11 }
+      ? { ok: true, recorderVersion: 12 }
       : { ok: true, claimed: true };
 
   it('scans before opening and routes to the oldest exact worker tab', async () => {
@@ -3327,7 +3382,9 @@ it.each(['matching', 'wrong-document', 'unsafe-draft', 'newer-navigation'])('ret
   const tabsRemove = vi.fn();
   const sendMessage = vi.fn(async (..._args: unknown[]) => ({ safe: scenario !== 'unsafe-draft', conversationId, navigationEpoch: 0 }));
   const code = backgroundSource.slice(backgroundSource.indexOf('async function pruneManagedTabs('), backgroundSource.indexOf('\nfunction maintain(', backgroundSource.indexOf('async function pruneManagedTabs(')));
-  const prune = vm.runInNewContext(`${code}\npruneManagedTabs`, {
+  const bounded = backgroundSource.slice(backgroundSource.indexOf('async function boundedDocumentMessage('), backgroundSource.indexOf('\nconst desktopInputOffers', backgroundSource.indexOf('async function boundedDocumentMessage(')));
+  const prune = vm.runInNewContext(`${bounded}\n${code}\npruneManagedTabs`, {
+    setTimeout, clearTimeout,
     cleanConversationId: (id: string) => id, conversationForTab: () => conversationId,
     conversationFromUrl: (url: string) => url.split('/c/')[1], tabDocuments: { '71': scenario === 'wrong-document' ? 'replacement' : 'doc' },
     tabEpochs: { '71': 0 }, ownsDocument: () => true, journalCountForConversation: () => 0,

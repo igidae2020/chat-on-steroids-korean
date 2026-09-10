@@ -52,6 +52,7 @@ const {
   AUTOMATIC_HANDOVER_TTL_MS,
   CONTINUATION_TTL_MS,
   abortContinuation,
+  abortContinuationSourceBeforeSendNow,
   attachSummary,
   beginContinuationDestinationSendNow,
   beginContinuationSourceSendNow,
@@ -143,6 +144,64 @@ async function readyContinuation(): Promise<{ sessionId: string; token: string }
 }
 
 describe('capturing the brief', () => {
+  it('keeps a pre-send automatic refusal across restart, scoped to its original turn', async () => {
+    const summary = await createSession({ title: 'refused turn', conversationId: CHAT_A });
+    await store.appendEvent(summary.id, { time: 1, source: 'extension', kind: 'turn_start', turnId: 'refused' });
+    const ticket = await openContinuationNow(summary.id, CHAT_A, true);
+    expect(await abortContinuationSourceBeforeSendNow(ticket.token, 'handoff_never_sent')).toBe(true);
+    await store.flushSessions();
+    await resetSessionStoreForTests();
+    const restored = (await getSession(summary.id))!;
+    expect(store.autoCompactionReady({ ...restored, contextTokens: 1_000_000 })).toBe(false);
+    await store.appendEvent(summary.id, { time: 2, source: 'extension', kind: 'turn_start', turnId: 'next' });
+    expect(store.autoCompactionReady({ ...(await getSession(summary.id))!, contextTokens: 1_000_000 })).toBe(true);
+  });
+
+  it('aborts only while the source checkpoint still proves no prompt was sent', async () => {
+    const untouched = await createSession({ title: 'untouched source', conversationId: CHAT_A });
+    const untouchedContinuation = await openContinuationNow(untouched.id, CHAT_A, true);
+    expect(await abortContinuationSourceBeforeSendNow(untouchedContinuation.token, 'handoff_never_sent')).toBe(true);
+    expect(continuationByToken(untouchedContinuation.token)).toMatchObject({
+      state: 'aborted',
+      error: 'handoff_never_sent'
+    });
+
+    const claimed = await createSession({ title: 'claimed source', conversationId: CHAT_B });
+    const claimedContinuation = await openContinuationNow(claimed.id, CHAT_B, true);
+    expect((await beginContinuationSourceSendNow(claimedContinuation.token))?.allowed).toBe(true);
+    expect(await abortContinuationSourceBeforeSendNow(claimedContinuation.token, 'handoff_never_sent')).toBe(true);
+    expect(continuationByToken(claimedContinuation.token)?.state).toBe('aborted');
+
+    const armed = await createSession({ title: 'armed source', conversationId: CHAT_C });
+    const armedContinuation = await openContinuationNow(armed.id, CHAT_C, true);
+    expect((await beginContinuationSourceSendNow(armedContinuation.token))?.allowed).toBe(true);
+    expect(await dispatchContinuationSourceSendNow(armedContinuation.token)).toBe(true);
+    expect(await abortContinuationSourceBeforeSendNow(armedContinuation.token, 'handoff_never_sent')).toBe(false);
+    expect(continuationByToken(armedContinuation.token)).toMatchObject({
+      state: 'awaiting-summary',
+      sourceSend: { state: 'dispatched-unresolved' }
+    });
+  });
+
+  it('publishes no pre-send abort when either durable write fails', async () => {
+    const summary = await createSession({ title: 'refusal durability', conversationId: CHAT_A });
+    await store.appendEvent(summary.id, { time: 1, source: 'extension', kind: 'turn_start', turnId: 'refused' });
+    const ticket = await openContinuationNow(summary.id, CHAT_A, true);
+    const refusal = vi.spyOn(store, 'refuseAutomaticCompactionNow').mockRejectedValueOnce(new Error('summary disk full'));
+    await expect(abortContinuationSourceBeforeSendNow(ticket.token, 'handoff_never_sent')).rejects.toThrow('summary disk full');
+    expect(continuationByToken(ticket.token)?.state).toBe('awaiting-summary');
+    refusal.mockRestore();
+
+    const durable = await import('../src/main/durable.js');
+    vi.spyOn(durable, 'writeDurableNow').mockRejectedValueOnce(new Error('continuation disk full'));
+    await expect(abortContinuationSourceBeforeSendNow(ticket.token, 'handoff_never_sent')).rejects.toThrow('continuation disk full');
+    expect(continuationByToken(ticket.token)?.state).toBe('awaiting-summary');
+    // The eligibility fence lands first. A failed terminal WAL stays retryable, while a
+    // restart cannot turn this refusal into a fresh automatic ticket for the same turn.
+    expect(store.autoCompactionReady({ ...(await getSession(summary.id))!, contextTokens: 1_000_000 })).toBe(false);
+    expect(await abortContinuationSourceBeforeSendNow(ticket.token, 'handoff_never_sent')).toBe(true);
+  });
+
   it('answers a repeated capture with the handoff it already wrote', async () => {
     const summary = await createSession({ title: 'work', conversationId: CHAT_A });
     const opened = await openContinuationNow(summary.id, CHAT_A);
@@ -848,6 +907,39 @@ describe('the swarm handover', () => {
 });
 
 describe('restart lifetime recovery', () => {
+  it('persists the automatic handover deadline in the dispatch WAL and preserves it after restart', async () => {
+    vi.useFakeTimers();
+    const summary = await createSession({ title: 'dispatch deadline survives restart', conversationId: CHAT_A });
+    const opened = await openContinuationNow(summary.id, CHAT_A, true);
+    expect((await beginContinuationSourceSendNow(opened.token))?.allowed).toBe(true);
+    const durable = await import('../src/main/durable.js');
+    const writes = vi.spyOn(durable, 'writeDurableNow');
+    const askedAt = Date.now();
+
+    expect(await dispatchContinuationSourceSendNow(opened.token)).toBe(true);
+    // Restore what was passed to the WAL, not a later in-memory snapshot: publication used
+    // to set askedAt only after writing, so a stalled dispatch restarted its clock on reload.
+    const saved = structuredClone(writes.mock.calls.findLast(([name]) => name === 'continuations')![1]) as
+      ReturnType<typeof snapshotContinuations>;
+    expect(saved.entries.find(entry => entry.token === opened.token)?.askedAt).toBe(askedAt);
+
+    vi.setSystemTime(askedAt + 2 * 60 * 60_000);
+    resetContinuationsForTests();
+    await restoreContinuations(saved);
+    expect(compactingConversation(CHAT_A)?.token).toBe(opened.token);
+    expect(continuationByToken(opened.token)?.askedAt).toBe(askedAt);
+
+    // A later stable-message receipt advances the transaction, but never extends its clock.
+    vi.setSystemTime(askedAt + 3 * 60 * 60_000);
+    expect(await bindContinuationSourceMessageNow(opened.token, 'handoff-user-raw')).toBe(true);
+    expect(continuationByToken(opened.token)?.askedAt).toBe(askedAt);
+    vi.setSystemTime(askedAt + AUTOMATIC_HANDOVER_TTL_MS - 1);
+    expect(compactingConversation(CHAT_A)?.token).toBe(opened.token);
+    vi.setSystemTime(askedAt + AUTOMATIC_HANDOVER_TTL_MS);
+    expect(compactingConversation(CHAT_A)).toBeNull();
+    expect(continuationForSession(summary.id)).toBeNull();
+  });
+
   it('gives up an automatic handover that never lands, so the source chat gets its tools back', async () => {
     vi.useFakeTimers();
     const summary = await createSession({ title: 'stuck auto handover', conversationId: CHAT_A });

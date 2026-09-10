@@ -1721,12 +1721,38 @@ async function createChatTab(url, background = false, active = !background) {
   });
 }
 
+/** Page silence is not custody, completion or close permission. */
+async function boundedDocumentMessage(tabId, message, documentId, timeoutMs = 3000) {
+  let timer;
+  try {
+    return await Promise.race([
+      chrome.tabs.sendMessage(tabId, message, { documentId }),
+      new Promise(resolve => { timer = setTimeout(() => resolve(null), timeoutMs); })
+    ]);
+  } catch { return null; } finally { clearTimeout(timer); }
+}
+
+const desktopInputOffers = new Map();
+function offerDesktopInput(tabId, message) {
+  // The reply is not a delivery receipt: the app's durable browser claim and
+  // one-time sendAuthorizedAt own Send. Share only the exact in-flight document
+  // offer so repeated wakes cannot flood a frozen renderer or block other work.
+  const source = { tab: tabId, documentId: tabDocuments[String(tabId)], navigationEpoch: tabEpochs[String(tabId)] };
+  const held = desktopInputOffers.get(message.id);
+  if (held && held.tab === source.tab && held.documentId === source.documentId && held.navigationEpoch === source.navigationEpoch) return;
+  desktopInputOffers.set(message.id, source);
+  void chrome.tabs.sendMessage(tabId, message).catch(() => undefined).finally(() => {
+    if (desktopInputOffers.get(message.id) === source) desktopInputOffers.delete(message.id);
+  });
+}
+
 async function deliverDesktopInputs(inputs, background, reusableConversations = [], activeIds) {
   if (!Array.isArray(inputs)) return;
   // Only the app's complete outbox projection retires spent opening authority.
   if (Array.isArray(activeIds)) {
     const active = new Set(activeIds);
     for (const id of Object.keys(inputOpenings)) if (!active.has(id)) delete inputOpenings[id];
+    for (const id of desktopInputOffers.keys()) if (!active.has(id)) desktopInputOffers.delete(id);
     await persistLive();
   }
   if (!inputs.length) return;
@@ -1752,6 +1778,7 @@ async function deliverDesktopInputs(inputs, background, reusableConversations = 
     const candidates = tabs.filter(tab => matchesInput(input, tab));
     let tab = candidates.sort((a, b) => a.id - b.id)[0];
     let elected = elections[input.id];
+    let recoveredReuse = null;
     // A queued checkpoint follows the app's durable session rebind. Transfer only
     // to an already-existing successor tab, never reopen a closed elected target.
     if (target && cleanConversationId(input.supersededConversationId) &&
@@ -1760,6 +1787,32 @@ async function deliverDesktopInputs(inputs, background, reusableConversations = 
       elected = elections[input.id];
     }
     if (elected?.tab != null) tab = candidates.find(candidate => candidate.id === elected.tab);
+    // A prepare receipt can be lost after its exact document changes nothing. Do
+    // not replay from elapsed time: only the still-elected, still-owned document
+    // can prove that it is idle again and therefore no old preparation is live.
+    if (!tab && !target && elected?.stage === 'preparing' && Number.isInteger(elected.tab)) {
+      const candidate = tabs.find(row => row.id === elected.tab);
+      const reusable = new Set(reusableConversations);
+      // A completed conversation registry entry can survive New Chat and an
+      // extension reload. Only a concrete current/pending /c URL may protect a
+      // different conversation here; an unmarked home must reach the exact
+      // document/epoch/idle probe instead of deadlocking on stale metadata.
+      const concreteConversation = conversationFromUrl(candidate?.url) || conversationFromUrl(candidate?.pendingUrl);
+      if (candidate) {
+        if (candidate.pendingUrl || modelCatalogTarget?.tab === candidate.id ||
+            (concreteConversation && !reusable.has(concreteConversation))) continue;
+        const source = { tab: candidate.id, documentId: tabDocuments[String(candidate.id)], navigationEpoch: tabEpochs[String(candidate.id)] };
+        if (!ownsDocument(source)) continue;
+        const proof = await boundedDocumentMessage(candidate.id, { type: 'clf-input-reuse-state' }, source.documentId);
+        const current = await chrome.tabs.get(candidate.id).catch(() => null);
+        if (proof?.safe !== true || proof.navigationEpoch !== source.navigationEpoch || !ownsDocument(source) ||
+            !current || current.pendingUrl || current.url !== candidate.url) continue;
+        // Logically clear this pass for one same-tab retry while the durable row
+        // remains custody if the document changes before preparation begins.
+        elected = null;
+        recoveredReuse = source;
+      }
+    }
     if (input.close === true && input.lifetime === 'temporary-planner') {
       if (!tab) continue;
       // Preserve the warm planner until newer app work has an actual browser tab.
@@ -1771,7 +1824,7 @@ async function deliverDesktopInputs(inputs, background, reusableConversations = 
       const documentId = tabDocuments[String(tab.id)];
       const source = { tab: tab.id, documentId, navigationEpoch: tabEpochs[String(tab.id)] };
       try {
-        const proof = await chrome.tabs.sendMessage(tab.id, { type: 'clf-close-temporary-planner', id: input.id, owner: input.owner }, { documentId });
+        const proof = await boundedDocumentMessage(tab.id, { type: 'clf-close-temporary-planner', id: input.id, owner: input.owner }, documentId);
         const current = await chrome.tabs.get(tab.id);
         const successor = replacement ? await chrome.tabs.get(replacement.id) : null;
         if (proof?.safe === true && ownsDocument(source) && String(current.url || '').includes(marker) &&
@@ -1785,37 +1838,39 @@ async function deliverDesktopInputs(inputs, background, reusableConversations = 
     if (!tab) {
       // Handout is opening authority, not a missing delivery receipt. A closed or
       // unresponsive elected document never grants another opening attempt.
-      if (elections[input.id]) continue;
+      if (elections[input.id] && !recoveredReuse) continue;
       if (Object.keys(elections).length >= 1000) continue;
       const url = target ? `https://chatgpt.com/c/${encodeURIComponent(target)}` : `https://chatgpt.com/?${input.lifetime === 'temporary-planner' ? 'temporary-chat=true&' : ''}${marker}#${marker}`;
       if (!target && input.lifetime !== 'temporary-planner') {
         const reusable = new Set(reusableConversations);
         const choices = tabs.filter(candidate => !candidate.pendingUrl && modelCatalogTarget?.tab !== candidate.id &&
-          (!conversationForTab(candidate) || reusable.has(conversationForTab(candidate))))
+          (recoveredReuse ? candidate.id === recoveredReuse.tab :
+            (!conversationForTab(candidate) || reusable.has(conversationForTab(candidate)))))
           .sort((a, b) => Number(!!conversationForTab(a)) - Number(!!conversationForTab(b)) || a.id - b.id);
         for (const candidate of choices) {
           const source = { tab: candidate.id, documentId: tabDocuments[String(candidate.id)], navigationEpoch: tabEpochs[String(candidate.id)] };
           if (!ownsDocument(source)) continue;
-          let proof;
-          try { proof = await chrome.tabs.sendMessage(candidate.id, { type: 'clf-input-reuse-state' }, { documentId: source.documentId }); }
-          catch { continue; }
+          const proof = recoveredReuse?.tab === source.tab && recoveredReuse.documentId === source.documentId && recoveredReuse.navigationEpoch === source.navigationEpoch
+            ? { safe: true, navigationEpoch: source.navigationEpoch }
+            : await boundedDocumentMessage(candidate.id, { type: 'clf-input-reuse-state' }, source.documentId);
           const current = await chrome.tabs.get(candidate.id).catch(() => null);
           if (proof?.safe !== true || proof.navigationEpoch !== source.navigationEpoch || !ownsDocument(source) ||
               !current || current.pendingUrl || current.url !== candidate.url) continue;
           await elect(input.id, { tab: candidate.id, stage: 'preparing' });
           const owner = (await chrome.storage.session.get('modelCatalogOwner')).modelCatalogOwner;
           if (owner?.tab === candidate.id) await chrome.storage.session.set({ modelCatalogOwner: { ...owner, handedToInput: input.id } });
-          let prepared;
-          try { prepared = await chrome.tabs.sendMessage(candidate.id, { type: 'clf-prepare-desktop-input', id: input.id }, { documentId: source.documentId }); }
-          catch { break; } // Ambiguous preparation is not a fallback authorization.
+          if (!ownsDocument(source)) break;
+          // Preparation itself can take 13s (sidebar 3s, New Chat 5s, mode 5s).
+          // Missing its reply grants no fallback: retain this exact tab's custody.
+          const prepared = await boundedDocumentMessage(candidate.id,
+            { type: 'clf-prepare-desktop-input', id: input.id }, source.documentId, 15000);
           const latest = await chrome.tabs.get(candidate.id).catch(() => null);
           if (!latest || latest.pendingUrl || tabDocuments[String(candidate.id)] !== source.documentId) break;
           if (prepared?.ready === true && matchesInput(input, latest)) {
             await elect(input.id, { tab: candidate.id, stage: 'ready' });
             tab = latest;
-            try { await chrome.tabs.sendMessage(tab.id, { type: 'clf-desktop-input', id: input.id, conversationId: null }); }
-            catch { /* Claim/send ambiguity keeps this exact tab elected. */ }
-          } else if (prepared?.fallback === true && prepared.preSend === true) {
+            offerDesktopInput(tab.id, { type: 'clf-desktop-input', id: input.id, conversationId: null });
+          } else if (prepared?.fallback === true && prepared.preSend === true && ownsDocument(source)) {
             // Explicit native transition failure, before claim/insertion/send, owns
             // exactly one replacement. Persist that expenditure before Chrome awaits.
             await elect(input.id, { tab: null, stage: 'opening', fallbackUsed: true });
@@ -1833,8 +1888,7 @@ async function deliverDesktopInputs(inputs, background, reusableConversations = 
       tabs.push(tab);
       continue;
     }
-    try { await chrome.tabs.sendMessage(tab.id, { type: 'clf-desktop-input', id: input.id, conversationId: target, ...(input.lifetime ? { lifetime: input.lifetime } : {}) }); }
-    catch { /* Navigation is not a delivery receipt; a later maintenance pass can offer it. */ }
+    offerDesktopInput(tab.id, { type: 'clf-desktop-input', id: input.id, conversationId: target, ...(input.lifetime ? { lifetime: input.lifetime } : {}) });
   }
 }
 
@@ -2099,8 +2153,8 @@ async function pruneManagedTabs(tabs, policy, protectedChats, closable) {
       const current = await chrome.tabs.get(tab.id);
       if (conversationFromUrl(current.url) !== conversationId || current.pendingUrl) continue;
 
-      const proof = await chrome.tabs.sendMessage(tab.id, { type: 'clf-tab-close-check', conversationId,
-        allowGenerating: blocked.has(conversationId), ...(cancelledDecisions.length ? { cancelledDecisions } : {}) }, { documentId: source.documentId });
+      const proof = await boundedDocumentMessage(tab.id, { type: 'clf-tab-close-check', conversationId,
+        allowGenerating: blocked.has(conversationId), ...(cancelledDecisions.length ? { cancelledDecisions } : {}) }, source.documentId);
       if (proof?.safe !== true || proof.conversationId !== conversationId || proof.navigationEpoch !== source.navigationEpoch || !ownsDocument(source)) continue;
       const latest = await chrome.tabs.get(tab.id);
       if (latest.pendingUrl || conversationFromUrl(latest.url) !== conversationId || !ownsDocument(source) || journalCountForConversation(conversationId) > 0) continue;
@@ -2144,14 +2198,6 @@ async function maintainOnce() {
   if (reply.data.placement) await placeSuccessorChat(reply.data.placement, null);
   inspectRequestedModels(reply.data.modelCatalogRequest);
   inspectRequestedPluginRefresh(reply.data.pluginRefreshRequests, reply.data.background === true, reply.data.browserOnly === true);
-  await deliverDesktopInputs(reply.data.inputs, reply.data.background === true, reply.data.reusableConversations, reply.data.inputOpeningIds);
-  if (!backgroundReady) await reconcileBackgroundWindow(reply.data);
-  const monitoring = reply.data.recoveryMonitoring === true;
-  if (monitoring !== recoveryMonitoring) {
-    recoveryMonitoring = monitoring;
-    await persistLive().catch(() => undefined);
-  }
-  if (await acceptBrowserRevival(reply.data.revival)) await recoverDeferredRevivals();
   // Quoted back exactly as they arrived. A token names the handout being answered, so that a
   // receipt this pass sends late cannot close a repair the app has since raised for a different
   // turn. An entry missing either half is not actionable and is dropped rather than guessed at.
@@ -2162,6 +2208,20 @@ async function maintainOnce() {
       focus: Boolean(entry && entry.focus === true)
     }))
     .filter((entry) => entry.conversationId && entry.token);
+  const repairConversations = new Set(repairs.map(entry => entry.conversationId));
+  // Reloading the same document races its final input offer. Repair it now; the
+  // still-durable app row is offered on the next status pass after the reload.
+  const inputs = Array.isArray(reply.data.inputs)
+    ? reply.data.inputs.filter(input => !repairConversations.has(cleanConversationId(input?.conversationId)))
+    : reply.data.inputs;
+  await deliverDesktopInputs(inputs, reply.data.background === true, reply.data.reusableConversations, reply.data.inputOpeningIds);
+  if (!backgroundReady) await reconcileBackgroundWindow(reply.data);
+  const monitoring = reply.data.recoveryMonitoring === true;
+  if (monitoring !== recoveryMonitoring) {
+    recoveryMonitoring = monitoring;
+    await persistLive().catch(() => undefined);
+  }
+  if (await acceptBrowserRevival(reply.data.revival)) await recoverDeferredRevivals();
   const nonDiscardable = new Set(
     (Array.isArray(reply.data.nonDiscardableConversations) ? reply.data.nonDiscardableConversations : [])
       .map(cleanConversationId)
@@ -2830,6 +2890,9 @@ const HANDLERS = {
         ...(typeof message.token === 'string' && message.sourceAttempt === true
           ? { token: message.token, sourceAttempt: true }
           : {}),
+        ...(typeof message.token === 'string' && message.sourceLost === true
+          ? { token: message.token, sourceLost: true }
+          : {}),
         ...(typeof message.token === 'string' && message.sourceDispatch === true
           ? { token: message.token, sourceDispatch: true }
           : {}),
@@ -3164,6 +3227,7 @@ function conversationForTab(tab) {
 // Document unload is not conversation lifetime. A real tab close is: reload keeps the
 // same tab id, while closing it wakes the service worker and retires only that tab's claim.
 chrome.tabs.onRemoved.addListener((id) => {
+  recoveryReloads.delete(id);
   clearDeferredRevivalOffersForTab(id);
   void serializeTab(id, async () => {
     const documentId = await markTerminal(id);
@@ -3247,13 +3311,13 @@ chrome.tabs.onUpdated.addListener((id, changeInfo) => {
  * That exact split produces a healthy MCP tunnel plus a permanently growing Unattributed
  * session and no session at all for the ChatGPT tab.
  *
- * runtime.onInstalled fires for unpacked Reload as an update, so repair only at that real
- * lifecycle boundary — never from the service worker's ordinary wake/sleep cycle. The
- * isolated content script has its own one-instance guard because a newly loading page can
- * receive both its static manifest injection and this recovery injection.
+ * runtime.onInstalled fires for unpacked Reload as an update. Never hot-reinject a
+ * runtime into an invalidated surviving page: old DOM mutations and MAIN-world hooks
+ * remain present. Only an exact, natively idle document may reload; static manifest
+ * startup establishes the fresh runtime. A draft or uncertain page stays untouched.
  */
 const CHATGPT_TAB_URLS = ['https://chatgpt.com/*', 'https://chat.openai.com/*'];
-const PAGE_RECORDER_VERSION = 11;
+const PAGE_RECORDER_VERSION = 12;
 
 let deferredRecoveryWork = null;
 
@@ -3500,40 +3564,71 @@ function recoverDeferredRevivals() {
   return tracked;
 }
 
+/** Runs in the existing isolated world; it installs no recorder, observer or listener. */
+function idleRecorderDocument(expectedUrl, expectedVersion, deadlineAt, reload) {
+  try {
+    if (Date.now() >= deadlineAt || location.href !== expectedUrl || document.readyState !== 'complete' ||
+        typeof CLF_DOM === 'undefined') return null;
+    const incumbent = globalThis.__CLF_CONTENT_RECORDER__;
+    if (incumbent && incumbent.version >= expectedVersion && incumbent.healthy?.() === true) return null;
+    const box = CLF_DOM.composer();
+    if (!box || !box.isConnected || !CLF_DOM.composerVisible() || box.disabled || box.readOnly ||
+        box.getAttribute('aria-disabled') === 'true' || box.getAttribute('contenteditable') === 'false' ||
+        String(box.value || box.textContent || '').trim() || CLF_DOM.hasComposerAttachments() ||
+        CLF_DOM.generating() || CLF_DOM.stopButton()) return null;
+    // A queued script can execute after its worker-side timeout. Expiry and every
+    // native-page precondition are checked in this same task before native reload.
+    if (Date.now() >= deadlineAt || location.href !== expectedUrl) return null;
+    if (reload) location.reload();
+    return { idle: true, url: expectedUrl };
+  } catch { return null; }
+}
+
+async function boundedRecoveryCall(operation) {
+  let timer;
+  try {
+    return await Promise.race([
+      operation(),
+      new Promise(resolve => { timer = setTimeout(() => resolve(null), 3000); })
+    ]);
+  } catch { return null; } finally { clearTimeout(timer); }
+}
+
+// One reload attempt per old document; its missing receipt is not another attempt.
+const recoveryReloads = new Map();
 async function restoreChatgptTab(id) {
-  try {
-    const live = await chrome.tabs.sendMessage(id, { type: 'clf-recorder-ping' });
-    if (live && live.ok === true && live.recorderVersion === PAGE_RECORDER_VERSION) {
-      // Healthy content.js does not prove the independently running MAIN-world helper is
-      // still present. Request-id ownership depends on fiber.js, and re-executing it is
-      // idempotent because the helper keeps one listener per protocol version.
-      try {
-        await chrome.scripting.executeScript({ target: { tabId: id }, world: 'MAIN', files: ['fiber.js'] });
-      } catch {
-        // The tab can navigate between the ping and repair. Static injection covers it.
-      }
-      return true;
-    }
-  } catch {
-    // No receiver is the expected signature of an already-open tab whose isolated world
-    // was invalidated by an extension reload. Fall through to deterministic recovery.
-  }
-  try {
-    // Rebuild the isolated-world DOM adapter before the recorder that consumes it.
-    await chrome.scripting.executeScript({ target: { tabId: id }, files: ['chatgpt-dom.js'] });
-    // Keep the React/Fiber reader in ChatGPT's own world, exactly like the static manifest
-    // declaration. An older helper may still answer too; the nonce/version gate in
-    // content.js makes those replies harmless, and a future version bump rejects them.
-    await chrome.scripting.executeScript({ target: { tabId: id }, world: 'MAIN', files: ['fiber.js'] });
-    await chrome.scripting.executeScript({ target: { tabId: id }, files: ['content.js'] });
-    await chrome.scripting.insertCSS({ target: { tabId: id }, files: ['overlay.css'] });
-    // Successful injection means this exact tab is recovering. Its document registration will
-    // re-run revival routing; opening a second tab during that handoff recreates the race.
+  const live = await boundedRecoveryCall(() => chrome.tabs.sendMessage(id, { type: 'clf-recorder-ping' }));
+  if (live?.ok === true && live.recorderVersion === PAGE_RECORDER_VERSION) {
+    recoveryReloads.delete(id);
+    // The live recorder's document-scoped repair_fiber request owns missing Fiber.
     return true;
-  } catch {
-    // Injection failure does not transfer ownership to a replacement tab.
-    return false;
   }
+  try {
+    const tab = await chrome.tabs.get(id);
+    if (!tab || !isChatGptUrl(tab.url) || tab.pendingUrl || tab.status !== 'complete') return false;
+    const key = String(id), knownDocument = tabDocuments[key], knownEpoch = tabEpochs[key];
+    const results = await boundedRecoveryCall(() => chrome.scripting.executeScript({
+      target: { tabId: id }, func: idleRecorderDocument,
+      args: [tab.url, PAGE_RECORDER_VERSION, Date.now() + 3000, false]
+    }));
+    const proof = Array.isArray(results) && results.length === 1 ? results[0] : null;
+    if (!proof || proof.frameId !== 0 || typeof proof.documentId !== 'string' || !proof.documentId ||
+        proof.result?.idle !== true || proof.result.url !== tab.url || recoveryReloads.get(id) === proof.documentId) return false;
+    const current = await chrome.tabs.get(id);
+    if (!current || current.pendingUrl || current.status !== 'complete' || current.url !== tab.url ||
+        (knownDocument && (tabDocuments[key] !== knownDocument || tabEpochs[key] !== knownEpoch)) ||
+        (tabDocuments[key] && tabDocuments[key] !== proof.documentId)) return false;
+    recoveryReloads.set(id, proof.documentId);
+    await boundedRecoveryCall(() => chrome.scripting.executeScript({
+      // tabs.reload has no document fence. Recheck and reload synchronously inside
+      // only the proven document, so navigation/draft changes cannot consume proof.
+      target: { tabId: id, documentIds: [proof.documentId] }, func: idleRecorderDocument,
+      args: [tab.url, PAGE_RECORDER_VERSION, Date.now() + 3000, true]
+    }));
+  } catch { /* Missing native idle proof leaves the user's exact tab untouched. */ }
+  // Static manifest startup and the new document's registration own continuation.
+  // A reload response is neither a live recorder nor a delivery receipt.
+  return false;
 }
 
 async function restoreOpenChatgptTabs() {

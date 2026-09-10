@@ -371,6 +371,7 @@ const startedCompactions = (harness: Harness): any[] =>
       !message.cancel &&
       !message.summary &&
       !message.sourceAttempt &&
+      !message.sourceLost &&
       !message.sourceDispatch &&
       !message.sourceMessageId &&
       !message.destinationAttempt &&
@@ -9612,7 +9613,7 @@ describe('the Compact & resume control', () => {
     expect(startedCompactions(live)).toEqual([]);
     expect(sends()).toBe(0);
     expect(composerText(live.document)).toBe('');
-    expect(live.document.querySelector('.clf-pill-text')!.textContent).toContain('still running');
+    expect(live.document.querySelector('.clf-pill-text')!.textContent).toContain('실행 중이어서');
   });
 
   it('outlives the recorder attribution grace before declaring a finished call stuck', async () => {
@@ -9681,7 +9682,7 @@ describe('the Compact & resume control', () => {
     expect(startedCompactions(live)).toEqual([]);
     expect(sends()).toBe(0);
     expect(composerText(live.document)).toBe('');
-    expect(live.document.querySelector('.clf-pill-text')!.textContent).toContain('Could not verify');
+    expect(live.document.querySelector('.clf-pill-text')!.textContent).toContain('확인하지 못해');
   });
 
   it('leaves the old chat alone and never opens a request at all when the turn will not stop', async () => {
@@ -9714,7 +9715,7 @@ describe('the Compact & resume control', () => {
     expect(live.sent.filter((message) => message.type === 'compact')).toEqual([
       expect.objectContaining({ ticket: true, automatic: false })
     ]);
-    expect(live.document.querySelector('.clf-pill-text')!.textContent).toContain('would not stop');
+    expect(live.document.querySelector('.clf-pill-text')!.textContent).toContain('중지하지 못해');
   });
 
   it('never overwrites a draft the user is writing', async () => {
@@ -9743,9 +9744,47 @@ describe('the Compact & resume control', () => {
     expect(compacts[compacts.length - 1]).toMatchObject({ cancel: true });
   });
 
-  it('keeps an automatic ticket open when a page-side composer error happens before Send', async () => {
+  it('durably retires an automatic ticket blocked by a persistent user draft without changing the draft', async () => {
     const automaticJob = {
       sessionId: 's-auto-page-error',
+      stage: 'handoff-pending',
+      automatic: true,
+      busy: true,
+      handoffId: null,
+      error: null
+    };
+    live = await harness(undefined, {
+      activity: () => ({ ok: true, data: { entries: [], stream: [], nextSince: 0, pendingTools: 0, job: null } }),
+      compact: (message) =>
+        message.sourceLost
+          ? { ok: true, data: { aborted: true, job: null } }
+          : {
+              ok: true,
+              data: {
+                started: true,
+                token: 'tok-auto-page-error',
+                prompt: 'write the automatic handoff brief',
+                job: automaticJob
+              }
+            }
+    });
+    live.hook.injectControl();
+    live.document.querySelector('#prompt-textarea')!.textContent = 'draft that makes prompt insertion fail';
+
+    await live.hook.startCompact(true);
+
+    const compacts = live.sent.filter((message) => message.type === 'compact');
+    expect(compacts[0]).toMatchObject({ ticket: true, automatic: true });
+    expect(compacts).toContainEqual(expect.objectContaining({ token: 'tok-auto-page-error', sourceLost: true }));
+    expect(compacts.some((message) => message.cancel === true)).toBe(false);
+    expect(live.sent.some((message) => message.type === 'compact' && message.sourceAttempt === true)).toBe(false);
+    expect(composerText(live.document)).toBe('draft that makes prompt insertion fail');
+    expect(live.document.querySelector('.clf-pill-text')!.textContent).toContain('clear the message box');
+  });
+
+  it('keeps an automatic ticket recoverable when the composer itself is transiently missing', async () => {
+    const automaticJob = {
+      sessionId: 's-auto-missing-composer',
       stage: 'handoff-pending',
       automatic: true,
       busy: true,
@@ -9758,14 +9797,14 @@ describe('the Compact & resume control', () => {
         ok: true,
         data: {
           started: true,
-          token: 'tok-auto-page-error',
+          token: 'tok-auto-missing-composer',
           prompt: 'write the automatic handoff brief',
           job: automaticJob
         }
       })
     });
     live.hook.injectControl();
-    live.document.querySelector('#prompt-textarea')!.textContent = 'draft that makes prompt insertion fail';
+    live.document.querySelector('#prompt-textarea')!.remove();
 
     await live.hook.startCompact(true);
 
@@ -9773,6 +9812,64 @@ describe('the Compact & resume control', () => {
     expect(compacts[0]).toMatchObject({ ticket: true, automatic: true });
     expect(compacts.some((message) => message.cancel === true)).toBe(false);
     expect(live.document.querySelector('.clf-pill-text')!.textContent).toContain('clear the message box');
+  });
+
+  it('preserves a stale COS handoff draft including user edits and retires the unsent ticket', async () => {
+    const pendingJob = {
+      sessionId: 's-auto-stale-draft',
+      stage: 'handoff-pending',
+      automatic: true,
+      busy: true,
+      handoffId: null,
+      error: null,
+      sourceSend: { state: 'not-attempted', messageId: null }
+    };
+    live = await harness(undefined, {
+      activity: () => ({
+        ok: true,
+        data: {
+          entries: [],
+          stream: [],
+          nextSince: 0,
+          pendingTools: 0,
+          job: pendingJob
+        }
+      }),
+      compact: (message) => {
+        if (message.sourceAttempt) {
+          return { ok: true, data: { allowed: true } };
+        }
+        if (message.sourceDispatch) return { ok: true, data: { armed: true } };
+        if (message.sourceLost) return { ok: true, data: { aborted: true } };
+        return {
+          ok: true,
+          data: {
+            started: false,
+            token: '0123456789abcdef0123456789abcdef',
+            prompt: '[[CLF-HANDOFF:0123456789abcdef0123456789abcdef]]\n\ncurrent handoff prompt',
+            job: pendingJob
+          }
+        };
+      }
+    });
+    live.hook.injectControl();
+    const stale =
+      '[[CLF-HANDOFF:fedcba9876543210fedcba9876543210]]\n\n' +
+      'Chat On Steroids is compacting this conversation so a fresh chat can continue the work. Stop whatever you were doing and do only this.\n\n' +
+      'stale rejected handoff prompt';
+    live.document.querySelector('#prompt-textarea')!.textContent = stale;
+
+    await live.hook.pullActivity();
+    await settle();
+    await live.hook.pullActivity();
+    await settle();
+
+    expect(startedCompactions(live)).toHaveLength(1);
+    expect(live.sent.some((message) => message.type === 'compact' && message.cancel === true)).toBe(false);
+    expect(live.sent.some((message) => message.type === 'compact' && message.sourceLost === true)).toBe(true);
+    expect(live.sent.some((message) => message.type === 'compact' && message.sourceAttempt === true)).toBe(false);
+    expect(live.sent.some((message) => message.type === 'compact' && message.sourceDispatch === true)).toBe(false);
+    expect(composerText(live.document)).toBe(stale);
   });
 
   it('does not submit a compaction prompt after the composer changes during its pre-send wait', async () => {
@@ -9841,7 +9938,7 @@ describe('the Compact & resume control', () => {
    * with tool refusals. The composer now carries the one word, and the hover says where the
    * block is undone.
    */
-  it('says "Chat blocked" beside the gear of a chat blocked in the app, and how to release it', async () => {
+  it('says "차단된 대화" beside the gear of a chat blocked in the app, and how to release it', async () => {
     let blocked = 'blocked';
     live = await harness(undefined, {
       activity: () => ({
@@ -10054,6 +10151,34 @@ describe('the Compact & resume control', () => {
     expect(live.sent.some((message) => message.type === 'compact' && message.cancel === true)).toBe(false);
   });
 
+  it.each(['disabled', 'generating', 'edited', 'edited-after-arm'])('does not send a handoff when its source approval races %s', async change => {
+    let clicks = 0;
+    live = await harness(undefined, {
+      activity: () => ({ ok: true, data: { entries: [], stream: [], nextSince: 0, pendingTools: 0, job: null } }),
+      compact: message => {
+        if (message.sourceAttempt) {
+          const button = live!.document.querySelector('[data-testid="send-button"]') as HTMLButtonElement;
+          if (change === 'disabled') button.disabled = true;
+          if (change === 'generating') startGenerating(live!.document, { send: false });
+          if (change === 'edited') live!.document.querySelector('#prompt-textarea')!.textContent = 'my unrelated draft';
+          return { ok: true, data: { allowed: true } };
+        }
+        if (message.sourceDispatch) {
+          if (change === 'edited-after-arm') live!.document.querySelector('#prompt-textarea')!.textContent = 'my unrelated draft';
+          return { ok: true, data: { armed: true } };
+        }
+        return { ok: true, data: { started: true, token: 'tok-ready-check', prompt: 'write the exact handoff brief',
+          job: { sessionId: 's1', stage: 'handoff-pending', busy: true, automatic: true } } };
+      }
+    });
+    live.document.querySelector('[data-testid="send-button"]')!.addEventListener('click', () => clicks++);
+    await live.hook.startCompact();
+    await settle();
+    expect(clicks).toBe(0);
+    expect(live.sent.filter(message => message.sourceDispatch)).toHaveLength(change === 'edited-after-arm' ? 1 : 0);
+    if (change.startsWith('edited')) expect(live.document.querySelector('#prompt-textarea')!.textContent).toBe('my unrelated draft');
+  });
+
   it('arms the click durably before submitting the handoff, and only then', async () => {
     const order: string[] = [];
     live = await harness(undefined, {
@@ -10198,16 +10323,16 @@ describe('truthful quiet operation status', () => {
   it('explains one/multiple workers and failures without claiming the parent depends on them', async () => {
     live = await harness();
     const view = (workers: unknown) => live!.hook.stageView({ now: 10000, changedAt: 0, progress: { workers } });
-    expect(view({ active: 1, finished: 2, failed: 0, names: ['Repository audit'] })).toMatchObject({ stage: 'Worker still running: Repository audit', detail: '2 finished · 1 running' });
-    expect(view({ active: 2, finished: 1, failed: 1 })).toMatchObject({ stage: '2 workers still running', detail: '1 finished · 2 running · 1 failed' });
-    expect(view({ active: 0, finished: 2, failed: 1 })).toMatchObject({ stage: 'A worker needs attention' });
+    expect(view({ active: 1, finished: 2, failed: 0, names: ['Repository audit'] })).toMatchObject({ stage: '작업자 실행 중: Repository audit', detail: '2개 완료 · 1개 실행 중' });
+    expect(view({ active: 2, finished: 1, failed: 1 })).toMatchObject({ stage: '작업자 2개 실행 중', detail: '1개 완료 · 2개 실행 중 · 1개 실패' });
+    expect(view({ active: 0, finished: 2, failed: 1 })).toMatchObject({ stage: '작업자 확인 필요' });
     expect(view({ active: 0, finished: 3, failed: 0 })).toBeNull(); // no invented consolidation
   });
   it('waits through short pauses and clears the status when real output resumes', async () => {
     live = await harness();
     const progress = { tools: { count: 1, since: 5000 } };
     expect(live.hook.stageView({ now: 6000, changedAt: 0, progress })).toBeNull();
-    expect(live.hook.stageView({ now: 10000, changedAt: 0, progress })).toMatchObject({ stage: 'Waiting for a local tool to finish' });
+    expect(live.hook.stageView({ now: 10000, changedAt: 0, progress })).toMatchObject({ stage: '로컬 도구 실행 완료 대기 중' });
     expect(live.hook.stageView({ now: 10000, changedAt: 9999, progress })).toBeNull();
     expect(live.hook.stageView({ now: 10000, changedAt: 0, progress: { tools: null } })).toBeNull();
   });
@@ -10224,7 +10349,7 @@ describe('truthful quiet operation status', () => {
     await live.hook.pullActivity();
     expect(live.document.querySelectorAll('.clf-stage')).toHaveLength(1);
     expect(live.document.querySelector('.clf-stage')).toBe(panel);
-    expect(panel!.textContent).toContain('2 local tools');
+    expect(panel!.textContent).toContain('로컬 도구 2개');
     live.reply.set('activity', () => ({ ok: false }));
     await live.hook.pullActivity();
     expect(live.document.querySelector('.clf-stage')).toBeNull();
@@ -10232,7 +10357,7 @@ describe('truthful quiet operation status', () => {
   });
   it('does not guess a GitHub or API dependency from an otherwise unexplained pending generation', async () => {
     live = await harness();
-    expect(live.hook.stageView({ now: 10000, changedAt: 0, generating: true })).toMatchObject({ stage: 'Still waiting for the current operation to complete' });
+    expect(live.hook.stageView({ now: 10000, changedAt: 0, generating: true })).toMatchObject({ stage: '현재 작업의 완료를 기다리는 중' });
     expect(live.hook.stageView({ now: 10000, changedAt: 0, generating: false })).toBeNull();
   });
 });
@@ -10340,6 +10465,40 @@ describe('folding away the chat’s opening instruction', () => {
     return section;
   }
 
+  it('keeps provider-owned children in their original parent through collapse, expansion and recorder takeover', async () => {
+    live = await harness();
+    const section = userTurn(live.document, 'unchanged-parent', BRIEF.repeat(100));
+    const message = section.querySelector('[data-message-id]') as HTMLElement;
+    const body = message.firstElementChild!;
+    const originalChildren = [...message.childNodes];
+    live.reply.set('activity', () => ({ ok: true, data: { entries: [], bootstrap: 'resume', job: null } }));
+    await live.hook.pullActivity();
+    await settle();
+    expect(body.parentElement).toBe(message);
+    expect([...message.childNodes]).toEqual(originalChildren);
+    const toggle = section.querySelector('button.clf-boot') as HTMLButtonElement;
+    expect(toggle.parentElement).toBe(message.parentElement);
+    expect(toggle.nextElementSibling).toBe(message);
+    expect(toggle.getAttribute('aria-expanded')).toBe('false');
+    toggle.click();
+    expect(toggle.getAttribute('aria-expanded')).toBe('true');
+    expect(message.hasAttribute('data-clf-bootstrap-collapsed')).toBe(false);
+    expect([...message.childNodes]).toEqual(originalChildren);
+    expect(live.window.CLF_DOM.messages()[0].text).toBe(BRIEF.repeat(100));
+    toggle.click();
+    expect(message.getAttribute('data-clf-bootstrap-collapsed')).toBe('1');
+
+    live.window.__CLF_CONTENT_RECORDER__.stop();
+    expect(section.querySelector('.clf-boot')).toBeNull();
+    expect(message.hasAttribute('data-clf-bootstrap-collapsed')).toBe(false);
+    expect([...message.childNodes]).toEqual(originalChildren);
+    live.window.eval(contentSource);
+    await settle();
+    expect(section.querySelectorAll('button.clf-boot')).toHaveLength(1);
+    expect([...message.childNodes]).toEqual(originalChildren);
+    expect(live.window.CLF_DOM.messages()[0].text).toBe(BRIEF.repeat(100));
+  });
+
   it('leaves a chat the user started alone', async () => {
     live = await harness();
     const section = await opened(null, 'rename the thing');
@@ -10352,22 +10511,24 @@ describe('folding away the chat’s opening instruction', () => {
     const section = await opened('resume');
     const fold = section.querySelector('.clf-boot') as HTMLElement;
     expect(fold).not.toBeNull();
-    expect(fold.querySelector('summary')!.textContent).toContain('사용자가 입력한 글이 아니라');
-    // Moved, not copied: one copy of a several-thousand-character brief, not two.
+    expect(fold.textContent).toContain('앱이 이전 대화에서 가져온');
+    // Original text stays under its provider-owned parent, with no duplicate preview.
     expect(section.querySelectorAll('.whitespace-pre-wrap')).toHaveLength(1);
-    expect(fold.textContent).toContain('REQUIREMENTS — no install, no reload');
+    expect(section.querySelector('[data-message-id]')!.textContent).toBe(BRIEF);
+    expect(fold.textContent).not.toContain('REQUIREMENTS');
     expect((section.querySelector('[data-message-id]') as HTMLElement).dataset.clfBootstrap).toBe('resume');
   });
 
   it('says which kind of machinery it was, and which worker this chat is', async () => {
     live = await harness();
     const section = await opened('worker', 'You are worker agent worker-3. Your task is …', { bootstrapAgent: 'worker-3' });
-    const summary = section.querySelector('.clf-boot summary')!;
+    const summary = section.querySelector('button.clf-boot')!;
     expect(summary.querySelector('.clf-boot-label')!.textContent).toBe(
-      'worker-3 — 사용자가 입력한 글이 아니라 앱이 작업자에게 전달한 지시입니다.'
+      'worker-3 대화 — 앱이 작업자에게 전달한 지시입니다'
     );
-    // The text itself stays visible in the closed fold, clamped, so the bubble keeps its width.
-    expect(summary.querySelector('.clf-boot-preview')!.textContent).toContain('You are worker agent worker-3');
+    // CSS clips the original source for the preview; the control copies no authored text.
+    expect(section.querySelector('[data-clf-bootstrap-collapsed="1"]')!.textContent).toContain('You are worker agent worker-3');
+    expect(summary.querySelector('.clf-boot-preview')).toBeNull();
   });
 
   it('folds only the first message, not everything the user went on to say', async () => {
@@ -10380,8 +10541,8 @@ describe('folding away the chat’s opening instruction', () => {
   });
 
   /**
-   * Asks the DOM rather than remembering. React re-rendering the message would take the
-   * fold with it, and a remembered "already done" would leave the wall of text on screen.
+   * React can replace the source children independently of the sibling control.
+   * Those new children must also remain where React mounted them.
    */
   it('folds it again when ChatGPT rebuilds the message', async () => {
     live = await harness();
@@ -10389,10 +10550,29 @@ describe('folding away the chat’s opening instruction', () => {
     const message = section.querySelector('[data-message-id]') as HTMLElement;
     message.replaceChildren(live.document.createElement('div'));
     message.firstElementChild!.textContent = BRIEF;
+    const replacement = message.firstElementChild;
 
     live.hook.foldBootstrap();
-    expect(section.querySelector('.clf-boot')!.textContent).toContain('TASK — ship v1.6');
+    expect(message.firstElementChild).toBe(replacement);
+    expect(replacement!.parentElement).toBe(message);
+    expect(message.textContent).toBe(BRIEF);
     expect(section.querySelectorAll('.clf-boot')).toHaveLength(1);
+  });
+
+  it('moves only its control when React replaces the whole authored message', async () => {
+    live = await harness();
+    const section = await opened('resume');
+    const oldMessage = section.querySelector('[data-message-id]') as HTMLElement;
+    const replacement = oldMessage.cloneNode(true) as HTMLElement;
+    replacement.removeAttribute('data-clf-bootstrap');
+    replacement.removeAttribute('data-clf-bootstrap-collapsed');
+    oldMessage.replaceWith(replacement);
+    const children = [...replacement.childNodes];
+    live.hook.foldBootstrap();
+    expect(oldMessage.hasAttribute('data-clf-bootstrap-collapsed')).toBe(false);
+    expect([...replacement.childNodes]).toEqual(children);
+    expect(section.querySelectorAll('.clf-boot')).toHaveLength(1);
+    expect(section.querySelector('.clf-boot')!.nextElementSibling).toBe(replacement);
   });
 
   it('is not fooled by a chat whose first message is the assistant’s', async () => {
@@ -12141,7 +12321,7 @@ describe('one live isolated-world recorder per document', () => {
 
     await expect(live.runtimeMessage({ type: 'clf-recorder-ping' })).resolves.toEqual({
       ok: true,
-      recorderVersion: 11
+      recorderVersion: 12
     });
   });
 
@@ -13312,14 +13492,22 @@ describe('the goal loop', () => {
    * keeps the turn, says so on the bar, and asks again on the plain wait — no backoff, because
    * nothing was spent — until the app has seen the chat finish.
    */
-  it('keeps the turn the app still sees working, and asks again on the plain wait', async () => {
+  it.each(['observed', 'durable'])('keeps the %s turn the app still sees working, and asks again on the plain wait', async (trigger) => {
     let asked = 0;
     let working = true;
+    let pending: Record<string, unknown> | null = null;
     live = await harness(`https://chatgpt.com/c/${CHAT}`, {
       ...goalReplies(),
+      activity: () => {
+        const reply = feed()();
+        return { ...reply, data: { ...reply.data, goal: { ...reply.data.goal, pending } } };
+      },
       goal_draft: () => {
         asked += 1;
-        if (working) return { ok: false, error: 'chat_still_working', message: 'This chat is still working on its answer.' };
+        if (working) return {
+          ok: false, status: 409,
+          data: { error: 'chat_still_working', retryable: true, message: 'This chat is still working on its answer.' }
+        };
         return goalReplies().goal_draft();
       }
     });
@@ -13336,18 +13524,34 @@ describe('the goal loop', () => {
       return timer(fn, ms);
     }) as typeof held.window.setTimeout;
 
-    await answerATurn(live, 'an end the page believes in');
+    if (trigger === 'observed') {
+      await answerATurn(live, 'an end the page believes in');
+    } else {
+      pending = { replyId: 'stable-final', turnId: 'g-original-turn', eventSeq: 12, acceptedAt: 1000 };
+      await live.hook.pullActivity();
+      await settle(800);
+    }
     expect(asked).toBe(1);
     const stage = () => live!.document.querySelector('.clf-stage')?.textContent ?? '';
-    expect(stage()).toContain('still sees this chat working');
+    expect(stage()).toContain('응답 완료 여부 확인 중');
+    expect(stage()).not.toContain('자동 진행이 중단되었습니다');
     expect(wakes, 'the page must ask again by itself').toHaveLength(1);
+
+    // Repeated activity snapshots must not release the durable claim and bypass the wait.
+    for (let i = 0; i < 5; i += 1) {
+      await live.hook.pullActivity();
+      await settle();
+    }
+    expect(asked).toBe(1);
+    expect(wakes).toHaveLength(1);
 
     // Still working: the same wait again, and no backoff on a draft nobody attempted.
     wakes[0]!();
     await settle(800);
     expect(asked).toBe(2);
     expect(wakes).toHaveLength(2);
-    expect(stage()).not.toContain('자동 진행 재시도');
+    expect(stage()).toContain('응답 완료 여부 확인 중');
+    expect(stage()).not.toContain('자동 진행이 중단되었습니다');
 
     // The app has seen the chat finish: the next ask is the draft.
     working = false;
@@ -13355,7 +13559,7 @@ describe('the goal loop', () => {
     await settle(800);
     expect(asked).toBe(3);
     expect(drafts(live)).toHaveLength(3);
-    expect(stage()).not.toContain('still sees this chat working');
+    expect(stage()).not.toContain('응답 완료 여부 확인 중');
   });
 
   /**
@@ -13797,7 +14001,7 @@ describe('the goal loop', () => {
       detail: 'out_of_credit: add credits',
       at: 2
     });
-    expect(view({ phase: 'sending', error: 'the message box was in use, so nothing was sent', draft: null })).toMatchObject({
+    expect(view({ phase: 'sending', error: '입력창을 사용 중이어서 전송하지 않았습니다', draft: null })).toMatchObject({
       kind: 'goal-error',
       at: 3
     });
@@ -13835,9 +14039,10 @@ describe('the goal loop', () => {
       stage: 'ChatGPT가 이어가기 요약 작성 중',
       at: 1
     });
-    // Dispatched and unresolved is the same fact for a reader: the click happened, and
-    // whether ChatGPT accepted it is exactly what the next step is waiting to find out.
-    expect(pending({ state: 'dispatched-unresolved', messageId: null })).toMatchObject({ at: 1 });
+    // Dispatch alone cannot prove ChatGPT received a prompt or started writing.
+    expect(pending({ state: 'dispatched-unresolved', messageId: null })).toMatchObject({
+      stage: '요약 요청의 전송 확인이 필요합니다', at: 0
+    });
     // Nothing has been typed yet, so "Preparing" is the truth and stays.
     expect(pending({ state: 'not-attempted', messageId: null })).toMatchObject({ at: 0 });
     expect(pending(null)).toMatchObject({ at: 0 });

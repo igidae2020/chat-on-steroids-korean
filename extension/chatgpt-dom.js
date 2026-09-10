@@ -23,6 +23,9 @@
  */
 
 var CLF_DOM = (() => {
+  // Recovery reinjects this helper into a surviving world. Retire its prior cache
+  // owner before publishing the replacement, so observers do not accumulate.
+  if (typeof CLF_DOM !== 'undefined') CLF_DOM?.dispose?.();
   const TURN = 'section[data-testid^="conversation-turn"]';
   // ChatGPT has used both shapes in the live renderer: the older tool-message span
   // and, as of 2026-08-15, a display-contents row wrapping the visible tool label.
@@ -323,6 +326,13 @@ var CLF_DOM = (() => {
   const sectionCache = new WeakMap();
   let cacheObserver = null;
   let cacheObserverFailed = false;
+  let disposed = false;
+
+  function dispose() {
+    disposed = true;
+    cacheObserver?.disconnect();
+    cacheObserver = null;
+  }
   const CACHE_ATTRIBUTES = [
     'class',
     'data-interrupted',
@@ -343,6 +353,7 @@ var CLF_DOM = (() => {
   }
 
   function ensureCacheObserver() {
+    if (disposed) return false;
     if (cacheObserver) return true;
     if (cacheObserverFailed) return false;
     try {
@@ -628,6 +639,14 @@ var CLF_DOM = (() => {
   // through ARIA only. Upload readiness and the final click must use the same gate.
   function sendButtonEnabled(button) {
     return !!button && !button.disabled && button.getAttribute('aria-disabled') !== 'true';
+  }
+
+  /** Shared preflight for durable send authorization and the actual submit. */
+  function canSend() {
+    const box = composer(), button = sendButton();
+    return !!box && box.isConnected && !generating() && !stopButton() &&
+      box.getAttribute('aria-disabled') !== 'true' && box.getAttribute('contenteditable') !== 'false' &&
+      !!box.textContent?.trim() && (!button || sendButtonEnabled(button));
   }
 
   /**
@@ -1611,8 +1630,7 @@ var CLF_DOM = (() => {
   async function send({ acceptanceTimeoutMs = 30000, stillCurrent = () => true, matchesUser = null, observeEvidence = null, clearAcceptedDraft = true } = {}) {
     try {
       const box = composer();
-      if (!box || !box.isConnected || !stillCurrent() || generating() || stopButton()) return false;
-      if (box.getAttribute('aria-disabled') === 'true' || box.getAttribute('contenteditable') === 'false') return false;
+      if (!stillCurrent() || !canSend()) return false;
       // Rich editors use adjacent paragraphs for newlines; textContent concatenates
       // their words. Preserve those boundaries when matching the rendered user message.
       const submitted = (typeof box.innerText === 'string' ? box.innerText : [...box.childNodes]
@@ -2073,6 +2091,7 @@ var CLF_DOM = (() => {
       const button = dialog && [...dialog.querySelectorAll('button')].find(node => text(node, 100) === 'Continue');
       if (button) button.click();
     },
+    dispose,
     conversationId,
     conversationFromPath,
     conversationTitle,
@@ -2085,6 +2104,7 @@ var CLF_DOM = (() => {
     stopButton,
     stopGeneration,
     sendButton,
+    canSend,
     progressLine,
     progressItems,
     interrupted,

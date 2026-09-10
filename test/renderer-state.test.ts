@@ -156,7 +156,7 @@ it('does not overwrite a focused dirty settings field on an unsolicited state pu
   stateListener(withMissingMacAccess);
   const accessWarning = w.document.getElementById('desktopAccess')!;
   expect(accessWarning.hidden).toBe(false);
-  expect(accessWarning.textContent).toContain('Accessibility: missing');
+  expect(accessWarning.textContent).toContain('손쉬운 사용: missing');
   expect(accessWarning.textContent).toContain('네이티브 기능에서 확인한 현재 권한 상태');
   expect((w.document.getElementById('openDesktopScreen') as HTMLButtonElement).hidden).toBe(true);
   expect((w.document.getElementById('openDesktopAccessibility') as HTMLButtonElement).hidden).toBe(false);

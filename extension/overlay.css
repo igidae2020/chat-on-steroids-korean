@@ -167,10 +167,15 @@
    machinery where the thing the user actually asked for belongs. Folded, never removed:
    it is real input a real model was given, and a transcript that quietly hides part of
    its own input is worse than a long one. */
-.clf-boot > summary {
+.clf-boot {
   display: block;
+  width: 100%;
+  border: 0;
+  padding: 0.35em 0;
+  background: transparent;
+  color: inherit;
+  text-align: start;
   cursor: pointer;
-  list-style: none;
   font-size: 0.82em;
   user-select: none;
 }
@@ -181,33 +186,20 @@
   opacity: 0.55;
 }
 
-/* The first two lines of the folded text. Present while closed so the bubble is the same
-   width open and closed — ChatGPT fits the bubble to its content, and a one-line summary
-   made the message lurch left every time it was opened. */
-.clf-boot-preview {
-  display: -webkit-box;
-  -webkit-box-orient: vertical;
-  -webkit-line-clamp: 2;
-  overflow: hidden;
-  margin-top: 0.25em;
-  font-weight: 400;
+.clf-boot-action {
+  display: block;
   opacity: 0.6;
 }
 
-.clf-boot[open] > summary .clf-boot-preview {
-  display: none;
+/* The original message is its own preview. Do not reparent React-owned children or
+   duplicate the handoff text just to collapse its presentation. */
+[data-clf-bootstrap-collapsed='1'] {
+  max-height: 4.5em !important;
+  overflow: hidden !important;
 }
 
-/* No disclosure triangle. The summary's children are blocks, so a marker — the native one
-   or a `::before` — landed on a line of its own above the label: a stray arrow floating in
-   empty space. The label and its clamped preview are the affordance; the whole summary is
-   the hit target. */
-.clf-boot > summary::-webkit-details-marker {
-  display: none;
-}
-
-.clf-boot > summary:hover .clf-boot-label,
-.clf-boot > summary:focus-visible .clf-boot-label {
+.clf-boot:hover .clf-boot-label,
+.clf-boot:focus-visible .clf-boot-label {
   opacity: 0.9;
 }
 

@@ -111,6 +111,7 @@ var CLF_DOM = (() => {
   function displayed(node) {
     return safe(() => {
       if (!node) return true;
+      if (typeof node.closest === 'function' && node.closest('[hidden], [aria-hidden="true"]')) return false;
       if (typeof node.closest === 'function' && node.closest(SCREEN_READER_ONLY)) return false;
       if (typeof node.getBoundingClientRect !== 'function') return true;
       const rect = node.getBoundingClientRect();
@@ -233,6 +234,7 @@ var CLF_DOM = (() => {
 
   function transportFailure(value) {
     const line = String(value || '').replace(/\s+/g, ' ').trim();
+    if (/^메시지 전송 시간이 초과되었습니다\.(?: 다시 시도해 주세요\.?)?(?:\s*다시 시도)?$/.test(line)) return true;
     return /^(?:message delivery timed out(?:\. please try again\.?)?|connection interrupted\.? waiting for the complete answer\.?|unknown error occurred\.?|there was an error generating (?:a|the) response\.?|error in message stream\.?|network error\.?|something went wrong\.?|something went wrong while generating the response(?:\. if this issue persists please contact us through our help center at help\.openai\.com\.?)?\.?)(?: retry)?$/i.test(line);
   }
 
@@ -249,7 +251,7 @@ var CLF_DOM = (() => {
   function retryFailure(button) {
     return safe(() => {
       const label = (button.innerText || button.textContent || '').replace(/\s+/g, ' ').trim();
-      if (!/^retry$/i.test(label) || !displayed(button)) return null;
+      if (!/^(?:retry|다시 시도)$/i.test(label) || !displayed(button)) return null;
       let node = button.parentElement;
       for (let up = 0; node && up < 8 && node !== document.body; up++, node = node.parentElement) {
         if (node.closest && node.closest(OWN_SURFACES)) return null;

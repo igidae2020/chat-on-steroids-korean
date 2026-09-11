@@ -21,11 +21,13 @@ vi.mock('electron', () => ({
   shell: {}
 }));
 
-const { defaultConfig, initConfigPath, saveConfig } = await import('../src/main/config.js');
+const { defaultConfig, getConfig, initConfigPath, saveConfig } = await import('../src/main/config.js');
+const { goalPendingReplyFor, resetGoalStateForTests } = await import('../src/main/goal.js');
 const { APP_VERSION, BRIDGE_PROTOCOL } = await import('../src/main/version.js');
 const { initSecretsPath, setSecret } = await import('../src/main/secrets.js');
 const {
   CHAT_SILENCE_MS,
+  PRO_SILENCE_MS,
   resetBridgeForTests,
   shutdownBridge,
   startBridge,
@@ -41,7 +43,8 @@ const {
 const { recordToolCall, resetRecorderForTests } = await import('../src/main/session/recorder.js');
 const { makeTempDir, removeTempDir } = await import('./helpers.js');
 
-const CHAT = '6a9705af-0d44-83ed-a5e3-b7b68df77df1';
+let CHAT = '6a9705af-0d44-83ed-a5e3-b7b68df77df1';
+let chatSerial = 0;
 const TURN = 'g-1cn09rgnc5jts-1-1';
 const ERROR_TEXT = 'Connection interrupted. Waiting for the complete answer';
 const EXTENSION_ORIGIN = 'chrome-extension://abcdefghijklmnopabcdefghijklmnop';
@@ -158,6 +161,7 @@ afterAll(async () => {
 });
 
 beforeEach(async () => {
+  CHAT = `6a9705af-0d44-83ed-a5e3-${String(++chatSerial).padStart(12, '0')}`;
   resetBridgeForTests();
   resetRecorderForTests();
   writeDurableSoon('bridge-commands', null);
@@ -168,6 +172,47 @@ beforeEach(async () => {
 });
 
 describe('silence after a confirmed assistant-error repair', () => {
+  it.each(['pro', 'unknown'])('keeps observing a failed %s Loop turn after each confirmed reload without sending a follow-up', async model => {
+    const previous = getConfig();
+    await saveConfig({ ...previous, goal: { ...previous.goal, enabled: true, mode: 'loop' } });
+    await setSecret('openRouterApiKey', 'test-recovery');
+    resetGoalStateForTests();
+    vi.useFakeTimers();
+    try {
+      await pair();
+      await events([
+        ...(model === 'pro' ? [{ kind: 'model_selection', model: 'gpt-6-pro', reasoningEffort: 'pro', time: Date.now() }] : []),
+        { kind: 'turn_start', time: Date.now(), turnId: TURN }
+      ]);
+      await vi.advanceTimersByTimeAsync(60_000);
+      await events([
+        { kind: 'chat_error', time: Date.now(), text: ERROR_TEXT, turnId: TURN, recoverable: true },
+        { kind: 'turn_end', time: Date.now(), turnId: TURN, outcome: 'failed' }
+      ]);
+      const error = await maintenance();
+      expect(error).toMatchObject({ reason: 'assistant-error' });
+      expect(await maintenance(error!.token, 'reloaded')).toBeNull();
+      for (let index = 0; index < 3; index++) {
+        await vi.advanceTimersByTimeAsync(PRO_SILENCE_MS - 1);
+        await sweepStaleSwarm(Date.now());
+        expect(await maintenance()).toBeNull();
+        await vi.advanceTimersByTimeAsync(2);
+        await sweepStaleSwarm(Date.now());
+        const repair = await maintenance();
+        expect(repair).toMatchObject({ reason: 'silence' });
+        expect(await maintenance(repair!.token, 'reloaded')).toBeNull();
+        expect(goalPendingReplyFor(CHAT)).toBeNull();
+      }
+      // A real completed response, not the failed browser turn, ends observation.
+      await events([{ kind: 'assistant_message', time: Date.now(), messageId: 'recovered-final', text: 'Finished.', final: true }]);
+      await vi.advanceTimersByTimeAsync(PRO_SILENCE_MS + 1);
+      await sweepStaleSwarm(Date.now());
+      expect((await maintenance())?.reason).not.toBe('silence');
+    } finally {
+      vi.useRealTimers(); resetGoalStateForTests(); await setSecret('openRouterApiKey', ''); await saveConfig(previous);
+    }
+  });
+
   it('still queues the silence reload when the same turn never ends', async () => {
     vi.useFakeTimers();
     try {

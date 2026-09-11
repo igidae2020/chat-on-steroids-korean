@@ -1527,15 +1527,18 @@ thread per second on a 300-turn chat, and the freeze behind the 2026-09-03 prime
 message text or tool rows around the cache; add a field to the memo instead.
 
 An ordinary open semantic turn grants its **conversation** a two-minute silence deadline in `activeUntil`.
-Known Pro models instead use ten minutes from meaningful work/tool-start evidence. A late exact
+Known Pro models and unknown models in Goal/Loop instead use ten minutes from meaningful work/tool-start evidence. A late exact
 picker or MCP identity promotes an unknown grant without resetting its evidence timestamp. A real
-turn-end removes activity immediately; a genuinely newer exact MCP call can revive it. Pro never
+completed/stopped turn-end removes activity immediately; a failed/unknown Pro or unknown Goal/Loop stream is not server completion. A genuinely newer exact MCP call can revive activity. Pro never
 receives an inactivity-generated Goal or automatic compaction. Picker presence alone is not work.
 `grantActivity()` arms/pushes it from accepted current-turn evidence and attributed calls;
 `endActivity()` removes it only on a real terminal. `armSilenceSweep()` owns one timer for the
 earliest deadline across all chats, so a 30-second maintenance tick cannot silently add another
 half-minute to the contract. Expiry queues one receipt-tracked browser recovery for an ordinary
 chat, Prime or Worker alike; a confirmed one-shot repair is not repeated for the same episode.
+Goal/Loop retains observation of unfinished Pro/unknown responses through the same repair queue:
+a confirmed reload schedules the next check ten minutes later without inventing work evidence
+or a synthetic follow-up. Canonical completion, Stop, block and Goal/Loop Off fence this observation.
 **A resumed chat is armed at the commit** (`armResumedChat()`, called from both commit sites —
 the `/compact` destination-marker route and the `/commands/ack` resume receipt): the moment S
 names B, B gets the same grant an accepted turn would have earned. The 2026-09-02 automatic

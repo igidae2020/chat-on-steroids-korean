@@ -1,4 +1,5 @@
-import { describe, expect, it } from 'vitest';
+import { spawn, type ChildProcessWithoutNullStreams } from 'node:child_process';
+import { afterAll, beforeAll, describe, expect, it } from 'vitest';
 import {
   act,
   actAndCapture,
@@ -8,23 +9,82 @@ import {
   getWindowState,
   listWindows,
   screenshot,
+  stopComputerHelper,
   waitForWindow
 } from '../src/main/computer/index.js';
+import { findWindowsPowerShell, terminateProcessTree } from '../src/main/exec.js';
 import { IS_WINDOWS } from './helpers.js';
 
 describe.runIf(IS_WINDOWS)('desktop helper', () => {
-  // A hosted runner can have no visible desktop window at all, and getWindowState is right
-  // to answer that with WINDOW_NOT_FOUND — that is the production semantic, not a bug to
-  // work around here. The tests below are about what a window state *says* once there is a
-  // window, so they find one first and skip when the desktop has none, the way the window
-  // tests above already do. Naming the window also removes a race the foreground introduces:
-  // between probing and asking, whatever happened to be in front may no longer be.
-  const visibleWindow = async (): Promise<number | null> => {
-    const active = (await activeWindow()).window;
-    if (active) return active.id;
-    const { windows } = await listWindows();
-    return windows.find((w) => w.state !== 'minimized')?.id ?? null;
-  };
+  let fixture: ChildProcessWithoutNullStreams | null = null;
+  let fixtureWindow: number;
+
+  beforeAll(async () => {
+    // UIA assertions need an owned, responsive provider, not whichever console/browser the
+    // hosted runner left in front. Keep a real message loop and report readiness by HWND;
+    // neither a fixed sleep nor skipping an empty desktop establishes a usable fixture.
+    const script = String.raw`
+$ErrorActionPreference = 'Stop'
+Add-Type -AssemblyName PresentationFramework
+Add-Type -TypeDefinition @'
+using System;
+using System.Windows;
+using System.Windows.Controls;
+using System.Windows.Interop;
+public static class DesktopTestWindow {
+  public static void RunFixture() {
+    var window = new Window {
+      Title = "COS desktop test fixture", ShowActivated = false,
+      Left = 40, Top = 40, Width = 360, Height = 220,
+      Content = new Button {
+        Name = "fixtureAction", Content = "Fixture action",
+        Width = 140, Height = 40, Margin = new Thickness(20),
+        HorizontalAlignment = HorizontalAlignment.Left,
+        VerticalAlignment = VerticalAlignment.Top
+      }
+    };
+    window.ContentRendered += delegate {
+      Console.WriteLine(new WindowInteropHelper(window).Handle.ToInt64());
+      Console.Out.Flush();
+    };
+    new Application().Run(window);
+  }
+}
+'@ -ReferencedAssemblies PresentationFramework,PresentationCore,WindowsBase,System.Xaml
+[DesktopTestWindow]::RunFixture()
+`;
+    const child = spawn(findWindowsPowerShell() ?? 'powershell.exe', [
+      '-NoProfile', '-NonInteractive', '-Sta', '-EncodedCommand', Buffer.from(script, 'utf16le').toString('base64')
+    ], { windowsHide: true, stdio: ['pipe', 'pipe', 'pipe'] });
+    fixture = child;
+    fixtureWindow = await new Promise<number>((resolve, reject) => {
+      let output = '';
+      let errors = '';
+      const timer = setTimeout(() => reject(new Error(`Desktop fixture did not become ready: ${errors}`)), 15_000);
+      child.stderr.on('data', (chunk: Buffer) => { errors = (errors + chunk.toString('utf8')).slice(-4000); });
+      child.stdout.on('data', (chunk: Buffer) => {
+        output += chunk.toString('utf8');
+        if (!output.includes('\n')) return;
+        clearTimeout(timer);
+        const id = Number(output.trim());
+        if (Number.isSafeInteger(id) && id > 0) resolve(id);
+        else reject(new Error(`Invalid desktop fixture HWND: ${output}`));
+      });
+      child.once('error', (error) => { clearTimeout(timer); reject(error); });
+      child.once('exit', (code) => {
+        clearTimeout(timer);
+        reject(new Error(`Desktop fixture exited (${code}): ${errors}`));
+      });
+    });
+  });
+
+  afterAll(async () => {
+    try {
+      await stopComputerHelper();
+    } finally {
+      if (fixture?.pid && fixture.exitCode === null) await terminateProcessTree(fixture.pid);
+    }
+  });
 
   it('starts once and serves repeated window queries', async () => {
     const first = await listWindows();
@@ -97,21 +157,23 @@ describe.runIf(IS_WINDOWS)('desktop helper', () => {
   });
 
   it('queries Windows UI Automation without requiring a screenshot', async () => {
-    const result = await findUi({ role: 'Button', maxResults: 5 });
-    expect(result.window).toBeGreaterThan(0);
+    const result = await findUi({ window: fixtureWindow, query: 'Fixture action', role: 'Button', maxResults: 5 });
+    expect(result.window).toBe(fixtureWindow);
     expect(Array.isArray(result.elements)).toBe(true);
     expect(result.elements.length).toBeLessThanOrEqual(5);
+    expect(result.elements).toEqual(expect.arrayContaining([
+      expect.objectContaining({ name: 'Fixture action', role: 'Button' })
+    ]));
     expect(result.snapshotId).toBeGreaterThan(0);
     for (const element of result.elements) expect(element.ref).toMatch(/^g\d+_s\d+_e\d+$/);
   });
 
   it('returns a Codex-style window state with semantic UI refs', async () => {
-    const target = await visibleWindow();
-    if (target === null) return;
-    const state = await getWindowState({ window: target, includeScreenshot: false, maxElements: 8 });
-    expect(state.window.id).toBeGreaterThan(0);
+    const state = await getWindowState({ window: fixtureWindow, includeScreenshot: false, maxElements: 8 });
+    expect(state.window.id).toBe(fixtureWindow);
     expect(state.screenshot).toBeNull();
     expect(state.elements.length).toBeLessThanOrEqual(8);
+    expect(state.elements.some((element) => element.name === 'Fixture action')).toBe(true);
     expect(state.snapshotId).toBeGreaterThan(0);
     for (const element of state.elements) expect(element.ref).toMatch(/^g\d+_s\d+_e\d+$/);
   });
@@ -229,9 +291,7 @@ describe.runIf(IS_WINDOWS)('desktop helper', () => {
     // A competing capture is fired while get_window_state is mid-acquisition. The state
     // it returns must describe one moment: centres computed against its own screenshot,
     // never against the frame the interloper installed.
-    const target = await visibleWindow();
-    if (target === null) return;
-    const statePromise = getWindowState({ window: target, includeScreenshot: true, maxWidth: 640, maxElements: 12 });
+    const statePromise = getWindowState({ window: fixtureWindow, includeScreenshot: true, maxWidth: 640, maxElements: 12 });
     const interloper = screenshot({ maxWidth: 320 });
     const [state, other] = await Promise.all([statePromise, interloper]);
 
@@ -239,10 +299,7 @@ describe.runIf(IS_WINDOWS)('desktop helper', () => {
     const shot = state.screenshot!;
     // Different capture, therefore a different region and scale to be mapped against.
     expect(shot.frameId).not.toBe(other.frameId);
-    // A window with no automation tree has no centres to pair. That is a property of the
-    // desktop this happens to run on, not of the mapping under test, so it is a skip rather
-    // than a failure; the checked count below still holds the assertion that matters.
-    if (state.elements.length === 0) return;
+    expect(state.elements.some((element) => element.name === 'Fixture action')).toBe(true);
 
     let checked = 0;
     for (const element of state.elements) {
@@ -265,12 +322,10 @@ describe.runIf(IS_WINDOWS)('desktop helper', () => {
   it('refuses a ref minted before the desktop helper restarted', async () => {
     // A UI Automation runtime id is meaningless to a different helper process, so acting
     // on one would target whatever now holds that id rather than what the model saw.
-    const target = await visibleWindow();
-    if (target === null) return;
-    const state = await getWindowState({ window: target, includeScreenshot: false, maxElements: 4 });
-    const live = state.elements.find((element) => element.ref.startsWith('g'));
-    if (!live) return;
-    const older = live.ref.replace(/^g(\d+)/, (_match, gen: string) => `g${Number(gen) - 1}`);
+    const state = await getWindowState({ window: fixtureWindow, includeScreenshot: false, maxElements: 8 });
+    const live = state.elements.find((element) => element.name === 'Fixture action');
+    expect(live).toBeDefined();
+    const older = live!.ref.replace(/^g(\d+)/, (_match, gen: string) => `g${Number(gen) - 1}`);
     await expect(act([{ type: 'click_ref', ref: older }])).rejects.toThrow(/UNKNOWN_UI_REF|STALE_REF/);
   });
 });

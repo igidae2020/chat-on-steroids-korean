@@ -1,5 +1,15 @@
 # Changelog
 
+## [2.0.10] — 2026-09-11
+
+**한국어 · OpenCodex 배포판 — 공식 2.0.8 기반**
+
+- 작업 중 Chrome이 종료되면 silence/no-tab 복구도 기존 단일 브라우저 시작 경로로 전달합니다. 정지·차단·복구 Off·이전 대화 전환 시 실행 권한을 재검사합니다.
+- Windows에서 별도 user-data 디렉터리의 자동화 Chrome이나 남은 렌더러를 작업용 브라우저로 오인하지 않습니다. 프로세스 정보가 불확실하면 재실행하지 않으며 다른 프로필의 프로세스를 종료하지 않습니다.
+- main에 반영된 요약 응답의 provider request 연결, 전송 전 되돌릴 수 있는 입력 실패 처리, 긴 수동 요약 응답의 전송 후 수명 보완을 포함합니다.
+
+See [the release notes](docs/release-notes/v2.0.10.md). Existing releases are unchanged.
+
 ## [2.0.9] — 2026-09-10
 
 **한국어 · OpenCodex 배포판 — 공식 2.0.8 기반**

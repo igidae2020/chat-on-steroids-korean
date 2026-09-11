@@ -5436,9 +5436,10 @@ function queueBrowserRecovery(
   // A queued durable pickup used to wait forever when Chrome itself had exited:
   // nobody remained to collect /status. This same accepted repair owns one cold
   // start through the existing startup owner; no new timer or opening retry exists.
-  if ((reason === 'goal' || reason === 'compaction') && getConfig().ui.browserOnly !== true) {
+  if (['goal', 'compaction', 'silence', 'no-tab'].includes(reason) && getConfig().ui.browserOnly !== true) {
     const reply = goalPendingReplyFor(conversationId);
     const ticket = continuationForSession(sessionId);
+    const activity = activeUntil.get(conversationId);
     const lifecycle = bridgeLifecycleEpoch;
     void wakeBrowserUrl(chatUrl(conversationId), true, getConfig().ui.backgroundChats === true, {
       current: () => bridgeLifecycleEpoch === lifecycle && !bridgeShutdownRequested &&
@@ -5449,8 +5450,11 @@ function queueBrowserRecovery(
         (reason === 'compaction'
           ? !!ticket && ticket.from === conversationId && continuationForSession(sessionId)?.token === ticket.token &&
             continuationForSession(sessionId)?.state === 'awaiting-summary'
-          : goalActiveFor(conversationId) && !!reply && goalPendingReplyFor(conversationId)?.replyId === reply.replyId &&
-            !continuationForSession(sessionId))
+          : reason === 'goal'
+            ? goalActiveFor(conversationId) && !!reply && goalPendingReplyFor(conversationId)?.replyId === reply.replyId &&
+              !continuationForSession(sessionId)
+            : tabRecoveryWanted(conversationId) && !continuationForSession(sessionId) &&
+              (reason === 'no-tab' || (!!activity && activeUntil.get(conversationId) === activity)))
     }).catch((error: Error) => logWarn(`bridge: could not start browser for ${reason} recovery: ${error.message}`));
   }
   return true;

@@ -5756,6 +5756,28 @@ describe('unattributed activity recovery', () => {
    * finished its answer, as the manual reload then showed — went unreloaded for twenty minutes.
    * A failure restarts the watch instead; a completed answer still spends it.
    */
+  it('cold-starts one silent chat recovery without a living extension and revokes it on Off', async () => {
+    const previous = getConfig();
+    const chat = 'cafe0191-0000-4000-8000-000000000191';
+    vi.useFakeTimers();
+    try {
+      await pair();
+      await events(chat, [openTurn('turn-browser-crashed')]);
+      await vi.advanceTimersByTimeAsync(CHAT_SILENCE_MS);
+      await sweepStaleSwarm(Date.now());
+      expect(recoveryBrowserWake).toHaveBeenCalledTimes(1);
+      const [url, , , authority] = recoveryBrowserWake.mock.calls[0]!;
+      expect(url).toBe(`https://chatgpt.com/c/${chat}`);
+      expect(authority?.current()).toBe(true);
+      await sweepStaleSwarm(Date.now());
+      expect(recoveryBrowserWake).toHaveBeenCalledTimes(1);
+      await request('POST', '/settings', { body: { conversationId: chat, goal: false } });
+      const config = getConfig();
+      await saveConfig({ ...config, multiAgent: { ...config.multiAgent, recoverAgentTabs: false } });
+      expect(authority?.current()).toBe(false);
+    } finally { await saveConfig(previous); vi.useRealTimers(); }
+  });
+
   it('keeps a chat whose turn failed on the silence watch and reloads it two minutes later', async () => {
     vi.useFakeTimers();
     try {
@@ -6484,6 +6506,35 @@ describe('unattributed activity recovery', () => {
     } finally { resetGoalStateForTests(); await setSecret('openRouterApiKey', ''); await saveConfig(previous); }
   });
 
+  it('does not turn a Pro delivery-timeout banner into another prompt or repeated reload', async () => {
+    const previous = getConfig();
+    const chat = 'cafe0192-0000-4000-8000-000000000192';
+    await saveConfig({ ...previous, goal: { ...previous.goal, enabled: true, mode: 'loop' } });
+    await setSecret('openRouterApiKey', 'sk-or-pro-timeout-test');
+    resetGoalStateForTests();
+    vi.useFakeTimers();
+    try {
+      await pair();
+      await events(chat, [{ kind: 'model_selection', model: 'GPT-5.6 Pro', time: Date.now() }, openTurn('pro-timeout')]);
+      await events(chat, [{ kind: 'chat_error', time: Date.now(), turnId: 'pro-timeout',
+        text: 'Message delivery timed out. Please try again.', recoverable: true }, endTurn('pro-timeout', 'failed')]);
+      const repair = await maintenance();
+      expect(repair).toMatchObject({ conversationId: chat, reason: 'assistant-error' });
+      await maintenance(repair!.token);
+      await events(chat, [{ kind: 'chat_error', time: Date.now(), turnId: 'pro-timeout',
+        text: 'Message delivery timed out. Please try again.', recoverable: true }]);
+      await vi.advanceTimersByTimeAsync(30 * 60_000);
+      await sweepStaleSwarm(Date.now());
+      expect(await maintenance()).toBeNull();
+      expect(goalPendingReplyFor(chat)).toBeNull();
+      expect((await request('POST', '/goal/draft', { body: { conversationId: chat, turnId: 'pro-timeout', clientId: 'tab-1' } })).status).toBe(409);
+      // A later reload may finally reveal the actual model answer. Only that exact final is authority.
+      await events(chat, [{ kind: 'assistant_message', time: Date.now(), turnId: 'pro-timeout', messageId: 'pro-real-final',
+        text: 'The long calculation finished.', state: 'final', final: true, activeNow: true, goalEligible: true }]);
+      expect(goalPendingReplyFor(chat)?.replyId).toBe('pro-real-final');
+    } finally { resetGoalStateForTests(); await setSecret('openRouterApiKey', ''); await saveConfig(previous); vi.useRealTimers(); }
+  });
+
   for (const proof of ['missing', 'exact', 'older', 'new turn']) it(`requires ${proof} canonical Pro final proof without any recent tool call`, async () => {
     const previous = getConfig();
     await saveConfig({ ...previous, goal: { ...previous.goal, enabled: true, mode: 'loop' } });
@@ -6865,8 +6916,14 @@ describe('unattributed activity recovery', () => {
 
     await request('POST', '/closed', { body: { conversationId: SOLO } });
 
+    expect(recoveryBrowserWake).toHaveBeenCalledTimes(1);
+    const [url, , , authority] = recoveryBrowserWake.mock.calls[0]!;
+    expect(url).toBe(`https://chatgpt.com/c/${SOLO}`);
+    expect(authority?.current()).toBe(true);
+
     // Nothing is waited out: the close itself is the evidence.
     expect(chatOf(await maintenance())).toBe(SOLO);
+    expect(authority?.current()).toBe(false); // Extension now owns the handed repair.
   });
 
   /**
@@ -6883,6 +6940,7 @@ describe('unattributed activity recovery', () => {
     await request('POST', '/closed', { body: { conversationId: BROWSING } });
 
     expect(await maintenance()).toBeNull();
+    expect(recoveryBrowserWake).not.toHaveBeenCalled();
   });
 
   it('immediately reopens an active Goal chat without tool calls while ordinary recovery is off', async () => {

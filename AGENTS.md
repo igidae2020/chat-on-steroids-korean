@@ -1472,6 +1472,11 @@ broken-page recovery can all consume the same observation without inventing thre
 receipt systems.
 
 Browser recovery now has **one per-conversation queue** in `bridge.ts::queueBrowserRecovery()`;
+Accepted silence/no-tab repairs also use the shared cold-start owner when the companion browser
+has exited; a dead extension cannot collect its own queued recovery. Windows presence is scoped
+to the default user-data instance targeted by the launcher, not unrelated isolated automation
+instances or orphan renderer processes. Unknown process evidence never authorizes a launch;
+classification stays in the bounded probe and does not publish process command lines.
 silence, recoverable assistant transport errors, missing mid-turn tabs and broken request-id joins
 converge there instead of each owning a reload/open loop. The queued record is fenced by a stable
 episode + receipt token and moves `queued -> handed -> done`; only a confirmed browser action is

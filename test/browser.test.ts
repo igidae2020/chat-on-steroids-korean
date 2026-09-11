@@ -41,11 +41,29 @@ describe('browser-backed ChatGPT commands', () => {
   it('probes the selected browser process rather than inferring it from another installed browser', async () => {
     const probe = vi.fn(async (_script: string) => ({ stdout: 'running', stderr: '', exitCode: 0, timedOut: false, truncated: false, durationMs: 1 }));
     expect(await isPreferredBrowserRunning('win32', probe, 'edge')).toBe(true);
-    expect(probe.mock.calls[0]?.[0]).toContain("ProcessName -eq 'msedge'");
-    expect(probe.mock.calls[0]?.[0]).not.toContain("ProcessName -eq 'chrome'");
+    expect(probe.mock.calls[0]?.[0]).toContain("Name='msedge.exe'");
+    expect(probe.mock.calls[0]?.[0]).not.toContain("Name='chrome.exe'");
     expect(await isPreferredBrowserRunning('win32', probe, 'brave')).toBe(true);
-    expect(probe.mock.calls[1]?.[0]).toContain("ProcessName -eq 'brave'");
+    expect(probe.mock.calls[1]?.[0]).toContain("Name='brave.exe'");
   });
+  it.skipIf(process.platform !== 'win32')('does not mistake isolated automation or orphan renderers for the companion browser', async () => {
+    const cases: Array<[Array<string | null>, boolean | null]> = [
+      [['"C:\\Chrome\\chrome.exe" --user-data-dir="C:\\Isolated Profile"', '"C:\\Chrome\\chrome.exe" --type=renderer'], false],
+      [['"C:\\Chrome\\chrome.exe" --user-data-dir="C:\\Isolated Profile"', '"C:\\Chrome\\chrome.exe"'], true],
+      [[`"C:\\Chrome\\chrome.exe" --user-data-dir="${path.win32.join(process.env.LOCALAPPDATA!, 'Google', 'Chrome', 'User Data')}"`], true],
+      [[null], null],
+      [['chrome.exe --user-data-dir="unterminated'], null],
+      [['chrome.exe --user-data-dir=relative'], null],
+      [[], false]
+    ];
+    for (const [lines, expected] of cases) {
+      const literal = (value: string) => `'${value.replace(/'/g, "''")}'`;
+      const records = lines.map(line => `[pscustomobject]@{ SessionId=[Diagnostics.Process]::GetCurrentProcess().SessionId; CommandLine=${line === null ? '$null' : literal(line)} }`).join('; ');
+      const probe: typeof runPowerShell = (script, cwd, timeout) => runPowerShell(
+        `function Get-CimInstance { param($ClassName, $Filter) ${records} }; ${script}`, cwd, timeout);
+      expect(await isPreferredBrowserRunning('win32', probe), JSON.stringify(lines)).toBe(expected);
+    }
+  }, 30_000);
   it('grants process absence only from a successful bounded Windows probe', async () => {
     const result = { stdout: 'absent\r\n', stderr: '', exitCode: 0, timedOut: false, truncated: false, durationMs: 1 };
     const probe = vi.fn(async () => result);

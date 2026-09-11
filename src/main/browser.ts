@@ -29,10 +29,29 @@ export async function isPreferredBrowserRunning(
         : /^(?:chrome|google-chrome(?:-(?:stable|beta|unstable))?|chromium(?:-browser)?|Google Chrome(?: Beta| Dev| Canary)?(?: Helper.*)?|Chromium(?: Helper.*)?)$/i;
       return result.stdout.split('\n').some(name => family.test(path.posix.basename(name.trim())));
     }
-    // Probe only the selected family; another browser cannot prove its presence or absence.
-    // Enumerate names only, never user command lines or profile data. Both names are constants.
+    // Match the default user-data instance our launcher targets, not a separate
+    // automation profile. A surviving isolated Chrome masked a crashed companion
+    // on Windows. Classify inside PowerShell; never return command lines or paths.
     const processName = browser === 'edge' ? 'msedge' : browser === 'brave' ? 'brave' : 'chrome';
-    const result = await powershell(`$ErrorActionPreference='Stop'; if (@(Get-Process | Where-Object ProcessName -eq '${processName}').Count) { 'running' } else { 'absent' }`, os.tmpdir(), 5000);
+    const dataFolder = browser === 'edge' ? 'Microsoft\\Edge\\User Data' : browser === 'brave'
+      ? 'BraveSoftware\\Brave-Browser\\User Data' : 'Google\\Chrome\\User Data';
+    const result = await powershell(String.raw`$ErrorActionPreference='Stop'
+$target = [IO.Path]::GetFullPath((Join-Path $env:LOCALAPPDATA '${dataFolder}')).TrimEnd('\')
+$session = [Diagnostics.Process]::GetCurrentProcess().SessionId
+$unknown = $false
+foreach ($entry in @(Get-CimInstance Win32_Process -Filter "Name='${processName}.exe'")) {
+  if ($entry.SessionId -ne $session) { continue }
+  $line = $entry.CommandLine
+  if ([string]::IsNullOrWhiteSpace($line)) { $unknown = $true; continue }
+  if ($line -match '(?i)(?:^|\s)--type=\S+') { continue }
+  if ($line -match '(?i)(?:^|\s)--user-data-dir(?:=|\s+)(?:"([^"\r\n]+)"|([^\s"]+))(?=\s|$)') {
+    $folder = if ($Matches[1]) { $Matches[1] } else { $Matches[2] }
+    if (![IO.Path]::IsPathRooted($folder)) { $unknown = $true; continue }
+    if ([IO.Path]::GetFullPath($folder).TrimEnd('\') -ne $target) { continue }
+  } elseif ($line -match '(?i)--user-data-dir|--type') { $unknown = $true; continue }
+  'running'; return
+}
+if ($unknown) { 'unknown' } else { 'absent' }`, os.tmpdir(), 5000);
     if (result.timedOut || result.truncated || result.exitCode !== 0) return null;
     return result.stdout.trim() === 'absent' ? false : result.stdout.trim() === 'running' ? true : null;
   } catch { return null; }

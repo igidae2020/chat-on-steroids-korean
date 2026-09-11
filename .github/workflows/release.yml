@@ -18,6 +18,8 @@ jobs:
     timeout-minutes: 20
     steps:
       - uses: actions/checkout@fbc6f3992d24b796d5a048ff273f7fcc4a7b6c09 # v5
+        with:
+          persist-credentials: false
       - uses: actions/setup-node@a0853c24544627f65ddf259abe73b1d18a591444 # v5
         with:
           node-version: 22
@@ -29,10 +31,12 @@ jobs:
           name: package-native-sources
           path: release/Chat-On-Steroids-Native-Sources.tar.gz
           if-no-files-found: error
-          retention-days: 30
+          retention-days: 3
 
   package:
     name: Package ${{ matrix.name }}
+    # Do not allocate six packaging runners when source/license verification has failed.
+    needs: [sources]
     strategy:
       fail-fast: false
       matrix:
@@ -92,6 +96,8 @@ jobs:
 
     steps:
       - uses: actions/checkout@fbc6f3992d24b796d5a048ff273f7fcc4a7b6c09 # v5
+        with:
+          persist-credentials: false
 
       - uses: actions/setup-node@a0853c24544627f65ddf259abe73b1d18a591444 # v5
         with:
@@ -315,7 +321,7 @@ jobs:
           name: ${{ matrix.artifact }}
           path: ${{ matrix.files }}
           if-no-files-found: error
-          retention-days: 30
+          retention-days: 3
 
   assemble:
     name: Assemble release candidate
@@ -325,6 +331,8 @@ jobs:
 
     steps:
       - uses: actions/checkout@fbc6f3992d24b796d5a048ff273f7fcc4a7b6c09 # v5
+        with:
+          persist-credentials: false
 
       - name: Download packages
         uses: actions/download-artifact@d3f86a106a0bac45b974a628896c90dbdf5c8093 # v4
@@ -397,4 +405,4 @@ jobs:
             release/Chat-On-Steroids-Native-Sources.tar.gz
             release/SHA256SUMS.txt
           if-no-files-found: error
-          retention-days: 30
+          retention-days: 7

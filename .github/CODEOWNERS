@@ -1,0 +1,6 @@
+# Review routing only. Enforcing approval also requires repository protection rules.
+/.github/ @igidae2020
+/scripts/package-native-sources.mjs @igidae2020
+/scripts/korean-release.mjs @igidae2020
+/docs/licenses/native/ @igidae2020
+/electron-builder.yml @igidae2020

@@ -1,0 +1,27 @@
+version: 2
+updates:
+  - package-ecosystem: github-actions
+    directory: /
+    schedule:
+      interval: weekly
+      day: monday
+      time: '09:20'
+      timezone: Asia/Seoul
+    open-pull-requests-limit: 1
+    groups:
+      github-actions:
+        patterns: ['*']
+  - package-ecosystem: npm
+    directory: /
+    schedule:
+      interval: weekly
+      day: monday
+      time: '09:40'
+      timezone: Asia/Seoul
+    open-pull-requests-limit: 2
+    groups:
+      compatible-updates:
+        patterns: ['*']
+        update-types: [minor, patch]
+# Updates are proposed as pull requests, never automatically merged or released.
+# Native dependency changes must also pass the reviewed-source inventory gates.

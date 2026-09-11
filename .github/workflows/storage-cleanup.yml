@@ -1,0 +1,53 @@
+name: Clean up release artifacts
+
+on:
+  workflow_run:
+    workflows: ["Publish release"]
+    types: [completed]
+  schedule:
+    - cron: '17 3 * * *'
+  workflow_dispatch:
+
+permissions:
+  actions: write
+  contents: read
+
+jobs:
+  cleanup-completed-release:
+    if: github.event_name == 'workflow_run' && github.event.workflow_run.conclusion == 'success'
+    runs-on: ubuntu-latest
+    timeout-minutes: 5
+    steps:
+      - name: Delete artifacts from the successful publish run
+        env:
+          GH_TOKEN: ${{ github.token }}
+          RUN_ID: ${{ github.event.workflow_run.id }}
+        run: |
+          set -euo pipefail
+          ids=$(gh api --paginate "repos/${GITHUB_REPOSITORY}/actions/runs/${RUN_ID}/artifacts?per_page=100" --jq '.artifacts[].id')
+          for id in $ids; do
+            gh api --method DELETE "repos/${GITHUB_REPOSITORY}/actions/artifacts/${id}"
+          done
+
+  cleanup-stale-release-artifacts:
+    if: github.event_name == 'schedule' || github.event_name == 'workflow_dispatch'
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    steps:
+      - name: Delete stale release handoff artifacts older than one day
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          set -euo pipefail
+          cutoff=$(date -u -d '24 hours ago' +%s)
+          gh api --paginate "repos/${GITHUB_REPOSITORY}/actions/artifacts?per_page=100" --jq '.artifacts[] | [.id, .name, .created_at] | @tsv' |
+          while IFS=$'\t' read -r id name created; do
+            case "$name" in
+              chat-on-steroids-candidate-*|package-native-sources|package-windows-*|package-macos-*|package-linux-*) ;;
+              *) continue ;;
+            esac
+            created_epoch=$(date -u -d "$created" +%s)
+            if [ "$created_epoch" -le "$cutoff" ]; then
+              gh api --method DELETE "repos/${GITHUB_REPOSITORY}/actions/artifacts/${id}"
+            fi
+          done

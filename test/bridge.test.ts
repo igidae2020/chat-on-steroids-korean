@@ -6322,7 +6322,7 @@ describe('unattributed activity recovery', () => {
     try {
       await pair();
       await events(OTHER, [openTurn('turn-loop-silent')]);
-      await vi.advanceTimersByTimeAsync(CHAT_SILENCE_MS);
+      await vi.advanceTimersByTimeAsync(PRO_SILENCE_MS);
       await sweepStaleSwarm(Date.now());
       expect(await maintenance()).toMatchObject({ conversationId: OTHER, reason: 'silence' });
     } finally {
@@ -6460,21 +6460,23 @@ describe('unattributed activity recovery', () => {
     } finally { vi.useRealTimers(); }
   });
 
-  for (const outcome of ['completed', 'stopped', 'failed', 'unknown']) it(`ends Pro activity immediately on ${outcome} and revives only from a newer exact call`, async () => {
-    const timingChat = `a2222222-1111-4111-8111-00000000000${['completed', 'stopped', 'failed', 'unknown'].indexOf(outcome)}`;
+  for (const outcome of ['completed', 'stopped', 'failed', 'unknown', 'interrupted']) it(`distinguishes the Pro ${outcome} boundary from new work evidence`, async () => {
+    const timingChat = `a2222222-1111-4111-8111-00000000000${['completed', 'stopped', 'failed', 'unknown', 'interrupted'].indexOf(outcome)}`;
     vi.useFakeTimers();
     try {
       await pair();
       await events(timingChat, [{ kind: 'model_selection', model: 'gpt-6', reasoningEffort: 'pro', time: Date.now() }, openTurn('pro-terminal')]);
       const sessionId = (await request('GET', `/activity?conversationId=${timingChat}`)).body.sessionId;
       const { sessionActivityExpiresAt } = await import('../src/main/bridge.js');
+      const originalExpiry = sessionActivityExpiresAt((await getSession(sessionId))!);
       await vi.advanceTimersByTimeAsync(1_000);
       const end = Date.now();
       await events(timingChat, [endTurn('pro-terminal', outcome)]);
       expect((await getSession(sessionId))?.selectedModel).toMatchObject({ model: 'gpt-6', reasoningEffort: 'pro' });
-      expect(sessionActivityExpiresAt((await getSession(sessionId))!)).toBeNull();
+      const expectedExpiry = ['completed', 'stopped'].includes(outcome) ? null : originalExpiry;
+      expect(sessionActivityExpiresAt((await getSession(sessionId))!)).toBe(expectedExpiry);
       await attributed(timingChat, false, end - 1);
-      expect(sessionActivityExpiresAt((await getSession(sessionId))!)).toBeNull();
+      expect(sessionActivityExpiresAt((await getSession(sessionId))!)).toBe(expectedExpiry);
       await vi.advanceTimersByTimeAsync(1_000);
       await attributed(timingChat, false, Date.now());
       expect(sessionActivityExpiresAt((await getSession(sessionId))!)).toBe(Date.now() + PRO_ACTIVITY_MS);
@@ -6518,7 +6520,7 @@ describe('unattributed activity recovery', () => {
     } finally { resetGoalStateForTests(); await setSecret('openRouterApiKey', ''); await saveConfig(previous); }
   });
 
-  it('does not turn a Pro delivery-timeout banner into another prompt or repeated reload', async () => {
+  it('reobserves an unfinished Pro Loop at ten-minute intervals without inventing another prompt', async () => {
     const previous = getConfig();
     const chat = 'cafe0192-0000-4000-8000-000000000192';
     await saveConfig({ ...previous, goal: { ...previous.goal, enabled: true, mode: 'loop' } });
@@ -6535,8 +6537,16 @@ describe('unattributed activity recovery', () => {
       await maintenance(repair!.token);
       await events(chat, [{ kind: 'chat_error', time: Date.now(), turnId: 'pro-timeout',
         text: 'Message delivery timed out. Please try again.', recoverable: true }]);
-      await vi.advanceTimersByTimeAsync(30 * 60_000);
+      // Repeated banners do not grant immediate reloads or renew evidence. Loop may
+      // collect the server answer later, but only through the spaced silence owner.
+      await vi.advanceTimersByTimeAsync(PRO_ACTIVITY_MS - 1);
       await sweepStaleSwarm(Date.now());
+      expect(await maintenance()).toBeNull();
+      await vi.advanceTimersByTimeAsync(1);
+      await sweepStaleSwarm(Date.now());
+      const observation = await maintenance();
+      expect(observation).toMatchObject({ conversationId: chat, reason: 'silence' });
+      await maintenance(observation!.token);
       expect(await maintenance()).toBeNull();
       expect(goalPendingReplyFor(chat)).toBeNull();
       expect((await request('POST', '/goal/draft', { body: { conversationId: chat, turnId: 'pro-timeout', clientId: 'tab-1' } })).status).toBe(409);
@@ -6602,7 +6612,7 @@ describe('unattributed activity recovery', () => {
       await vi.advanceTimersByTimeAsync(1_000);
       await events(uncertainChat, [openTurn('uncertain-' + selection)]);
       if (selection === 'after-start') await events(uncertainChat, [{ kind: 'model_selection', model: 'GPT-5.6 Sol', reasoningEffort: 'high', time: Date.now() + 1 }]);
-      await vi.advanceTimersByTimeAsync(CHAT_SILENCE_MS);
+      await vi.advanceTimersByTimeAsync(PRO_SILENCE_MS);
       await sweepStaleSwarm(Date.now());
       const reload = await maintenance();
       expect(reload).toMatchObject({ reason: 'silence' });
@@ -6632,7 +6642,7 @@ describe('unattributed activity recovery', () => {
         text: 'Earlier progress arrived late.', state: 'streaming', activeNow: true }]);
       expect(sessionActivityExpiresAt((await getSession(sessionId))!)).toBe(expected);
       await events(OTHER, [{ kind: 'turn_end', turnId: 'delayed-pro', time: Date.now(), outcome: 'unknown' }]);
-      expect(sessionActivityExpiresAt((await getSession(sessionId))!)).toBeNull();
+      expect(sessionActivityExpiresAt((await getSession(sessionId))!)).toBe(expected);
     } finally { vi.useRealTimers(); }
   });
 
@@ -6644,7 +6654,8 @@ describe('unattributed activity recovery', () => {
     vi.useFakeTimers();
     try {
       await pair();
-      await events('a6666666-1111-4111-8111-000000000006', [openTurn('turn-loop-slow')]);
+      await events('a6666666-1111-4111-8111-000000000006', [
+        { kind: 'model_selection', model: 'GPT-5.6 Sol', reasoningEffort: 'high', time: Date.now() }, openTurn('turn-loop-slow')]);
       await vi.advanceTimersByTimeAsync(CHAT_SILENCE_MS);
       await sweepStaleSwarm(Date.now());
       const handout = await maintenance();

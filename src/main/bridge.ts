@@ -4856,7 +4856,8 @@ function grantActivity(conversationId: string, sessionId: string, at = Date.now(
   const ownership = turn ?? (previous?.sessionId === sessionId ? previous : { turnId: null, model: 'unknown' as const });
   if (ownership.model === 'pro' && (isChatBlocked(conversationId) || stopRequestedFor(conversationId))) return;
   const evidenceAt = previous?.sessionId === sessionId && previous.turnId === ownership.turnId ? Math.max(previous.evidenceAt, at) : at;
-  activeUntil.set(conversationId, { sessionId, evidenceAt, until: evidenceAt + (ownership.model === 'pro' ? PRO_SILENCE_MS : window), turnId: ownership.turnId, model: ownership.model });
+  const conservative = ownership.model === 'pro' || (ownership.model === 'unknown' && goalActiveFor(conversationId));
+  activeUntil.set(conversationId, { sessionId, evidenceAt, until: evidenceAt + (conservative ? PRO_SILENCE_MS : window), turnId: ownership.turnId, model: ownership.model });
   awaitingReturn.delete(conversationId);
   armSilenceSweep();
   void considerAutomaticCompaction(conversationId, sessionId);
@@ -5548,10 +5549,16 @@ async function noteRecoveryObservations(
     if (item.kind === 'turn_end') lastEnd = item.outcome ?? 'unknown';
   }
   const terminalGrant = activeUntil.get(conversationId);
-  const proTerminal = terminalGrant?.model === 'pro' && (activity.endedTurnId === terminalGrant.turnId ||
+  const proTerminal = terminalGrant && (terminalGrant.model === 'pro' ||
+    (terminalGrant.model === 'unknown' && goalActiveFor(conversationId))) && (activity.endedTurnId === terminalGrant.turnId ||
     (activity.terminal && !observations.some(item => item.kind === 'turn_end')));
   if (proTerminal || (activity.terminal && terminalGrant?.model !== 'pro')) {
-    if (proTerminal) endActivity(conversationId);
+    if (proTerminal) {
+      const end = observations.filter(item => item.kind === 'turn_end' && item.turnId === terminalGrant.turnId).at(-1);
+      // A failed page stream is not a server-side completion. Keep the existing evidence
+      // clock; a reload/error is not new model work. A later canonical final still closes it.
+      if (!end || end.outcome === 'completed' || end.outcome === 'stopped') endActivity(conversationId);
+    }
     else if (lastEnd === 'unknown' && sessionId && await extendedSilenceWindowFor(conversationId, sessionId)) {
       // Loss of browser completion evidence does not change the last meaningful-work clock.
     } else if (lastEnd === 'failed' && sessionId) grantActivity(conversationId, sessionId, Math.min(Date.now(), activity.at ?? Date.now()));
@@ -5763,7 +5770,7 @@ async function inspectSilentChats(now: number): Promise<{ queued: boolean; spent
     // the UI paints — for the rest of the process. Its silence is spent the moment it is
     // measured. (A blocked chat's worker slot is not this pass's business: sweepStaleSwarm
     // sleeps it from the block itself, grant or no grant.)
-    if (isChatBlocked(conversationId)) {
+    if (isChatBlocked(conversationId) || stopRequestedFor(conversationId)) {
       spent.push(conversationId);
       continue;
     }
@@ -5779,20 +5786,27 @@ async function inspectSilentChats(now: number): Promise<{ queued: boolean; spent
       continue;
     }
     const held = repairsInFlight.get(conversationId);
+    // Goal/Loop owns continued observation of an uncertain response. Ten-minute page
+    // pickups reuse this same receipt queue; they never manufacture a completed answer
+    // or spend the non-Pro synthetic-follow-up path. Ordinary chats retain one-shot repair.
+    const observing = pro && goalActiveFor(conversationId);
     if (held?.state === 'done' && !TURN_SCOPED_REPAIRS.has(held.reason)) {
-      if (pro && now < grant.evidenceAt + activityLifetime(grant)) {
-        grant.until = grant.evidenceAt + activityLifetime(grant);
-        deferred = true;
+      if (observing) repairsInFlight.delete(conversationId);
+      else {
+        if (pro && now < grant.evidenceAt + activityLifetime(grant)) {
+          grant.until = grant.evidenceAt + activityLifetime(grant);
+          deferred = true;
+          continue;
+        }
+        spent.push(conversationId);
         continue;
       }
-      spent.push(conversationId);
-      continue;
     }
     // A turn-scoped repair is a different question about a different subject, and is superseded
     // below rather than obeyed here; reading one as "a recovery is already running" is what left
     // a chat that had been dead for eighteen minutes unreloaded. Everything else in flight —
     // silence's own action, or a no-tab reopen under its floor — is this path already acting.
-    if (held && !TURN_SCOPED_REPAIRS.has(held.reason)) continue;
+    if (held && held.state !== 'done' && !TURN_SCOPED_REPAIRS.has(held.reason)) continue;
     // A reload carried out moments ago, that the page has not yet come back from, is the reload
     // silence would ask for. A large chat takes minutes to come back — three, for the 300k-token
     // prime of 2026-09-03 — and a second reload landing on a page still loading starts that wait
@@ -5809,7 +5823,7 @@ async function inspectSilentChats(now: number): Promise<{ queued: boolean; spent
     if (queueBrowserRecovery(conversationId, grant.sessionId, `silence:${grant.until}`, 'silence', 0, now)) {
       queued = true;
       logInfo(
-        `bridge: active chat silent for ${grant.model === 'pro' ? 'ten' : 'two'} minutes — asking the browser to reload ${conversationId} once`
+        `bridge: active chat silent for ${grant.model === 'pro' || observing ? 'ten' : 'two'} minutes — asking the browser to reload ${conversationId} once`
       );
     }
   }
@@ -6588,7 +6602,29 @@ async function confirmRepair(token: string, action: 'reloaded' | 'reopened' | nu
       repair.state = 'done';
       lastBrowserRecoveryAt.set(conversationId, Date.now());
       awaitingReturn.add(conversationId);
-      if (repair.reason === 'silence') {
+      const session = await getSession(repair.sessionId);
+      if (repairsInFlight.get(conversationId) !== repair) return;
+      const existing = activeUntil.get(conversationId);
+      // Completion/Stop can arrive during the summary read. The current recorder projection
+      // wins over that snapshot before this receipt can extend any observation deadline.
+      const current = liveConversations().find(entry => entry.conversationId === conversationId && entry.sessionId === repair.sessionId);
+      const selection = session?.selectedModel;
+      const model = existing?.model ?? (selection?.conversationId === conversationId
+        ? isProModel(selection.model, selection.reasoningEffort) ? 'pro' : 'other' : 'unknown');
+      const unfinished = session?.conversationId === conversationId && !!current &&
+        (!!current.activeTurnId || (current.lastTurnOutcome != null && !['completed', 'stopped'].includes(current.lastTurnOutcome)));
+      const mayObserve = unfinished && !isChatBlocked(conversationId) && !stopRequestedFor(conversationId);
+      const observing = goalActiveFor(conversationId) && model !== 'other' && mayObserve;
+      if (observing) {
+        // A failed stream can outlive its work grant. Restore only the observation
+        // deadline, with no invented recent work evidence, under this confirmed repair.
+        activeUntil.set(conversationId, {
+          sessionId: repair.sessionId, turnId: existing?.turnId ?? current?.activeTurnId ?? null,
+          model, evidenceAt: existing?.evidenceAt ?? 0, until: Date.now() + PRO_SILENCE_MS
+        });
+        armSilenceSweep();
+      }
+      if (repair.reason === 'silence' && !observing && mayObserve) {
         // The reload is the chat's chance, so the verdict on it waits — not the next maintenance
         // pass. A model writing a long answer makes no durable progress until the answer lands;
         // judging the reload on the pass right after it is how worker-2 was slept 27 seconds

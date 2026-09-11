@@ -359,6 +359,27 @@ describe('native image readiness', () => {
 });
 
 
+describe('localized transport failure', () => {
+  it.each([false, true])('recognizes the Korean timeout with its retry control (alert: %s)', alert => {
+    const notice = document.createElement('div');
+    if (alert) notice.setAttribute('role', 'alert');
+    notice.innerHTML = '<p>메시지 전송 시간이 초과되었습니다. 다시 시도해 주세요.</p><button>다시 시도</button>';
+    document.body.append(notice);
+    expect(api.errors()).toEqual(expect.arrayContaining([
+      expect.objectContaining({ recoverable: true, text: expect.stringContaining('메시지 전송 시간이 초과되었습니다.') })
+    ]));
+    notice.hidden = true;
+    expect(api.errors().filter(error => error.recoverable)).toEqual([]);
+  });
+
+  it('does not recover from quoted Korean error prose without a provider retry control', () => {
+    const prose = document.createElement('div'); prose.className = 'markdown';
+    prose.textContent = '메시지 전송 시간이 초과되었습니다. 다시 시도해 주세요.';
+    document.body.append(prose);
+    expect(api.errors().filter(error => error.recoverable)).toEqual([]);
+  });
+});
+
 describe('provider limit notice', () => {
   it('records and acknowledges the exact Korean access notice once without accepting other dialogs', () => {
     const notice = document.createElement('div'); notice.setAttribute('role', 'dialog');

@@ -15,7 +15,7 @@
 import { RELEASE_REPOSITORY } from '../shared/types.js';
 
 export { RELEASE_REPOSITORY, DISTRIBUTION_LABEL } from '../shared/types.js';
-export const APP_VERSION = '2.0.10';
+export const APP_VERSION = '2.0.11';
 
 /**
  * Standalone extension recovery must stay on the app's own release. Using GitHub's moving

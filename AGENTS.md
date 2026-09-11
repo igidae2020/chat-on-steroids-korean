@@ -1477,6 +1477,9 @@ has exited; a dead extension cannot collect its own queued recovery. Windows pre
 to the default user-data instance targeted by the launcher, not unrelated isolated automation
 instances or orphan renderer processes. Unknown process evidence never authorizes a launch;
 classification stays in the bounded probe and does not publish process command lines.
+The content script's ten-minute visibility warning is diagnostic only, including old journal
+rows marked recoverable. It cannot bypass the app's model/work-aware silence policy as an
+assistant transport failure. The renderer labels that known local warning as COS, not ChatGPT.
 silence, recoverable assistant transport errors, missing mid-turn tabs and broken request-id joins
 converge there instead of each owning a reload/open loop. The queued record is fenced by a stable
 episode + receipt token and moves `queued -> handed -> done`; only a confirmed browser action is

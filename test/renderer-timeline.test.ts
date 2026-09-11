@@ -259,6 +259,19 @@ async function boot(events: SessionEvent[], selectExisting = true, pausedHelpers
   };
 }
 
+it('labels a local visibility watchdog separately from a real ChatGPT error', async () => {
+  const { w } = await boot([
+    { seq: 1, time: T0, source: 'extension', kind: 'chat_error',
+      message: text('No visible progress for ten minutes. The turn is still marked as generating.') },
+    { seq: 2, time: T0 + 1, source: 'extension', kind: 'chat_error',
+      message: text('Message delivery timed out. Please try again.') }
+  ]);
+  const notices = [...w.document.querySelectorAll('.chat-error-notice')];
+  expect(notices[0]?.querySelector('strong')?.textContent).toBe('COS에서 화면 진행을 확인하지 못했습니다.');
+  expect(notices[0]?.textContent).toContain('작업이 중단되거나 완료됐다는 뜻은 아닙니다.');
+  expect(notices[1]?.querySelector('strong')?.textContent).toBe('ChatGPT에서 문제를 보고했습니다.');
+});
+
 it('reorders queued tasks by drag and keyboard through the durable IPC operation', async () => {
   const { w, live, append } = await boot([]);
   const sessionId = summary([]).id;

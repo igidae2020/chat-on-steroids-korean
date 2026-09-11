@@ -2402,7 +2402,9 @@
       // identity. DOM rows alone are presentation and never mint durable page_tool ids.
       if (!stallReported && Date.now() - lastChangeAt > STALL_MS) {
         stallReported = true;
-        emit({ kind: 'chat_error', text: 'No visible progress for ten minutes. The turn is still marked as generating.', turnId, recoverable: true });
+        // Visibility is not provider failure. The app already owns recovery from
+        // exact work/model evidence; this local clock must not bypass that policy.
+        emit({ kind: 'chat_error', text: 'No visible progress for ten minutes. The turn is still marked as generating.', turnId, recoverable: false });
       }
     }
 

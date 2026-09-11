@@ -1479,8 +1479,13 @@ function eventBody(event: SessionEvent, context?: { id: string; current: () => b
     case 'chat_error': {
       const notice = el('div', 'chat-error-notice');
       notice.setAttribute('role', 'status');
-      const title = el('strong', '', 'ChatGPT에서 문제를 보고했습니다.');
-      notice.append(title, textBlock('msg', event.message.text, event.message.truncated, event.message.chars));
+      const localVisibility = event.message.text ===
+        'No visible progress for ten minutes. The turn is still marked as generating.';
+      const title = el('strong', '', localVisibility
+        ? 'COS에서 화면 진행을 확인하지 못했습니다.' : 'ChatGPT에서 문제를 보고했습니다.');
+      notice.append(title, localVisibility
+        ? el('p', 'msg', '10분 동안 화면상 진행을 확인하지 못했습니다. 생성 표시는 남아 있으며, 작업이 중단되거나 완료됐다는 뜻은 아닙니다.')
+        : textBlock('msg', event.message.text, event.message.truncated, event.message.chars));
       return notice;
     }
     case 'tool_call':

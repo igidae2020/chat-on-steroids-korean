@@ -5454,6 +5454,18 @@ describe('unattributed activity recovery', () => {
     expect((await maintenance())?.reason).toBe('assistant-error');
   });
 
+  it('does not turn an old extension visibility watchdog into a provider failure', async () => {
+    await pair();
+    await events(PRIME, [openTurn('visibility-only'), { kind: 'chat_error', time: Date.now(),
+      turnId: 'visibility-only', recoverable: true,
+      text: 'No visible progress for ten minutes. The turn is still marked as generating.' }]);
+    expect(await maintenance()).toBeNull();
+    expect((await request('GET', `/activity?conversationId=${PRIME}`)).body.activeTurnId).toBe('visibility-only');
+    await events(PRIME, [{ kind: 'chat_error', time: Date.now(), turnId: 'visibility-only',
+      text: 'Message delivery timed out. Please try again.', recoverable: true }]);
+    expect((await maintenance())?.reason).toBe('assistant-error');
+  });
+
   it('reloads for recognized transport errors, once per user turn', async () => {
     vi.useFakeTimers();
     try {

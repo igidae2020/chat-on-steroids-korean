@@ -6178,7 +6178,8 @@ describe('a stop button that goes missing while the turn is still running', () =
     expect(emitted(live.sent, 'chat_error').map((entry) => entry.event.text)).toContain(
       'No visible progress for ten minutes. The turn is still marked as generating.'
     );
-    expect(emitted(live.sent, 'chat_error').at(-1)!.event.recoverable).toBe(true);
+    expect(emitted(live.sent, 'chat_error').at(-1)!.event.recoverable).toBe(false);
+    expect(emitted(live.sent, 'turn_end')).toHaveLength(0);
 
     for (let tick = 0; tick < 3; tick++) {
       live.advance(live.hook.STALL_MS + 1);
@@ -6186,6 +6187,7 @@ describe('a stop button that goes missing while the turn is still running', () =
       await settle();
     }
     expect(live.sent.some((message) => message.type === 'reload_owned_chat')).toBe(false);
+    expect(emitted(live.sent, 'turn_end')).toHaveLength(0);
   });
 
   /**

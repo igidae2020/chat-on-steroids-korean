@@ -5570,7 +5570,10 @@ async function noteRecoveryObservations(
       endActivity(conversationId);
       continue;
     }
-    if (item.recoverable !== true) continue;
+    // Older loaded documents marked their local visibility timeout recoverable.
+    // It is not a provider failure; the app's model/work-aware silence owner remains authoritative.
+    if (item.recoverable !== true || item.text ===
+      'No visible progress for ten minutes. The turn is still marked as generating.') continue;
     // Auto-compaction owns this chat's recovery clock until its ticket commits or is cancelled.
     // A native error inside a handoff is not permission for the ordinary two-minute response
     // watchdog to cut across the compaction's own pickup schedule. The failure is still the page

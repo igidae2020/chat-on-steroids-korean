@@ -1,0 +1,55 @@
+name: Clean up Actions storage once
+
+on:
+  push:
+    branches: [main]
+    paths:
+      - .github/workflows/storage-cleanup-once.yml
+
+permissions:
+  actions: write
+  contents: write
+
+jobs:
+  cleanup:
+    name: Remove duplicate release artifacts and reduce retention
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    steps:
+      - name: Delete v2.0.9 Actions artifacts
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          set -euo pipefail
+          for id in \
+            10132738954 \
+            10132702286 \
+            10132371020 \
+            10132318376 \
+            10132282102 \
+            10132233225 \
+            10132215109 \
+            10132098810
+          do
+            gh api --method DELETE "repos/${GITHUB_REPOSITORY}/actions/artifacts/${id}"
+          done
+
+      - uses: actions/checkout@fbc6f3992d24b796d5a048ff273f7fcc4a7b6c09 # v5
+        with:
+          persist-credentials: true
+
+      - name: Keep future release handoff artifacts for one day
+        run: |
+          set -euo pipefail
+          file=.github/workflows/release.yml
+          count=$(grep -c 'retention-days: 30' "$file")
+          if [ "$count" -ne 3 ]; then
+            echo "Expected exactly 3 thirty-day artifact retention settings, found $count" >&2
+            exit 1
+          fi
+          sed -i 's/retention-days: 30/retention-days: 1/g' "$file"
+          git config user.name 'github-actions[bot]'
+          git config user.email '41898282+github-actions[bot]@users.noreply.github.com'
+          git add "$file"
+          git commit -m 'Reduce release artifact retention to one day'
+          git push

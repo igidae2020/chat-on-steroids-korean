@@ -1,53 +1,166 @@
 name: Clean up release artifacts
 
 on:
+  push:
+    branches: [main]
+    paths: [.github/workflows/storage-cleanup.yml]
   workflow_run:
     workflows: ["Publish release"]
     types: [completed]
   schedule:
     - cron: '17 3 * * *'
   workflow_dispatch:
+    inputs:
+      dry_run:
+        description: Report eligible artifacts without deleting them
+        type: boolean
+        default: true
 
-permissions:
-  actions: write
-  contents: read
+permissions: {}
+
+concurrency:
+  group: artifact-maintenance
+  cancel-in-progress: false
 
 jobs:
-  cleanup-completed-release:
-    if: github.event_name == 'workflow_run' && github.event.workflow_run.conclusion == 'success'
-    runs-on: ubuntu-latest
-    timeout-minutes: 5
-    steps:
-      - name: Delete artifacts from the successful publish run
-        env:
-          GH_TOKEN: ${{ github.token }}
-          RUN_ID: ${{ github.event.workflow_run.id }}
-        run: |
-          set -euo pipefail
-          ids=$(gh api --paginate "repos/${GITHUB_REPOSITORY}/actions/runs/${RUN_ID}/artifacts?per_page=100" --jq '.artifacts[].id')
-          for id in $ids; do
-            gh api --method DELETE "repos/${GITHUB_REPOSITORY}/actions/artifacts/${id}"
-          done
-
-  cleanup-stale-release-artifacts:
-    if: github.event_name == 'schedule' || github.event_name == 'workflow_dispatch'
-    runs-on: ubuntu-latest
+  cleanup:
+    if: github.repository == 'igidae2020/chat-on-steroids-korean'
+    runs-on: ubuntu-24.04
     timeout-minutes: 10
+    permissions:
+      actions: write
+      contents: read
     steps:
-      - name: Delete stale release handoff artifacts older than one day
+      # No checkout, caches, artifact downloads, or execution of triggering-run code.
+      - name: Remove only verified published release handoffs
         env:
           GH_TOKEN: ${{ github.token }}
+          CLEANUP_KIND: release
+          DRY_RUN: ${{ github.event_name == 'workflow_dispatch' && inputs.dry_run || false }}
+        shell: bash
         run: |
-          set -euo pipefail
-          cutoff=$(date -u -d '24 hours ago' +%s)
-          gh api --paginate "repos/${GITHUB_REPOSITORY}/actions/artifacts?per_page=100" --jq '.artifacts[] | [.id, .name, .created_at] | @tsv' |
-          while IFS=$'\t' read -r id name created; do
-            case "$name" in
-              chat-on-steroids-candidate-*|package-native-sources|package-windows-*|package-macos-*|package-linux-*) ;;
-              *) continue ;;
-            esac
-            created_epoch=$(date -u -d "$created" +%s)
-            if [ "$created_epoch" -le "$cutoff" ]; then
-              gh api --method DELETE "repos/${GITHUB_REPOSITORY}/actions/artifacts/${id}"
-            fi
-          done
+          python3 - <<'PY'
+          import json
+          import os
+          import re
+          import subprocess
+          from pathlib import Path
+
+          PACKAGES = {
+              'package-native-sources', 'package-windows-x64', 'package-windows-arm64',
+              'package-macos-x64', 'package-macos-arm64', 'package-linux-x64', 'package-linux-arm64',
+          }
+          RELEASE_FILES = {
+              'Chat-On-Steroids-Setup-x64.exe', 'Chat-On-Steroids-Setup-arm64.exe',
+              'Chat-On-Steroids-macOS-x64.dmg', 'Chat-On-Steroids-macOS-x64.zip',
+              'Chat-On-Steroids-macOS-arm64.dmg', 'Chat-On-Steroids-macOS-arm64.zip',
+              'Chat-On-Steroids-Linux-x64.AppImage', 'Chat-On-Steroids-Linux-x64.deb',
+              'Chat-On-Steroids-Linux-arm64.AppImage', 'Chat-On-Steroids-Linux-arm64.deb',
+              'Chat-On-Steroids-Extension.zip', 'Chat-On-Steroids-Native-Sources.tar.gz',
+              'SHA256SUMS.txt',
+          }
+
+          def api(endpoint, method='GET', missing_ok=False):
+              result = subprocess.run(
+                  ['gh', 'api', '--method', method, endpoint],
+                  capture_output=True, text=True, timeout=60, check=False,
+              )
+              if result.returncode:
+                  if missing_ok and '(HTTP 404)' in result.stderr:
+                      return None
+                  raise RuntimeError(result.stderr.strip())
+              return json.loads(result.stdout) if result.stdout.strip() else {}
+
+          def trusted_run(run, repo, kind):
+              expected = '.github/workflows/ci.yml' if kind == 'oci' else '.github/workflows/publish.yml'
+              return (
+                  run.get('status') == 'completed' and run.get('conclusion') == 'success'
+                  and run.get('head_repository', {}).get('full_name') == repo
+                  and run.get('path', '').split('@')[0] == expected
+                  and run.get('event') == 'workflow_dispatch'
+                  and (run.get('head_branch') == 'main' if kind == 'oci'
+                       else re.fullmatch(r'v[0-9]+\.[0-9]+\.[0-9]+', run.get('head_branch', '')) is not None)
+              )
+
+          def disposable(artifact, run, kind):
+              if artifact.get('expired') or artifact.get('workflow_run', {}).get('id') != run['id']:
+                  return False
+              name = artifact.get('name', '')
+              if kind == 'oci':
+                  return name == 'runtime-oci-publish-input-' + run['head_sha']
+              return name in PACKAGES or name == 'chat-on-steroids-candidate-' + str(run['id'])
+
+          def complete_release(release, tag, commit_sha, run_sha):
+              if not release or release.get('draft') or release.get('tag_name') != tag or commit_sha != run_sha:
+                  return False
+              assets = {asset.get('name'): asset for asset in release.get('assets', [])}
+              return all(
+                  name in assets and assets[name].get('state') == 'uploaded'
+                  and assets[name].get('size', 0) > 0
+                  and re.fullmatch(r'sha256:[0-9a-f]{64}', assets[name].get('digest') or '')
+                  for name in RELEASE_FILES
+              )
+
+          def main():
+              repo = os.environ['GITHUB_REPOSITORY']
+              kind = os.environ['CLEANUP_KIND']
+              dry_run = os.environ.get('DRY_RUN', 'true').lower() != 'false'
+              base = 'repos/' + repo
+              artifacts = []
+              page = 1
+              # Snapshot every page before deleting anything. Deleting while paging skips entries.
+              while True:
+                  batch = api(f'{base}/actions/artifacts?per_page=100&page={page}')['artifacts']
+                  artifacts.extend(batch)
+                  if len(batch) < 100:
+                      break
+                  page += 1
+              grouped = {}
+              for artifact in artifacts:
+                  run_id = artifact.get('workflow_run', {}).get('id')
+                  if run_id and not artifact.get('expired'):
+                      grouped.setdefault(run_id, []).append(artifact)
+              removed = 0
+              reclaimed = 0
+              eligible = 0
+              for run_id, items in grouped.items():
+                  run = api(f'{base}/actions/runs/{run_id}', missing_ok=True)
+                  if not run or not trusted_run(run, repo, kind):
+                      continue
+                  selected = [item for item in items if disposable(item, run, kind)]
+                  if not selected:
+                      continue
+                  if kind == 'release':
+                      tag = run['head_branch']
+                      release = api(f'{base}/releases/tags/{tag}', missing_ok=True)
+                      commit = api(f'{base}/commits/{tag}', missing_ok=True)
+                      if not complete_release(release, tag, (commit or {}).get('sha'), run['head_sha']):
+                          print(f'Preserved run {run_id}: published assets or tag identity could not be verified.')
+                          continue
+                  for artifact in selected:
+                      eligible += 1
+                      if dry_run:
+                          print(f'DRY RUN: would remove artifact {artifact["id"]} ({artifact["size_in_bytes"]} bytes).')
+                          continue
+                      # A manual re-run may have started after the snapshot. Never delete its inputs.
+                      current = api(f'{base}/actions/runs/{run_id}', missing_ok=True)
+                      if not current or not trusted_run(current, repo, kind) or current.get('run_attempt') != run.get('run_attempt'):
+                          print(f'Preserved remaining artifacts: run {run_id} changed state or attempt.')
+                          break
+                      if api(f'{base}/actions/artifacts/{artifact["id"]}', method='DELETE', missing_ok=True) is not None:
+                          removed += 1
+                          reclaimed += artifact['size_in_bytes']
+              observed = sum(item['size_in_bytes'] for item in artifacts if not item.get('expired'))
+              summary = (
+                  f'## Actions artifact maintenance\n\nDry run: {dry_run}\n\n'
+                  f'Snapshot: {observed / 1048576:.2f} MiB. Eligible: {eligible}. '
+                  f'Deleted: {removed}. Deleted artifact sizes: {reclaimed / 1048576:.2f} MiB.\n\n'
+                  'These are artifact API sizes, not account billing usage. '
+                  'Active/failed runs, unrecognized artifacts, release assets, logs and backups are not deleted.\n'
+              )
+              print(summary)
+              Path(os.environ['GITHUB_STEP_SUMMARY']).write_text(summary, encoding='utf-8')
+
+          if __name__ == '__main__':
+              main()
+          PY

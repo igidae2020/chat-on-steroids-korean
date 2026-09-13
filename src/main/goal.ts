@@ -55,12 +55,14 @@ import { getSession, readEvents, readHandoff, readRecentEvents } from './session
 import { foldProgress } from '../shared/session.js';
 import { isAstraModel } from '../shared/chat-models.js';
 
-/** Astra continuation belongs to session_finish, never to a new browser turn. */
+/** Astra uses session_finish by default; an explicit chat Loop also continues verified finals. */
 export async function astraFinishOnly(sessionId: string, conversationId: string): Promise<boolean> {
   const session = await getSession(sessionId);
   const selection = session?.selectedModel;
+  const control = goalSwitchFor(conversationId);
   return session?.conversationId === conversationId && selection?.conversationId === conversationId &&
-    isAstraModel(selection.model, selection.reasoningEffort);
+    isAstraModel(selection.model, selection.reasoningEffort) &&
+    !(control.own && control.enabled && control.mode === 'loop');
 }
 import { resumeBootstrapMatches, resumeBootstrapText } from './session/handoff.js';
 import {

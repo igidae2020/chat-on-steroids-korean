@@ -1156,9 +1156,31 @@ export async function setSessionAutomation(sessionId: string, automation: Sessio
   const live = goalSwitchFor(id);
   await setGoalReplyActiveNow(id, held.enabled && live.enabled && live.mode === held.mode && !goalBlockReason(id)
     && getConfig().sessions.record && keyPresent);
+  if (automation === 'loop') await armExplicitLoopFinal(id);
   forgetGoalWatch(id);
   changed();
   return sessionControlsFor(sessionId);
+}
+
+/** A deliberate Loop On may pick up the latest recorded final that finish-only never filed. */
+async function armExplicitLoopFinal(id: string): Promise<void> {
+  const allowed = () => {
+    const control = goalSwitchFor(id);
+    return control.own && control.enabled && control.mode === 'loop' && !goalBlockReason(id) &&
+      !stopRequestedFor(id) && getConfig().sessions.record;
+  };
+  if (!allowed() || goalPendingReplyFor(id)) return;
+  const session = await findSessionByConversation(id, { requireUnique: true });
+  if (!session || await conversationWasSuperseded(id)) return;
+  const events = await readRecentEvents(session.id, 256, { kinds: ['turn_start', 'turn_end', 'user_message', 'assistant_message'] });
+  const final = [...events].reverse().find(event => event.kind === 'assistant_message');
+  if (!final || final.kind !== 'assistant_message' || final.final !== true || final.goalEligible !== true || !final.messageId || !final.message.text) return;
+  if (events.some(event => (event.kind === 'turn_start' || event.kind === 'user_message') && event.seq > final.seq)) return;
+  const turnId = final.turnId ?? `reply:${final.messageId}`.slice(0, 200);
+  if (events.some(event => event.kind === 'turn_end' && event.turnId === turnId && event.outcome === 'stopped')) return;
+  if (await chatStillWorking(id, turnId, session.id) || !allowed() || goalPendingReplyFor(id)) return;
+  await acceptGoalReplyNow({ conversationId: id, sessionId: session.id, replyId: final.messageId,
+    turnId, eventSeq: final.origin ?? final.seq, blocked: false });
 }
 /** One ticket publication boundary shared by browser and app controls. */
 async function fileCompactionTicket(sessionId: string, id: string, automatic = false) {
@@ -2949,6 +2971,7 @@ async function handle(req: http.IncomingMessage, res: http.ServerResponse): Prom
             chatId,
             chatSwitch.enabled && getConfig().sessions.record && (await goalKeyPresent(chatSwitch.mode))
           );
+          if (chatSwitch.enabled && chatSwitch.mode === 'loop') await armExplicitLoopFinal(chatId);
           forgetGoalWatch(chatId);
         } catch (err) {
           logWarn(`bridge: Goal ticket for ${chatId} did not follow its switch — ${err instanceof Error ? err.message : String(err)}`);

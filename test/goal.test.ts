@@ -2394,6 +2394,23 @@ it('never owes or generates a browser continuation for Astra even with Goal arme
   expect(fetch).not.toHaveBeenCalled();
 });
 
+it('allows only an explicit per-chat Astra Loop and revokes it on Off or Goal', async () => {
+  const conversationId = 'aaaaaaaa-1111-4222-8333-123456789abd';
+  const config = defaultConfig();
+  await saveConfig({ ...config, ui: { ...config.ui, finishTool: true }, goal: { ...config.goal, enabled: true, mode: 'loop' } });
+  const session = await createSession({ conversationId, title: 'Explicit Astra Loop' });
+  await observeSessionModel(session.id, conversationId, '6', Date.now(), 'pro');
+  expect(await goal.astraFinishOnly(session.id, conversationId)).toBe(true);
+  await goal.setGoalSwitchNow(conversationId, 'loop', true);
+  expect(await goal.astraFinishOnly(session.id, conversationId)).toBe(false);
+  await goal.acceptGoalReplyNow({ conversationId, sessionId: session.id, replyId: 'explicit-final', turnId: 'explicit-turn', eventSeq: 1, blocked: false });
+  expect(goal.goalPendingReplyFor(conversationId)?.replyId).toBe('explicit-final');
+  await goal.setGoalSwitchNow(conversationId, 'loop', false);
+  expect(await goal.astraFinishOnly(session.id, conversationId)).toBe(true);
+  await goal.setGoalSwitchNow(conversationId, 'goal', true);
+  expect(await goal.astraFinishOnly(session.id, conversationId)).toBe(true);
+});
+
 describe('a custom OpenAI-compatible provider', () => {
   async function useCustom(over: Record<string, unknown> = {}): Promise<void> {
     await saveConfig({

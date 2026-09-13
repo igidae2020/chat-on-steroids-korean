@@ -231,7 +231,7 @@ Do not "restore" these from an older document:
   the project, so every intermediate folder remains explicit (`/me/projects/app/...`,
   not `/me/src/...`). There is no model-visible `list_roots` fallback that makes the old example
   safe; fix the instruction text/tests rather than teaching tools to guess a missing project level.
-- Ordinary Goal continues **completed final answers only**; Astra is finish-tool-only (see §17). Older README/working-note wording that
+- Ordinary Goal continues **completed final answers only**; Astra defaults to finish-tool continuation, with explicit per-chat Loop opting into final-answer continuation (see §17). Older README/working-note wording that
   says an `interrupted` turn is automatically continued is stale against `content.js::GOAL_CONTINUABLE`.
 - The older prose comment near `config.ts` auto-compaction defaults still calls the trigger
   edge-based. Live authority is `store.ts::autoCompactionReady()` + `bridge.ts::chatIsWorking()`:
@@ -2294,9 +2294,12 @@ normal browser sends retain one exclusive delivery claim. `session/input.ts` own
 receipts and cancellation. Tool-intent input has no claim-age timeout; actual turn/settings changes
 can cancel generated instructions. Legacy periodic generated rows are retired and cannot revive.
 
-For Astra, both Goal and Loop use the Loop prompt and tool injection: an actual completed answer
-never starts another automatic browser message. `goal.ts::astraFinishOnly()` guards ordinary Goal
-acceptance/generation and bridge routes. Pending user/plan instructions take priority. The shared
+For Astra, Goal and inherited automation use the Loop prompt and tool injection. Explicitly enabling
+Loop on one chat also permits a verified completed answer to start the next browser message.
+`goal.ts::astraFinishOnly()` is the shared policy for acceptance/generation and bridge routes;
+Off or Goal immediately removes that opt-in. Loop On may recover the latest recorded eligible final
+through the existing reply ledger, only without a newer user/turn start, a stopped turn or active work.
+Pending user/plan instructions take priority. The shared
 `automaticFinishEnabled()` authority decides both production and queued-input validity: an armed
 chat Goal/Loop suppresses Notify even when global finish action is Notify. A resulting instruction
 arrives on a later tool call, with the normal generating animation while it is being drafted.

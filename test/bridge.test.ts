@@ -9130,6 +9130,79 @@ describe('app requests to stop one exact active turn', () => {
   });
 });
 
+it('keeps an explicitly selected Pro Loop on across activity polls while refusing unfinished drafts', async () => {
+  const previous = getConfig();
+  try {
+    await saveConfig({ ...previous, ui: { ...previous.ui, finishTool: true } });
+    await pair();
+    const chat = 'a5555555-1111-4111-8111-000000000006';
+    await request('POST', '/events', { body: { conversationId: chat, events: [
+      { kind: 'model_selection', model: '6', reasoningEffort: 'pro', time: Date.now() },
+      { kind: 'turn_start', turnId: 'explicit-pro-turn', time: Date.now() }
+    ] } });
+    const changed = await request('POST', '/settings', { body: { conversationId: chat, loop: true } });
+    expect(changed.body.goal).toMatchObject({ enabled: true, own: true, mode: 'loop' });
+    for (let i = 0; i < 2; i++) {
+      expect((await request('GET', `/activity?conversationId=${chat}`)).body.goal).toMatchObject({ enabled: true, mode: 'loop' });
+    }
+    const draft = await request('POST', '/goal/draft', { body: { conversationId: chat, turnId: 'explicit-pro-turn', clientId: 'explicit-page' } });
+    expect(draft.status).toBe(409);
+    expect(draft.body.error).toBe('chat_still_working');
+    await request('POST', '/settings', { body: { conversationId: chat, loop: false } });
+    expect((await request('GET', `/activity?conversationId=${chat}`)).body.goal.enabled).toBe(false);
+  } finally { await saveConfig(previous); }
+});
+
+it('arms an existing completed Pro answer when the user explicitly enables Loop', async () => {
+  await pair();
+  const chat = 'a5555555-1111-4111-8111-000000000007';
+  await request('POST', '/events', { body: { conversationId: chat, events: [
+    { kind: 'model_selection', model: '6', reasoningEffort: 'pro', time: Date.now() },
+    { kind: 'turn_start', turnId: 'old-pro-turn', time: Date.now() },
+    { kind: 'assistant_message', messageId: 'old-pro-final', turnId: 'old-pro-turn', text: 'A completed answer.', state: 'final', final: true, goalEligible: true, time: Date.now() },
+    { kind: 'turn_end', turnId: 'old-pro-turn', outcome: 'completed', time: Date.now() }
+  ] } });
+  expect((await request('GET', `/activity?conversationId=${chat}`)).body.goal.pending).toBeNull();
+  const on = await request('POST', '/settings', { body: { conversationId: chat, loop: true } });
+  expect(on.status).toBe(200);
+  expect((await request('GET', `/activity?conversationId=${chat}`)).body.goal).toMatchObject({
+    enabled: true, mode: 'loop', pending: { replyId: 'old-pro-final', turnId: 'old-pro-turn' }
+  });
+  const pending = (await request('GET', `/activity?conversationId=${chat}`)).body.goal.pending;
+  for (let poll = 0; poll < 2; poll++) {
+    expect((await request('GET', `/activity?conversationId=${chat}`)).body.goal.pending).toEqual(pending);
+  }
+});
+
+it.each(['unproven-final', 'stopped-turn', 'new-user', 'new-turn'] as const)(
+  'does not arm an existing Pro answer after explicit Loop On with %s', async (scenario) => {
+    await pair();
+    const suffix = ['unproven-final', 'stopped-turn', 'new-user', 'new-turn'].indexOf(scenario) + 8;
+    const chat = `a5555555-1111-4111-8111-${String(suffix).padStart(12, '0')}`;
+    const now = Date.now();
+    const events = [
+      { kind: 'model_selection', model: '6', reasoningEffort: 'pro', time: now },
+      { kind: 'turn_start', turnId: 'previous-pro-turn', time: now + 1 },
+      { kind: 'assistant_message', messageId: 'previous-pro-final', turnId: 'previous-pro-turn',
+        text: 'A previously recorded answer.', state: 'final', final: true,
+        goalEligible: scenario !== 'unproven-final', time: now + 2 },
+      { kind: 'turn_end', turnId: 'previous-pro-turn',
+        outcome: scenario === 'stopped-turn' ? 'stopped' : 'completed', time: now + 3 },
+      ...(scenario === 'new-user'
+        ? [{ kind: 'user_message', messageId: 'new-user-message', text: 'A newer instruction.', time: now + 4 }]
+        : scenario === 'new-turn'
+          ? [{ kind: 'turn_start', turnId: 'new-pro-turn', time: now + 4 }]
+          : [])
+    ];
+    expect((await request('POST', '/events', { body: { conversationId: chat, events } })).status).toBe(200);
+    expect((await request('GET', `/activity?conversationId=${chat}`)).body.goal.pending).toBeNull();
+    expect((await request('POST', '/settings', { body: { conversationId: chat, loop: true } })).status).toBe(200);
+    expect((await request('GET', `/activity?conversationId=${chat}`)).body.goal).toMatchObject({
+      enabled: true, mode: 'loop', pending: null
+    });
+  }
+);
+
 it('retires an already armed ordinary Goal repair when its conversation is now Astra', async () => {
   const previous = getConfig();
   vi.useFakeTimers();

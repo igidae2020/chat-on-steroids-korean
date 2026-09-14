@@ -1,0 +1,47 @@
+name: Upstream repair workbench
+
+on:
+  push:
+    branches: [repair/upstream-v2.1.11-workbench]
+
+permissions:
+  contents: read
+
+jobs:
+  inspect:
+    if: github.repository == 'igidae2020/chat-on-steroids-korean'
+    runs-on: ubuntu-24.04
+    timeout-minutes: 10
+    steps:
+      - uses: actions/checkout@fbc6f3992d24b796d5a048ff273f7fcc4a7b6c09
+        with:
+          fetch-depth: 0
+          persist-credentials: false
+      - name: Export public source history and reproduce conflicts without publishing
+        shell: bash
+        run: |
+          set -euo pipefail
+          git config user.name 'github-actions[bot]'
+          git config user.email '41898282+github-actions[bot]@users.noreply.github.com'
+          git remote add upstream https://github.com/totec448-spec/chat-on-steroids.git
+          git fetch --no-tags upstream refs/tags/v2.1.11:refs/remotes/upstream/v2.1.11
+          git bundle create "$RUNNER_TEMP/upstream-repair.bundle" --all
+          git log --oneline --first-parent -40 > "$RUNNER_TEMP/upstream-repair-report.txt"
+          git merge-base HEAD refs/remotes/upstream/v2.1.11 >> "$RUNNER_TEMP/upstream-repair-report.txt"
+          set +e
+          git merge --no-commit --no-ff refs/remotes/upstream/v2.1.11 >> "$RUNNER_TEMP/upstream-repair-report.txt" 2>&1
+          status=$?
+          set -e
+          test "$status" -le 1
+          git diff --name-only --diff-filter=U >> "$RUNNER_TEMP/upstream-repair-report.txt"
+          git diff --cc > "$RUNNER_TEMP/upstream-repair-conflicts.patch"
+          cat "$RUNNER_TEMP/upstream-repair-report.txt"
+      - uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02
+        with:
+          name: upstream-repair-source
+          path: |
+            ${{ runner.temp }}/upstream-repair.bundle
+            ${{ runner.temp }}/upstream-repair-report.txt
+            ${{ runner.temp }}/upstream-repair-conflicts.patch
+          if-no-files-found: error
+          retention-days: 1

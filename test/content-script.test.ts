@@ -2342,6 +2342,51 @@ describe('recording authored message text', () => {
     expect(emitted(live.sent, 'conversation_title')).toHaveLength(1);
   });
 
+  it('attaches the unchanged submitted model to every new turn after picker changes were flushed', async () => {
+    live = await harness();
+    const model = { model: 'gpt-5-6-thinking', reasoningEffort: 'xhigh' };
+    (live.window as any).CLF_DOM.visibleModelSelection = () => model;
+    live.hook.observe();
+    await live.hook.flush();
+    for (const id of ['first', 'second']) {
+      userTurn(live.document, id, `continue ${id}`);
+      live.hook.observe();
+      await live.hook.flush();
+    }
+    const starts = emitted(live.sent, 'turn_start');
+    expect(starts).toHaveLength(2);
+    expect(starts[0]!.event.turnId).not.toBe(starts[1]!.event.turnId);
+    expect(starts.map(entry => entry.event.modelSelection))
+      .toEqual([model, model]);
+    expect(emitted(live.sent, 'model_selection')).toHaveLength(1);
+  });
+
+  it.each([null, { model: 'gpt-6-pro', reasoningEffort: 'pro' }])(
+    'retains the submitted model when the picker becomes %j before the bubble mounts', async (nextSelection) => {
+      live = await harness();
+      let selection: { model: string; reasoningEffort: string } | null = { model: 'gpt-5-6-thinking', reasoningEffort: 'xhigh' };
+      (live.window as any).CLF_DOM.visibleModelSelection = () => selection;
+      userTurn(live.document, 'send-before-picker-change', 'continue the requested work');
+      selection = nextSelection;
+      live.hook.observe();
+      await live.hook.flush();
+      expect(emitted(live.sent, 'turn_start').map(entry => entry.event)).toEqual([
+        expect.objectContaining({ modelSelection: { model: 'gpt-5-6-thinking', reasoningEffort: 'xhigh' } })
+      ]);
+    }
+  );
+
+  it('does not assign a later picker to a send whose model was unknown', async () => {
+    live = await harness();
+    userTurn(live.document, 'unknown-model-send', 'continue the requested work');
+    (live.window as any).CLF_DOM.visibleModelSelection = () => ({ model: 'gpt-5-6-thinking', reasoningEffort: 'xhigh' });
+    live.hook.observe();
+    await live.hook.flush();
+    const starts = emitted(live.sent, 'turn_start');
+    expect(starts).toHaveLength(1);
+    expect(starts[0]!.event.modelSelection).toBeNull();
+  });
+
   it('does not persist Show more / Show less controls as part of a user message', async () => {
     live = await harness();
     const section = userTurn(live.document, 'turn-user-chrome', 'the exact authored message');
@@ -5677,6 +5722,7 @@ describe('a stop button that goes missing while the turn is still running', () =
     { model: 'GPT-5.6 Pro' },
     { model: 'gpt-5-6-pro' },
     { model: 'gpt-5-5-pro' },
+    { model: 'gpt-5-6-thinking', reasoningEffort: 'pro' },
     { model: 'GPT-6', reasoningEffort: 'pro' },
     { model: 'GPT-5.6 Sol', reasoningEffort: 'pro' }
   ])('requires actual final evidence without Fiber for Pro or unknown selection %j', async (selection) => {
@@ -5723,6 +5769,28 @@ describe('a stop button that goes missing while the turn is still running', () =
     live.hook.observe();
     await settle();
     expect(emitted(live.sent, 'turn_end').map(entry => entry.event.outcome)).toEqual(['completed']);
+  });
+
+  it.each([
+    [{ model: 'gpt-6-pro', reasoningEffort: 'pro' }, { model: 'gpt-5-6-thinking', reasoningEffort: 'xhigh' }, false],
+    [null, { model: 'gpt-5-6-thinking', reasoningEffort: 'xhigh' }, false],
+    [{ model: 'gpt-5-6-thinking', reasoningEffort: 'xhigh' }, { model: 'gpt-6-pro', reasoningEffort: 'pro' }, true]
+  ])('keeps degraded completion bound to submitted selection %j after picker changes to %j', async (submitted, next, completed) => {
+    live = await harness();
+    (live.window as any).CLF_DOM.visibleModelSelection = () => submitted;
+    startGenerating(live.document);
+    const section = assistantTurn(live.document, 'turn-picker-change', []);
+    prose(live.document, section, 'picker-change-prose', 'Checking the remaining details.');
+    live.hook.observe();
+    await settle();
+    (live.window as any).CLF_DOM.visibleModelSelection = () => next;
+    stopGenerating(live.document);
+    live.hook.observe();
+    await settle();
+    live.advance(live.hook.TURN_SETTLE_MS * 2);
+    live.hook.observe();
+    await settle();
+    expect(emitted(live.sent, 'turn_end').map(entry => entry.event.outcome)).toEqual(completed ? ['completed'] : []);
   });
 
   it('does not close a quiet turn on a mounted Copy action when Fiber names no final message', async () => {
@@ -11310,10 +11378,13 @@ describe('the fresh chat the app opened', () => {
     expect(composerText(live.document)).toBe('');
 
     live.advance(live.hook.TURN_SETTLE_MS);
-    // Give the settled assistant turn the exact completed-message evidence the live page mounts.
-    const copy = live.document.createElement('button');
-    copy.setAttribute('aria-label', 'Copy message');
-    assistant!.append(copy);
+    // This document adopted the worker, so its current picker cannot prove the
+    // submitted model. Native completion, not a mounted Copy button, releases it.
+    await bindFiberTurns([{ section: assistant!, turn: {
+      turnId: 'turn-finishing-worker', endMessageId: 'worker-final',
+      messages: [{ messageId: 'worker-final', rawMessageId: 'worker-final', stable: true, order: 0,
+        rawText: 'Final handoff is complete.', renderedHtml: '<p>Final handoff is complete.</p>' }]
+    } }]);
     live.hook.observe();
     await settle(300);
 
@@ -11531,9 +11602,11 @@ describe('the fresh chat the app opened', () => {
     live.hook.observe();
     await settle();
     live.advance(live.hook.TURN_SETTLE_MS);
-    const copy = live.document.createElement('button');
-    copy.setAttribute('aria-label', 'Copy message');
-    assistant!.append(copy);
+    await bindFiberTurns([{ section: assistant!, turn: {
+      turnId: 'turn-durable-revival-boundary', endMessageId: 'durable-worker-final',
+      messages: [{ messageId: 'durable-worker-final', rawMessageId: 'durable-worker-final', stable: true, order: 0,
+        rawText: 'Finished before the revived message.', renderedHtml: '<p>Finished before the revived message.</p>' }]
+    } }]);
     live.hook.observe();
     await settle(200);
 

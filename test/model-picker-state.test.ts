@@ -156,6 +156,79 @@ it('keeps an explicit model denial unavailable even when the preset is visible',
   const f = fixture(); (f.props.modelSwitcherDenialsBySlug as any)['future-model'] = { reason: 'workspace_policy' };
   expect(await f.api.inspectModelSettings()).toEqual([{ id: 'gpt-5-6-thinking', label: 'GPT-5.6 Sol', efforts: ['medium', 'high'], aliases: ['gpt-5-6-thinking'] }]);
 });
+async function scanSelection(api: any) {
+  await new Promise<void>(resolve => {
+    const receive = (event: MessageEvent) => {
+      if (event.data?.source !== 'clf-picker-reply') return;
+      page.window.removeEventListener('message', receive as any); resolve();
+    };
+    page.window.addEventListener('message', receive as any);
+    page.window.postMessage({ source: 'clf-picker-ask', nonce: 'closed-picker' }, page.window.location.origin);
+  });
+  return api.visibleModelSelection();
+}
+it('reads the closed mounted trigger through its bounded dropdown props and invalidates stale proof', async () => {
+  const f = fixture(), trigger = page.window.document.querySelector('button')!;
+  let fiber: any = { memoizedProps: { dropdownContent: { props: f.props } }, return: null };
+  for (let i = 0; i < 25; i++) fiber = { memoizedProps: {}, return: fiber };
+  (trigger as any).__reactFiber$test = fiber;
+  expect(page.window.document.querySelector('[data-testid="composer-intelligence-picker-content"]')).toBeNull();
+  expect(await scanSelection(f.api)).toEqual({ model: 'gpt-5-6-thinking', reasoningEffort: 'high' });
+  f.state.currentSelection.thinkingEffort = 'max';
+  expect(await scanSelection(f.api)).toEqual({ model: 'gpt-5-6-thinking', reasoningEffort: 'xhigh' });
+  f.state.currentSelection.thinkingEffort = 'unknown';
+  expect(await scanSelection(f.api)).toBeNull();
+  expect(trigger.hasAttribute('data-clf-selected-model')).toBe(false);
+  expect(f.actions).not.toHaveBeenCalled();
+});
+it('rejects conflicting picker owners and ignores a menu outside the composer', async () => {
+  const f = fixture(), doc = page.window.document;
+  const trigger = doc.querySelector('button')!;
+  (trigger as any).__reactFiber$test = { memoizedProps: { dropdownContent: { props: f.props } }, return: null };
+  const otherProps = structuredClone(f.props);
+  otherProps.composerIntelligencePickerState.currentSelection.thinkingEffort = 'max';
+  otherProps.composerIntelligencePickerState.bucketSelections[1]!.thinkingEffort = 'max';
+  const other = doc.createElement('button'); other.setAttribute('aria-haspopup', 'menu');
+  (other as any).__reactFiber$test = { memoizedProps: { dropdownContent: { props: otherProps } }, return: null };
+  doc.body.append(other);
+  expect(await scanSelection(f.api)).toEqual({ model: 'gpt-5-6-thinking', reasoningEffort: 'high' });
+  doc.querySelector('form')!.append(other);
+  expect(await scanSelection(f.api)).toBeNull();
+  expect(trigger.hasAttribute('data-clf-selected-model')).toBe(false);
+  other.remove();
+  expect(await scanSelection(f.api)).toEqual({ model: 'gpt-5-6-thinking', reasoningEffort: 'high' });
+  trigger.remove();
+  expect(f.api.visibleModelSelection()).toBeNull();
+});
+it('refreshes send-time evidence after an idle model change without waiting for another scan', async () => {
+  const f = fixture(), trigger = page.window.document.querySelector('button')!;
+  (trigger as any).__reactFiber$test = { memoizedProps: { dropdownContent: { props: f.props } }, return: null };
+  expect(await scanSelection(f.api)).toEqual({ model: 'gpt-5-6-thinking', reasoningEffort: 'high' });
+  const pro = f.selections[0]![2]!;
+  pro.availability.status = 'available';
+  f.state.currentBucket = pro.bucket; f.state.currentSelection = pro;
+  expect(f.api.visibleModelSelection()).toEqual({ model: pro.modelSlug, reasoningEffort: 'pro' });
+  f.state.currentSelection.thinkingEffort = 'unknown';
+  f.state.currentSelection.category.modelLane = 'thinking';
+  expect(f.api.visibleModelSelection()).toBeNull();
+  expect(f.actions).not.toHaveBeenCalled();
+});
+it('rejects old stamps when the MAIN helper is unavailable', async () => {
+  const f = fixture(), trigger = page.window.document.querySelector('button')!;
+  (trigger as any).__reactFiber$test = { memoizedProps: { dropdownContent: { props: f.props } }, return: null };
+  page.window.document.removeEventListener('clf-picker-sync', (page.window as any).__clfFiberHelper.pickerSyncListener);
+  trigger.setAttribute('data-clf-selected-model', 'gpt-5-6-thinking');
+  trigger.setAttribute('data-clf-selected-effort', 'xhigh');
+  expect(f.api.visibleModelSelection()).toBeNull();
+});
+it('replaces the synchronous picker listener on helper reinjection', async () => {
+  const f = fixture(), win = page.window, trigger = win.document.querySelector('button')!;
+  const read = vi.fn(() => f.props);
+  (trigger as any).__reactFiber$test = { memoizedProps: { dropdownContent: { get props() { return read(); } } }, return: null };
+  win.eval(fiberSource);
+  expect(f.api.visibleModelSelection()).toEqual({ model: 'gpt-5-6-thinking', reasoningEffort: 'high' });
+  expect(read).toHaveBeenCalledTimes(1);
+});
 it('recognizes the provider min effort as Low without invalidating the account catalog', async () => {
   const f = fixture(); f.selections[0]![0]!.thinkingEffort = 'min';
   expect(await f.api.inspectModelSettings()).toContainEqual({ id: 'gpt-5-6-thinking', label: 'GPT-5.6 Sol', efforts: ['low', 'high'], aliases: ['gpt-5-6-thinking'] });

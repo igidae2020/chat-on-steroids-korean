@@ -440,6 +440,9 @@
     }
   })();
   let turnId = null;
+  // The picker describes the next send; only this generation's send receipt can
+  // authorize degraded completion while MAIN-world completion evidence is absent.
+  let turnModelSelection = null;
   let genCount = 0;
   /**
    * What the last activity pull said this chat has open in the app.
@@ -759,6 +762,7 @@
       text,
       conversationId: CLF_DOM.conversationId(),
       previousMessageId,
+      modelSelection: CLF_DOM.visibleModelSelection?.() || null,
       at: Date.now()
     };
   }
@@ -1350,7 +1354,7 @@
       unrecordedGeneratingSince = Date.now();
       return null;
     }
-    return Date.now() - unrecordedGeneratingSince >= TURN_SETTLE_MS ? newest : null;
+    return Date.now() - unrecordedGeneratingSince >= TURN_SETTLE_MS ? { messageId: newest, modelSelection: null } : null;
   }
 
   function adoptOpenTurn(open) {
@@ -1360,6 +1364,7 @@
     generating = true;
     unwitnessedGeneration = true;
     turnId = open;
+    turnModelSelection = null;
     genNode = null;
     priorSections = new WeakSet(baselineSections);
     priorMarks = baselineMarks;
@@ -1564,6 +1569,7 @@
     quietTurn = null;
     quietOutcome = null;
     turnId = null;
+    turnModelSelection = null;
     genNode = null;
     priorSections = new WeakSet();
     priorMarks = [];
@@ -1802,14 +1808,13 @@
     // document has seen running. An adopted one it has not has no document-side evidence of
     // finishing at all, and its visible prose is whatever was committed before the reload.
     // See unwitnessedGeneration. Pro can hide its Stop control while still thinking:
-    // it requires native end_turn even without Fiber. A closed picker supplies no current
-    // model proof either; never treat that absence as proof of a non-Pro turn. Read the
-    // existing passive picker authority, without opening it or trusting a cached selection.
-    const selection = CLF_DOM.visibleModelSelection?.();
+    // it requires native end_turn even without Fiber. A later picker change belongs to
+    // the next send, never this turn. An adopted/unknown send has no non-Pro proof.
+    const selection = turnModelSelection;
     const model = (selection?.model || '').trim().toLowerCase().replace(/\s+/g, '-');
     // Exact aliases match shared/chat-models.ts::isProModel (the extension is plain JS).
-    const pro = /^(?:astra|gpt-?6-astra|gpt-?\d+(?:[.-]\d+)?-pro)$/.test(model) ||
-      (/^(?:gpt-?6(?:\.0)?|gpt-?5\.6(?:-sol)?)$/.test(model) && selection?.reasoningEffort === 'pro');
+    const pro = selection?.reasoningEffort === 'pro' ||
+      /^(?:astra|gpt-?6-astra|gpt-?\d+(?:[.-]\d+)?-pro)$/.test(model);
     if (!fiberPresent && !unwitnessedGeneration && model && !pro && answerText(turn).length > 0) return { outcome: 'completed' };
     if (turnStalled()) {
       return { outcome: 'stalled', detail: 'no visible output and no progress for ten minutes' };
@@ -1892,6 +1897,7 @@
     // this transcript is unreadable rather than merely unopenable.
     if (resumeIdentityPending) return null;
     let newUserMessage = null;
+    let sentModelSelection = null;
     const rendered = CLF_DOM.messages();
     // The newest user message on screen, by document order. A send the user has just made is
     // always the last one; anything above it is transcript, however new it is to this
@@ -1929,6 +1935,7 @@
           const sameConversation = !receipt.conversationId || receipt.conversationId === conversationId;
           const newIdentity = !receipt.previousMessageId || receipt.previousMessageId !== message.id;
           if (sameConversation && newIdentity && matchesSubmittedUser(message, receipt.text)) {
+            sentModelSelection = receipt.modelSelection;
             userSendReceipt = null;
             return true;
           }
@@ -1959,7 +1966,7 @@
         // row contributes only the boundary here.
         const justAuthored = authoredNow(message);
         if (seenMessages.has(key)) {
-          if (justAuthored) newUserMessage = message.id;
+          if (justAuthored) newUserMessage = { messageId: message.id, modelSelection: sentModelSelection };
           continue;
         }
         // Presentation is not enough to commit a continuation, but it is enough to stop this
@@ -1978,7 +1985,7 @@
           commandJournalGate = true;
         }
         markSeen(key);
-        if (justAuthored) newUserMessage = message.id;
+        if (justAuthored) newUserMessage = { messageId: message.id, modelSelection: sentModelSelection };
         emit({
           kind: 'user_message',
           text: message.text,
@@ -2288,7 +2295,7 @@
     // which is adoption and not opening — no second `turn_start` for one generation. A turn no
     // document ever recorded arrives by claimUnrecordedGeneration(), which is an opening.
     if (newUserMessage && !generating) {
-      openedUserMessageId = newUserMessage;
+      openedUserMessageId = newUserMessage.messageId;
       generating = true;
       quietSince = 0;
       quietTurn = null;
@@ -2297,6 +2304,7 @@
       stallReported = false;
       genCount++;
       turnId = `g-${RUN_ID}-${epoch}-${genCount}`;
+      turnModelSelection = newUserMessage.modelSelection || null;
       unwitnessedGeneration = false;
       bindResumeGoalTurn(turnId);
       genNode = null;
@@ -2323,7 +2331,9 @@
       // what keeps the app's `turn_start` the only one — repeating it would clear the very
       // state the resume exists to keep, since recorder.ts empties `progress`, `pageTools`
       // and the pending sightings on every turn_start.
-      emit({ kind: 'turn_start', turnId });
+      // The send owns its model evidence. A deduplicated picker-change event can be in a
+      // previous journal batch, and the picker may already describe the next turn here.
+      emit({ kind: 'turn_start', turnId, modelSelection: newUserMessage.modelSelection });
 
       // The compaction binding is made here and only here: the first generation to open
     }

@@ -231,34 +231,26 @@ Do not "restore" these from an older document:
   the project, so every intermediate folder remains explicit (`/me/projects/app/...`,
   not `/me/src/...`). There is no model-visible `list_roots` fallback that makes the old example
   safe; fix the instruction text/tests rather than teaching tools to guess a missing project level.
-- Ordinary Goal continues **completed final answers only**; Astra is finish-tool-only (see §17). Older README/working-note wording that
+- Ordinary Goal continues **completed final answers only**; Astra defaults to finish-tool continuation, with explicit per-chat Loop opting into final-answer continuation (see §17). Older README/working-note wording that
   says an `interrupted` turn is automatically continued is stale against `content.js::GOAL_CONTINUABLE`.
 - The older prose comment near `config.ts` auto-compaction defaults still calls the trigger
   edge-based. Live authority is `store.ts::autoCompactionReady()` + `bridge.ts::chatIsWorking()`:
   **level above threshold + live work**, with no durable one-shot edge. Likewise, a background.js
   comment that implies browser recovery closes duplicate tabs is stale: recovery deterministically
   elects/reloads one exact tab but does not own duplicate-tab cleanup.
-- A separate `background.js` maintenance comment still says an unattributed repair is armed after
-  twenty seconds. That mixes two different clocks. Live authority is conditional: a call carrying an
-  unresolved request id may wait up to the recorder's **20-second request-id grace**; a call with no
-  request id has no ownership proof to await and lands Unattributed immediately. Either resulting
-  **Unattributed verdict** then starts `bridge.ts::UNATTRIBUTED_REPAIR_MS`, a separate **60-second
-  incident** before repair candidates are queued. The extension's 30-second alarm is only the MV3
-  wake-up floor for collecting already-decided work; it is not either recovery deadline. Several
-  `content.js` comments still carry old recorder timings: the Fiber request-id note says **15s**,
-  `streamTurnGroups()` says **5s**, and the compaction `TOOL_SETTLE_MS` rationale says **15s**. Live
-  authority is `recorder.ts::REQUEST_ID_GRACE_MS = evidenceWindow(20_000)`. That last comment also
-  predates the running-vs-settling split: Compact & Resume waits app-reported **running local tools**,
-  not the recorder's attribution tail. Treat all three as comment drift, not alternate timers.
+- Unattributed calls retain the recorder's exact request-id grace and late correlation. They grant
+  no browser recovery authority and start no incident, candidate search or timer. Older extension
+  comments describing an unattributed-repair deadline are obsolete. The recorder's live request-id
+  grace remains `REQUEST_ID_GRACE_MS = evidenceWindow(20_000)`; no-request-id calls land immediately.
 - `multiAgent.recoverAgentTabs` is one switch with one meaning, read through
   `bridge.ts::tabRecoveryWanted()`: whether **silence** and **no-tab** recovery may bring back a chat
   that the Goal/Loop switch is *not* driving — workers, primes, plain chats with recorded tool calls.
-  A Goal/Loop chat (`goalActiveFor()`) is always brought back. Unattributed, assistant-error, Goal
+  A Goal/Loop chat (`goalActiveFor()`) is always brought back. Assistant-error, Goal
   watch and compaction pickups are reloads of a broken page and are not gated by it.
 - `bridge.ts` still has two misleading comments near the live recovery/command structures. The
   `lastBrowserRecoveryAt` comment says one cooldown covers errors, silence and missing tabs, but
   `queueBrowserRecovery()` explicitly gives `silence` and `goal` no cooldown and applies the 3m floor
-  only to `unattributed` / `assistant-error` / `no-tab`. `Command.owner` also says a restored command
+  only to `assistant-error`. `Command.owner` also says a restored command
   has no waiting page and is memory-only; live `DurableCommandRecord` serializes/restores exact
   `owner` + `claimedAt` for valid leases. Trust the record/restore code and tests, not those comments.
 - Goal source comments have two current semantic drifts too. `goal.ts` still says a per-chat Off row
@@ -415,7 +407,7 @@ durable or externally re-observable fact can reconstruct it.
 | session retention | `session/retention.ts` | process timer, current config read each sweep | startup prune + one coarse six-hour sweep; retention applies to existing history even with recording off |
 | model-facing session cursor | `mcp/session-tool.ts` | opaque cursor carried by the caller | cursors pin snapshot/filter/range/open-message checkpoints; stale boundaries fail explicitly rather than silently skipping/repeating history |
 | browser pairing / presence | `extension/background.js` + `bridge.ts` | token/intent in extension `storage.local` and app secret store; presence memory-only/re-observed | pairing token never reaches content/page; “browser absent” and “one chat absent” are different facts |
-| shared broken-page recovery | `bridge.ts` `activeUntil` + `repairsInFlight` + `unattributedIncident` + `goalWatch` | **process memory**, not a recovery WAL; handout tokens/cooldowns/episode ids are ephemeral and re-earned from live evidence | restart must not resurrect an old browser action merely because it was once queued. A durable Goal reply obligation is separate truth and may cause a new Goal watch after this run observes/accepts eligible work; the old repair token itself never survives as authority |
+| shared broken-page recovery | `bridge.ts` `activeUntil` + `repairsInFlight` + `goalWatch` | **process memory**, not a recovery WAL; handout tokens/cooldowns/episode ids are ephemeral and re-earned from live evidence | restart must not resurrect an old browser action merely because it was once queued. A durable Goal reply obligation is separate truth and may cause a new Goal watch after this run observes/accepts eligible work; the old repair token itself never survives as authority |
 | browser observation custody | `extension/background.js` journal | `storage.session` until app `/events` accepts it | content-script success means “journal owns it”, not “app stored it”; an acknowledged observation must never vanish on worker suspension |
 | real conversation lifetime in a tab | `extension/background.js` tab registry | `storage.session` | document reload/pagehide is not conversation close; tab removal/navigation away decides closure |
 | active agent tab discard policy | `agents.ts` live state projected by `bridge.ts`; applied by `extension/background.js` | exact conversation ids derived per `/status`; extension-owned tab ids in `storage.session` | active Prime and active/waking/detached Worker tabs are non-auto-discardable; sleeping/terminal chats restore only policy this extension changed |
@@ -474,7 +466,7 @@ first?**
 | app bootstrap / restart order | `index.ts` `app.whenReady().then(...)` | Goal/correlation restore → retired workers/swarm → continuations → IPC/window → bridge/retention/connection/update; quit starts at the `will-quit` handler and enters `shutdown.ts` |
 | MCP request identity | ingress: `mcp/inbound.ts::requestIdFromHeader()` → `kernel.ts::callerConversation()` / `recorder.ts::awaitFreshCallOrigin()`; browser proof publication: `recorder.ts::noteCallEvidence()` | `correlation.ts::observeRequestCorrelations()` writes exact URL/Fiber-agreed ownership; `requestCorrelation()` is then read by caller/workspace guards → `recordToolCall()`. The MCP request never creates its own ownership proof |
 | live browser request-id ownership handshake | `content.js::confirmLiveRequestOwners()` | background `correlate()` → bridge POST `/correlations` → recorder exact call evidence → correlation registry read-back/`confirmed[]` |
-| broken ChatGPT page auto-recovery | all evidence converges on `bridge.ts::queueBrowserRecovery()` | silence: `armSilenceSweep()` → `inspectSilentChats()`; assistant-error: `noteRecoveryObservations()`; unattributed: `noteCallAttribution(null)` → `repairUnattributedChat()`; no-tab: `queueMissingTab()`; Goal: `inspectOwedGoals()` → current `takePendingRepair()` → `background.js::maintain()` → `confirmRepair()` / `failRepairAttempt()` |
+| broken ChatGPT page auto-recovery | all evidence converges on `bridge.ts::queueBrowserRecovery()` | silence: `armSilenceSweep()` → `inspectSilentChats()`; assistant-error: `noteRecoveryObservations()`; no-tab: `queueMissingTab()`; Goal: `inspectOwedGoals()` → current `takePendingRepair()` → `background.js::maintain()` → `confirmRepair()` / `failRepairAttempt()` |
 | Goal / Loop after a final answer | bridge POST `/events` durable `acceptGoalReplyNow()` + `content.js::noteGoalTurn()` | `watchGoalTurn()` → `/goal/draft` → `goal.ts::startGoalDraft(...deferStart:true)` → `beginGoalDraft()` / `requestDrivingDecision()` → `content.js::maybeSendGoalReply()` |
 | automatic compaction | bridge `considerAutomaticCompaction()` (from `grantActivity()`): `store.ts::autoCompactionReady()` + `chatIsWorking()` + worker/blocked fence → `continuation.ts::openContinuationNow(automatic)` | page reads the ticket as `job` → `content.js::maybeResumePendingCompaction()` (raises its tab) → `startCompact()` → `stopAndSettle()` → bridge `/compact`; pickups by phase in `inspectOwedCompactions()`: asking 2 min × 5 then abort, writing 5 min × 3, opening 15 min × 3, each in front |
 | Compact & Resume restart recovery | `continuation.ts::restoreContinuations()` | session metadata ownership → `commitContinuationResult()`/projection repair; browser send ambiguity is resolved by the continuation's durable source/destination send checkpoints |
@@ -1531,6 +1523,11 @@ Known Pro models and unknown models in Goal/Loop instead use ten minutes from me
 picker or MCP identity promotes an unknown grant without resetting its evidence timestamp. A real
 completed/stopped turn-end removes activity immediately; a failed/unknown Pro or unknown Goal/Loop stream is not server completion. A genuinely newer exact MCP call can revive activity. Pro never
 receives an inactivity-generated Goal or automatic compaction. Picker presence alone is not work.
+The extension's degraded DOM completion uses the submitted generation's picker receipt, not the
+currently selected next-send model. Adopted or unobserved sends retain unknown model identity.
+Recorder activity names the latest accepted start in a journal batch. An earlier turn's terminal
+cannot spend that new grant; its own terminal still can. Repair receipts without a surviving
+turn-bound grant restore unknown model observation, never infer it from the next-send picker.
 `grantActivity()` arms/pushes it from accepted current-turn evidence and attributed calls;
 `endActivity()` removes it only on a real terminal. `armSilenceSweep()` owns one timer for the
 earliest deadline across all chats, so a 30-second maintenance tick cannot silently add another
@@ -1541,26 +1538,20 @@ a confirmed reload schedules the next check ten minutes later without inventing 
 or a synthetic follow-up. Canonical completion, Stop, block and Goal/Loop Off fence this observation.
 **A resumed chat is armed at the commit** (`armResumedChat()`, called from both commit sites —
 the `/compact` destination-marker route and the `/commands/ack` resume receipt): the moment S
-names B, B gets the same grant an accepted turn would have earned. The 2026-09-02 automatic
-handover showed why. B never reported its turn or bound its first request id, so its calls went
-Unattributed and B, with no grant and no known turn, was not a repair candidate — the incident
-had nothing to reload and B stayed stuck at its first tool call. With the grant, the silence and
-unattributed sweeps cover B from the first second, exactly as they would a chat that had proved
-itself.
+names B, B gets the same activity grant. A committed continuation is exact evidence that B owes
+work, so its own silence clock can recover an unresponsive B before the first page report.
+An unattributed call adds no authority to that grant.
 
-Unattributed recovery is separate evidence feeding the same queue. One recorder verdict that a call
-is **Unattributed** opens a 60-second
-`unattributedIncident`; later attributed calls add their exact conversations to the incident's
-`proven` set. At expiry, `repairUnattributedChat()` looks only at chats this app can still prove are
-mid-turn (`repairCandidates()`), excludes those that proved their join, and queues one recovery for
-each remaining broken chat. It does not choose "the one likely chat", and agent role is not an
-eligibility gate. The incident carries the **request ids** of the unattributed calls that opened
-and fed it; once it has reloaded anybody those ids go into `unattributedReloadedRequests`, and a
-later unattributed call under one of them opens nothing — the reload is tried once per server turn,
-however the reloaded page re-labels its local turn, and a *different* request id (the user's next
-message from the phone, say) is a different turn with its own reload. Any `chat_error` the page
-shows queues an `assistant-error` repair — whatever the DOM classifier said about it and whether or
-not the page could name its turn — even while attributed MCP calls continue server-side. A final-tab close
+**Unattributed is recording uncertainty, never browser authority.** A recorder verdict with no
+conversation cannot authorize reload, open, stop or retry of any conversation, even if only one
+chat is active or other chats recently produced exact calls. There is no global incident, suspect
+set, countdown or request-id reload budget. Exact attribution and late request-id correlation keep
+recording their real owner. An exact current call may update only that chat's activity; historical
+source calls cannot revive a superseded conversation. `unattributedRepairEta()` remains an inert
+`null` compatibility export for the existing kernel notice caller and promises no repair.
+
+Independent per-chat evidence still feeds `queueBrowserRecovery()`: accepted transport failures,
+owned silence/Goal/compaction obligations and an eligible exact final-tab close. A final-tab close
 may queue `no-tab` when `tabRecoveryWanted()` holds (Goal/Loop chat, or `recoverAgentTabs` on) and
 this app is owed a running turn in that chat. "Owed" is the app's own fact, read in `/closed`
 before the close forgets it: the page's open turn **or** a live `activeUntil` grant (an attributed
@@ -1592,22 +1583,21 @@ any more: `bridge.ts::noteRecoveryObservations()` queues `assistant-error` for e
 observation (the page's own de-duplication in `unreportedError()` is what keeps a banner still on
 screen from re-queueing), and what rations it is the **once-per-user-turn budget** below.
 
-The five recovery reasons are intentionally different **evidence**, but not different action
+The remaining recovery reasons are intentionally different **evidence**, but not different action
 machines:
 
 | Reason | Who is allowed to create it | What proves the episode over |
 | --- | --- | --- |
 | `silence` | `inspectSilentChats()` after the semantic-turn `activeUntil` deadline expires — the only qualification is two minutes with no tool call and no page change on a chat that had activity | meaningful new current-turn activity before handoff cancels it; a confirmed reload re-grants the chat `CHAT_SILENCE_MS` (the reload is its chance; a model writing a long answer makes no durable progress until it lands) or, for a Goal/Loop chat, `GOAL_SILENCE_LISTEN_MS` (one minute), and only a second silent window after that spends the one-shot: the stale sweep sleeps a worker, and `fileSilenceGoalTickets()` files a **Goal ticket** for a Goal/Loop chat — the same durable `goal-replies` obligation a finished answer files, under a `g-silence-<time>` turn, which the page collects on its next pull like any restored pending reply, drafts and sends. A turn that ends **failed** re-grants the watch instead of ending it: the page gave up, the model usually did not. A user Stop ends activity and never reaches any of this |
-| `unattributed` | `repairUnattributedChat()` after the recorder opened one 60s post-grace incident and this exact mid-turn chat never joined the incident's `proven` set; refused when the call's request id is already in `unattributedReloadedRequests` | an attributed call proves the request-id join works, or a **later turn ends** and advances outcome-agnostic `endedTurns`; the rationing is per **request id**, not per turn |
 | `assistant-error` | `noteRecoveryObservations()` from any `chat_error`, turn id or not, recoverable or not | the browser carries the repair out, or a **later turn ends** and advances outcome-agnostic `endedTurns`; the broken turn's own end is deliberately pre-counted and does not cancel the repair. The once-per-user-turn budget (`turnRepairSpent`) is charged at **confirm** to the turn the chat is on then — `turnKeyFor()`: the running generation, or `ended:<count>` when none is running — and released the moment the chat is on a different one (read lazily in `queueBrowserRecovery()` as well as on the browser's pass), so a failed turn whose end preceded the reload cannot leave its charge on the turn that starts later. Ordinary server-side attributed calls do not cancel it because they prove attribution, not page-stream health |
 | `no-tab` | `queueMissingTab()` for a final tab that closed on a chat this app is owed a turn in: a Worker the close detached, or a Prime/plain chat with the page's open turn or a live activity grant (a plain chat also needs a recorded tool call) — under `recoverAgentTabs`, or always for a Goal/Loop chat | page/turn activity after reopening, or the normal agent lifecycle decision |
 | `goal` | `inspectOwedGoals()` when a `goal-replies` obligation this run accepted is still `pending` and its chat has been quiet for the current backoff step | the obligation is discharged, expired or superseded by a newer reply — or the five-step schedule runs out |
 
-`silence` and `goal` are **chat**-scoped; `unattributed` and `assistant-error` are **turn**-scoped
-(`bridge.ts::TURN_SCOPED_REPAIRS`), and that distinction is load-bearing. The three paths are
+`silence` and `goal` are **chat**-scoped; `assistant-error` is **turn**-scoped
+(`bridge.ts::TURN_SCOPED_REPAIRS`), and that distinction is load-bearing. These paths are
 otherwise **independent of one another**: none waits on, or is refused because, another one has
 or has not fired. Silence has no budget beyond its own two minutes; the error reload is rationed per
-user turn; the unattributed reload per request id. A turn-scoped repair is
+user turn. A turn-scoped repair is
 retired only by a *later* turn ending, so a page that dies on the broken turn keeps one forever —
 and `inspectSilentChats()` used to read any held repair as "a recovery is already running", which is
 how a chat that had been dead for eighteen minutes was never reloaded. `silence` therefore both
@@ -1632,7 +1622,7 @@ Failed/interrupted completion remains repairable. That veto remains meaningful u
 crosses the pre-action claim described below; after an action is atomically claimed, Stop cannot
 retroactively un-send a reload already authorized. Do not add a content-side anti-reload flag.
 
-The shared `lastBrowserRecoveryAt` floor is three minutes for error/unattributed actions,
+The shared `lastBrowserRecoveryAt` floor is three minutes for assistant-error actions,
 but **`silence`, `goal`, `compaction` and `no-tab` bypass it**: the first three already paid their own
 complete inactivity contract, so `queueBrowserRecovery()` sets `notBefore = now` instead of stacking
 another unrelated wait on top, and `no-tab` has nothing the floor could protect — the floor keeps a
@@ -1656,15 +1646,14 @@ Prime/Worker when `queueMissingTab()` runs. `/closed` first lets `primeConversat
 Prime with no reusable workers/reports is removed from the run at that point, the same conversation
 falls through the ordinary-chat branch and may qualify from durable `toolCalls>0` even with
 `recoverAgentTabs=false`. It does **not** suppress
-`silence`, `unattributed`, or `assistant-error` for any chat, and it does not suppress `no-tab` for a
+`silence` or `assistant-error` for any chat, and it does not suppress `no-tab` for a
 non-agent chat whose durable session already proves this connector participated via at least one
 tool call. Pending repairs and `activeUntil` keep `recoveryMonitoring` alive independently of that
 preference; the setting controls agent-tab resurrection, not the shared broken-page engine.
 
 There is also a **current premature-custody bug** in repair cancellation. `/status` changes one repair
 to `handed` **before** the service worker has even scanned current tabs, but
-`noteRecoveryActivity()` can then delete handed `silence` / `no-tab` / `goal` repairs and the
-attributed-call path can delete a handed `unattributed` repair. Nothing tells the browser that its
+`noteRecoveryActivity()` can then delete handed `silence` / `no-tab` / `goal` repairs. Nothing tells the browser that its
 already-issued token disappeared, so it may still reload/open and return a receipt the app now treats
 as stale. Manual Stop has the same physical race. The root is that discovery and action custody are
 currently the same read.
@@ -2294,9 +2283,12 @@ normal browser sends retain one exclusive delivery claim. `session/input.ts` own
 receipts and cancellation. Tool-intent input has no claim-age timeout; actual turn/settings changes
 can cancel generated instructions. Legacy periodic generated rows are retired and cannot revive.
 
-For Astra, both Goal and Loop use the Loop prompt and tool injection: an actual completed answer
-never starts another automatic browser message. `goal.ts::astraFinishOnly()` guards ordinary Goal
-acceptance/generation and bridge routes. Pending user/plan instructions take priority. The shared
+For Astra, Goal and inherited automation use the Loop prompt and tool injection. Explicitly enabling
+Loop on one chat also permits a verified completed answer to start the next browser message.
+`goal.ts::astraFinishOnly()` is the shared policy for acceptance/generation and bridge routes;
+Off or Goal immediately removes that opt-in. Loop On may recover the latest recorded eligible final
+through the existing reply ledger, only without a newer user/turn start, a stopped turn or active work.
+Pending user/plan instructions take priority. The shared
 `automaticFinishEnabled()` authority decides both production and queued-input validity: an armed
 chat Goal/Loop suppresses Notify even when global finish action is Notify. A resulting instruction
 arrives on a later tool call, with the normal generating animation while it is being drafted.

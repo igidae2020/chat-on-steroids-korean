@@ -1946,13 +1946,27 @@ var CLF_DOM = (() => {
       }
     };
   }
-  // The mounted provider picker carries the MAIN-world snapshot's exact identity.
-  // Removing that native node also removes the evidence; never cache across navigation.
+  // The open menu or its mounted trigger carries the MAIN-world verified identity.
+  // Refresh synchronously across worlds: a previous idle scan is not send-time evidence.
   function visibleModelSelection() {
-    const node = document.querySelector('[data-testid="composer-intelligence-picker-content"]');
-    const model = node?.getAttribute('data-clf-selected-model'), reasoningEffort = node?.getAttribute('data-clf-selected-effort');
-    return model && /^[a-zA-Z0-9._-]{1,80}$/.test(model) && ['none','minimal','low','medium','high','xhigh','max','ultra','pro'].includes(reasoningEffort)
-      ? { model, reasoningEffort } : null;
+    const panel = document.querySelector('[data-testid="composer-intelligence-picker-content"]');
+    const triggers = [...(composer()?.closest('form')?.querySelectorAll('button[aria-haspopup="menu"]') || [])]
+      .filter(node => !node.closest(OWN_SURFACES));
+    if (triggers.length > 12) return null;
+    const nodes = [...(panel ? [panel] : []), ...triggers];
+    for (const node of nodes) {
+      node.removeAttribute('data-clf-selected-model');
+      node.removeAttribute('data-clf-selected-effort');
+    }
+    document.dispatchEvent(new Event('clf-picker-sync'));
+    let selected = null;
+    for (const node of nodes) {
+      const model = node.getAttribute('data-clf-selected-model'), reasoningEffort = node.getAttribute('data-clf-selected-effort');
+      if (!model || !/^[a-zA-Z0-9._-]{1,80}$/.test(model) || !['none','minimal','low','medium','high','xhigh','max','ultra','pro'].includes(reasoningEffort)) continue;
+      if (selected && (selected.model !== model || selected.reasoningEffort !== reasoningEffort)) return null;
+      selected = { model, reasoningEffort };
+    }
+    return selected;
   }
   /** Account model discovery belongs to Chat; Work mounts a different picker.
    * The caller owns one idle document and verifies draft/epoch before and after this transition. */

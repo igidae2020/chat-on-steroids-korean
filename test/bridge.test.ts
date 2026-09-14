@@ -1612,11 +1612,13 @@ describe('automatic compaction', () => {
           events: [{ kind: 'turn_start', time: Date.now(), turnId: 'turn-rejected-compact' }, ...over()]
         }
       });
-      await settled();
       const activity = await request('GET', `/activity?conversationId=${conversationId}`);
       const sessionId = activity.body.sessionId as string;
+      // The ticket is published only after its durable write, not after a fixed delay.
+      await vi.waitFor(() => expect(continuationForSession(sessionId)).toMatchObject({
+        automatic: true, state: 'awaiting-summary'
+      }));
       const first = continuationForSession(sessionId);
-      expect(first).toMatchObject({ automatic: true, state: 'awaiting-summary' });
 
       const lost = await request('POST', '/compact', {
         body: { conversationId, token: first!.token, sourceLost: true }
@@ -1669,8 +1671,9 @@ describe('automatic compaction', () => {
           ]
         }
       });
-      await settled();
-      expect(continuationForSession(sessionId)).toMatchObject({ automatic: true, state: 'awaiting-summary' });
+      await vi.waitFor(() => expect(continuationForSession(sessionId)).toMatchObject({
+        automatic: true, state: 'awaiting-summary'
+      }));
     });
   });
 

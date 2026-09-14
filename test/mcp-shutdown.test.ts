@@ -60,7 +60,9 @@ it('drains an accepted MCP mutation before closing its response socket', async (
           process.platform === 'win32'
             ? path.join(process.env.SystemRoot ?? 'C:\Windows', 'System32', 'WindowsPowerShell', 'v1.0', 'powershell.exe')
             : '/bin/sh',
-        yield_time_ms: 5_000
+        // Keep this request open beyond the 15s command-start budget below. A 5s yield
+        // can return a running session before a cold Windows shell writes started.txt.
+        yield_time_ms: 30_000
       }
     }
   };

@@ -2,6 +2,10 @@ name: Update Korean distribution
 
 on:
   workflow_dispatch:
+  push:
+    branches: [main]
+    paths:
+      - '.github/workflows/sync-upstream.yml'
   schedule:
     - cron: '23 3 * * *'
 
@@ -42,9 +46,9 @@ jobs:
           commit="$(git rev-parse "refs/remotes/upstream/releases/$tag^{commit}")"
           git config user.name 'github-actions[bot]'
           git config user.email '41898282+github-actions[bot]@users.noreply.github.com'
-          # Ancestry decides whether official changes are new. Distribution numbers have
-          # their own sequence. The helper only resolves version fields and preserves
-          # published notes on the exact incoming release-note add/add collision.
+          # Ancestry decides whether official changes are new. The release helper rebuilds
+          # from the incoming official tag and replays Korean/OpenCodex distribution history
+          # commit-by-commit, while keeping the distribution version above the official tag.
           node scripts/korean-release.mjs "$commit" "$tag"
       - name: Install exact dependencies
         if: steps.upstream.outputs.changed == 'true'

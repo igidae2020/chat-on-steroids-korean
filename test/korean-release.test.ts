@@ -33,21 +33,23 @@ function fixture(current = '2.0.9', upstream = '2.0.9', conflict?: string, publi
   put(cwd, 'README.md', heading + '\n\n# Official\n');
   put(cwd, 'local-ui.txt', '한국어 · OpenCodex preserved\n');
   if (publishedNotes) put(cwd, `docs/release-notes/v${current}.md`, `## ${current}\n\nPublished Korean notes — preserve verbatim.\n`);
-  if (conflict === 'source') put(cwd, 'feature.txt', 'local code\n');
+  if (conflict === 'source' || conflict === 'structural') put(cwd, 'feature.txt', 'local code\n');
   if (conflict === 'metadata') { const p = JSON.parse(fs.readFileSync(path.join(cwd, 'package.json'), 'utf8')); p.name = 'local-name'; put(cwd, 'package.json', JSON.stringify(p, null, 2) + '\n'); }
   git(cwd, 'add', '.'); git(cwd, 'commit', '-m', 'Distribution');
   git(cwd, 'checkout', '-b', 'official', base); versions(cwd, upstream);
-  put(cwd, 'feature.txt', 'official improvement\n');
+  if (conflict === 'structural') fs.rmSync(path.join(cwd, 'feature.txt'));
+  else put(cwd, 'feature.txt', 'official improvement\n');
+  put(cwd, 'official-only.txt', 'new official file\n');
   if (conflict === 'metadata') { const p = JSON.parse(fs.readFileSync(path.join(cwd, 'package.json'), 'utf8')); p.name = 'official-name'; put(cwd, 'package.json', JSON.stringify(p, null, 2) + '\n'); }
   put(cwd, `docs/release-notes/v${upstream}.md`, `## ${upstream}\n\nOfficial improvements.\nunsigned unnotarized\n` + '`SHA256SUMS.txt`\n');
   git(cwd, 'add', '.'); git(cwd, 'commit', '-m', 'Official update'); const commit = git(cwd, 'rev-parse', 'HEAD');
   git(cwd, 'checkout', 'main');
   return { cwd, base, commit, tag: `v${upstream}` };
 }
-it('uses independent numeric distribution versions and preserves three components', () => {
+it('uses independent numeric distribution versions above official tags and preserves three components', () => {
   expect(nextDistributionVersion('2.0.9', '2.0.9')).toBe('2.0.10');
   expect(nextDistributionVersion('2.0.12', '2.0.9')).toBe('2.0.13');
-  expect(nextDistributionVersion('2.0.10', '2.1.0')).toBe('2.1.0');
+  expect(nextDistributionVersion('2.0.10', '2.1.0')).toBe('2.1.1');
   expect(() => nextDistributionVersion('2.0.9-local', '2.0.10')).toThrow();
 });
 it('does nothing for an already merged official commit and does not touch metadata', () => {
@@ -56,7 +58,7 @@ it('does nothing for an already merged official commit and does not touch metada
   expect(git(f.cwd, 'status', '--porcelain')).toBe(before);
   expect(JSON.parse(fs.readFileSync(path.join(f.cwd, 'package.json'), 'utf8')).version).toBe('2.0.9');
 });
-it.each([['2.0.9', '2.0.9', '2.0.10'], ['2.0.12', '2.0.9', '2.0.13'], ['2.0.10', '2.1.0', '2.1.0']])('prepares %s plus official %s as %s without committing or tagging', (current, official, expected) => {
+it.each([['2.0.9', '2.0.9', '2.0.10'], ['2.0.12', '2.0.9', '2.0.13'], ['2.0.10', '2.1.0', '2.1.1']])('prepares %s plus official %s as %s without committing or tagging', (current, official, expected) => {
   const f = fixture(current, official); const head = git(f.cwd, 'rev-parse', 'HEAD');
   expect(prepareKoreanRelease(f.cwd, f.commit, f.tag)).toMatchObject({ changed: true, version: expected, releaseTag: `v${expected}`, upstreamTag: f.tag });
   expect(git(f.cwd, 'rev-parse', 'HEAD')).toBe(head);
@@ -68,7 +70,9 @@ it.each([['2.0.9', '2.0.9', '2.0.10'], ['2.0.12', '2.0.9', '2.0.13'], ['2.0.10',
   expect(read('src/main/version.ts')).toContain('BRIDGE_PROTOCOL = 13');
   expect(lock.packages['node_modules/preserved'].version).toBe('1.0.0');
   expect(pkg.dependencies).toEqual({ preserved: '1.0.0' });
-  expect(read('local-ui.txt')).toContain('한국어 · OpenCodex preserved'); expect(read('feature.txt')).toBe('official improvement\n');
+  expect(read('local-ui.txt')).toContain('한국어 · OpenCodex preserved');
+  expect(read('feature.txt')).toBe('official improvement\n');
+  expect(read('official-only.txt')).toBe('new official file\n');
   expect(read('README.md')).toContain(`배포판 ${expected}** — 공식 ${f.tag} (${f.commit})`);
   expect(read('CHANGELOG.md')).toMatch(new RegExp(`^# Changelog\\n\\n## \\[${expected.replaceAll('.', '\\.')}\\]`));
   expect(read('CHANGELOG.md')).toContain('Original history');
@@ -76,10 +80,23 @@ it.each([['2.0.9', '2.0.9', '2.0.10'], ['2.0.12', '2.0.9', '2.0.13'], ['2.0.10',
   expect(notes).toContain(f.commit); expect(notes).toContain('unsigned unnotarized'); expect(notes).toContain('Official improvements');
   expect(git(f.cwd, 'diff', '--name-only', '--diff-filter=U')).toBe('');
 });
-it.each(['source', 'metadata'])('refuses non-version %s conflicts rather than choosing a side', conflict => {
+it.each(['source', 'metadata'])('replays local %s conflicts while retaining unrelated official changes', conflict => {
   const f = fixture('2.0.10', '2.0.9', conflict); const head = git(f.cwd, 'rev-parse', 'HEAD');
-  expect(() => prepareKoreanRelease(f.cwd, f.commit, f.tag)).toThrow(/conflict|Manual merge/);
+  const result = prepareKoreanRelease(f.cwd, f.commit, f.tag);
+  expect(result).toMatchObject({ changed: true, version: '2.0.11', upstreamTag: f.tag });
+  expect(result.replayedCommits).toBeGreaterThan(0);
   expect(git(f.cwd, 'rev-parse', 'HEAD')).toBe(head);
+  expect(git(f.cwd, 'tag', '--list')).toBe('');
+  expect(git(f.cwd, 'diff', '--name-only', '--diff-filter=U')).toBe('');
+  expect(fs.readFileSync(path.join(f.cwd, 'official-only.txt'), 'utf8')).toBe('new official file\n');
+  if (conflict === 'source') expect(fs.readFileSync(path.join(f.cwd, 'feature.txt'), 'utf8')).toBe('local code\n');
+  else expect(JSON.parse(fs.readFileSync(path.join(f.cwd, 'package.json'), 'utf8')).name).toBe('local-name');
+});
+it('still refuses structural replay conflicts instead of inventing a delete/modify resolution', () => {
+  const f = fixture('2.0.10', '2.0.9', 'structural'); const head = git(f.cwd, 'rev-parse', 'HEAD');
+  expect(() => prepareKoreanRelease(f.cwd, f.commit, f.tag)).toThrow(/Unable to replay local commit[\s\S]*feature\.txt/);
+  expect(git(f.cwd, 'rev-parse', 'HEAD')).toBe(head);
+  expect(git(f.cwd, 'status', '--porcelain')).toBe('');
   expect(git(f.cwd, 'tag', '--list')).toBe('');
 });
 it('rejects unknown metadata and retains non-version changes in a version-only merge', () => {
@@ -108,9 +125,15 @@ it('preserves published distribution notes on the exact upstream add/add collisi
   expect(next).toContain(f.commit);
 });
 
-it('refuses modify/modify release-note conflicts even for the exact upstream tag', () => {
+it('preserves local historical release-note edits while carrying official notes into the new release', () => {
   const f = fixture('2.0.9', '2.0.8');
-  put(f.cwd, 'docs/release-notes/v2.0.8.md', 'Changed Korean existing release history\n');
+  const historical = 'Changed Korean existing release history\n';
+  put(f.cwd, 'docs/release-notes/v2.0.8.md', historical);
   git(f.cwd, 'add', '.'); git(f.cwd, 'commit', '-m', 'Historical note edit');
-  expect(() => prepareKoreanRelease(f.cwd, f.commit, f.tag)).toThrow('Manual merge required');
+  const result = prepareKoreanRelease(f.cwd, f.commit, f.tag);
+  expect(result).toMatchObject({ changed: true, version: '2.0.10', upstreamTag: 'v2.0.8' });
+  expect(fs.readFileSync(path.join(f.cwd, 'docs/release-notes/v2.0.8.md'), 'utf8')).toBe(historical);
+  const next = fs.readFileSync(path.join(f.cwd, 'docs/release-notes/v2.0.10.md'), 'utf8');
+  expect(next).toContain('Official improvements');
+  expect(next).toContain(f.commit);
 });

@@ -5519,7 +5519,7 @@ async function noteRecoveryObservations(
   conversationId: string,
   sessionId: string | null,
   observations: readonly ChatObservation[],
-  activity: { meaningful: boolean; working: boolean; terminal: boolean; at?: number; toolStartedAt?: number; endedTurnId?: string }
+  activity: { meaningful: boolean; working: boolean; terminal: boolean; at?: number; toolStartedAt?: number; startedTurnId?: string; endedTurnId?: string }
 ): Promise<void> {
   // The recorder owns idempotency. Raw batches may contain a historical user row or turn_start
   // beside a newly accepted title, so inferring activity from `stored > 0` re-armed completed
@@ -5555,8 +5555,10 @@ async function noteRecoveryObservations(
     noteGoalWatchActivity(conversationId);
     // A current-turn interim can push an existing deadline; historical transcript/page rows
     // never enter this verdict and therefore cannot keep a confirmed reload alive.
-    if (sessionId && !activity.terminal && (activity.working || activeUntil.has(conversationId))) {
-      const liveTurn = liveConversations().find(entry => entry.conversationId === conversationId && entry.sessionId === sessionId)?.activeTurnId;
+    if (sessionId && (!activity.terminal || activity.startedTurnId) && (activity.working || activeUntil.has(conversationId))) {
+      // An accepted start owns its grant even if its terminal shares this batch.
+      // Terminal handling below then spends/retains that same generation's grant.
+      const liveTurn = activity.startedTurnId ?? liveConversations().find(entry => entry.conversationId === conversationId && entry.sessionId === sessionId)?.activeTurnId;
       const previous = activeUntil.get(conversationId);
       let selection: ChatObservation | undefined;
       let turn: Pick<ActivityGrant, 'turnId' | 'model'> | undefined;
@@ -6646,9 +6648,9 @@ async function confirmRepair(token: string, action: 'reloaded' | 'reopened' | nu
       // Completion/Stop can arrive during the summary read. The current recorder projection
       // wins over that snapshot before this receipt can extend any observation deadline.
       const current = liveConversations().find(entry => entry.conversationId === conversationId && entry.sessionId === repair.sessionId);
-      const selection = session?.selectedModel;
-      const model = existing?.model ?? (selection?.conversationId === conversationId
-        ? isProModel(selection.model, selection.reasoningEffort) ? 'pro' : 'other' : 'unknown');
+      // The current picker is for the next send. A retired grant has lost its
+      // turn-bound model proof; restore observation as unknown, never as non-Pro.
+      const model = existing?.sessionId === repair.sessionId ? existing.model : 'unknown';
       const unfinished = session?.conversationId === conversationId && !!current &&
         (!!current.activeTurnId || (current.lastTurnOutcome != null && !['completed', 'stopped'].includes(current.lastTurnOutcome)));
       const mayObserve = unfinished && !isChatBlocked(conversationId) && !stopRequestedFor(conversationId);

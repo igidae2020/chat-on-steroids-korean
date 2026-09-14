@@ -172,6 +172,82 @@ beforeEach(async () => {
 });
 
 describe('silence after a confirmed assistant-error repair', () => {
+  it.each(['pro', 'unknown', 'other'])('preserves the newest %s turn recovery across a batched previous completion', async model => {
+    const previous = getConfig();
+    await saveConfig({ ...previous, goal: { ...previous.goal, enabled: true, mode: 'loop' } });
+    await setSecret('openRouterApiKey', 'test-recovery');
+    resetGoalStateForTests(); vi.useFakeTimers();
+    try {
+      await pair();
+      const modelSelection = model === 'unknown' ? null : model === 'pro'
+        ? { model: 'gpt-6-pro', reasoningEffort: 'pro' }
+        : { model: 'gpt-5-6-thinking', reasoningEffort: 'xhigh' };
+      await events([{ kind: 'turn_start', time: Date.now(), turnId: 'batch-A', modelSelection }]);
+      await vi.advanceTimersByTimeAsync(1000);
+      await events([
+        { kind: 'turn_end', time: Date.now(), turnId: 'batch-A', outcome: 'completed' },
+        { kind: 'turn_start', time: Date.now(), turnId: 'batch-B', modelSelection }
+      ]);
+      expect((await request('GET', `/activity?conversationId=${CHAT}`)).body.activeTurnId).toBe('batch-B');
+      await vi.advanceTimersByTimeAsync((model === 'other' ? CHAT_SILENCE_MS : PRO_SILENCE_MS) + 1);
+      await sweepStaleSwarm(Date.now());
+      expect(await maintenance()).toMatchObject({ reason: 'silence' });
+    } finally { vi.useRealTimers(); resetGoalStateForTests(); await setSecret('openRouterApiKey', ''); await saveConfig(previous); }
+  });
+
+  it.each(['completed', 'stopped', 'failed'])('applies the newest batched Pro terminal %s to its own grant', async outcome => {
+    const previous = getConfig();
+    await saveConfig({ ...previous, goal: { ...previous.goal, enabled: true, mode: 'loop' } });
+    await setSecret('openRouterApiKey', 'test-recovery');
+    resetGoalStateForTests(); vi.useFakeTimers();
+    try {
+      await pair();
+      const modelSelection = { model: 'gpt-6-pro', reasoningEffort: 'pro' };
+      await events([{ kind: 'turn_start', time: Date.now(), turnId: 'terminal-A', modelSelection }]);
+      await events([
+        { kind: 'turn_end', time: Date.now(), turnId: 'terminal-A', outcome: 'completed' },
+        { kind: 'turn_start', time: Date.now(), turnId: 'terminal-B', modelSelection },
+        { kind: 'turn_end', time: Date.now(), turnId: 'terminal-B', outcome }
+      ]);
+      await vi.advanceTimersByTimeAsync(PRO_SILENCE_MS + 1);
+      await sweepStaleSwarm(Date.now());
+      if (outcome === 'failed') expect(await maintenance()).toMatchObject({ reason: 'silence' });
+      else expect(await maintenance()).toBeNull();
+    } finally { vi.useRealTimers(); resetGoalStateForTests(); await setSecret('openRouterApiKey', ''); await saveConfig(previous); }
+  });
+
+  it.each(['pro', 'other'])('reobserves a failed turn after its grant retired even if the next picker is %s', async picker => {
+    const previous = getConfig();
+    await saveConfig({ ...previous, multiAgent: { ...previous.multiAgent, recoverAgentTabs: false }, goal: { ...previous.goal, enabled: false } });
+    await setSecret('openRouterApiKey', 'test-recovery');
+    resetGoalStateForTests(); vi.useFakeTimers();
+    try {
+      await pair();
+      const selected = { model: 'gpt-6-pro', reasoningEffort: 'pro' };
+      await events([
+        { kind: 'model_selection', ...selected, time: Date.now() },
+        { kind: 'turn_start', time: Date.now(), turnId: TURN, modelSelection: selected }
+      ]);
+      await vi.advanceTimersByTimeAsync(1000);
+      await events([{ kind: 'turn_end', time: Date.now(), turnId: TURN, outcome: 'failed' }]);
+      await vi.advanceTimersByTimeAsync(PRO_SILENCE_MS + 1);
+      await sweepStaleSwarm(Date.now());
+      const session = await findSessionByConversation(CHAT);
+      const { sessionActivityExpiresAt } = await import('../src/main/bridge.js');
+      expect(sessionActivityExpiresAt(session!)).toBeNull();
+      if (picker === 'other') await events([{ kind: 'model_selection', model: 'gpt-6-thinking', reasoningEffort: 'high', time: Date.now() }]);
+      await saveConfig({ ...getConfig(), goal: { ...getConfig().goal, enabled: true, mode: 'loop' } });
+      await events([{ kind: 'chat_error', time: Date.now(), text: ERROR_TEXT, turnId: TURN, recoverable: true }]);
+      const repair = await maintenance();
+      expect(repair).toMatchObject({ reason: 'assistant-error' });
+      await maintenance(repair!.token, 'reloaded');
+      await vi.advanceTimersByTimeAsync(PRO_SILENCE_MS + 1);
+      await sweepStaleSwarm(Date.now());
+      expect(await maintenance()).toMatchObject({ reason: 'silence' });
+      expect(goalPendingReplyFor(CHAT)).toBeNull();
+    } finally { vi.useRealTimers(); resetGoalStateForTests(); await setSecret('openRouterApiKey', ''); await saveConfig(previous); }
+  });
+
   it.each(['pro', 'unknown'])('keeps observing a failed %s Loop turn after each confirmed reload without sending a follow-up', async model => {
     const previous = getConfig();
     await saveConfig({ ...previous, goal: { ...previous.goal, enabled: true, mode: 'loop' } });

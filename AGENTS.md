@@ -1531,6 +1531,11 @@ Known Pro models and unknown models in Goal/Loop instead use ten minutes from me
 picker or MCP identity promotes an unknown grant without resetting its evidence timestamp. A real
 completed/stopped turn-end removes activity immediately; a failed/unknown Pro or unknown Goal/Loop stream is not server completion. A genuinely newer exact MCP call can revive activity. Pro never
 receives an inactivity-generated Goal or automatic compaction. Picker presence alone is not work.
+The extension's degraded DOM completion uses the submitted generation's picker receipt, not the
+currently selected next-send model. Adopted or unobserved sends retain unknown model identity.
+Recorder activity names the latest accepted start in a journal batch. An earlier turn's terminal
+cannot spend that new grant; its own terminal still can. Repair receipts without a surviving
+turn-bound grant restore unknown model observation, never infer it from the next-send picker.
 `grantActivity()` arms/pushes it from accepted current-turn evidence and attributed calls;
 `endActivity()` removes it only on a real terminal. `armSilenceSweep()` owns one timer for the
 earliest deadline across all chats, so a 30-second maintenance tick cannot silently add another

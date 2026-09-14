@@ -440,6 +440,9 @@
     }
   })();
   let turnId = null;
+  // The picker describes the next send; only this generation's send receipt can
+  // authorize degraded completion while MAIN-world completion evidence is absent.
+  let turnModelSelection = null;
   let genCount = 0;
   /**
    * What the last activity pull said this chat has open in the app.
@@ -1361,6 +1364,7 @@
     generating = true;
     unwitnessedGeneration = true;
     turnId = open;
+    turnModelSelection = null;
     genNode = null;
     priorSections = new WeakSet(baselineSections);
     priorMarks = baselineMarks;
@@ -1565,6 +1569,7 @@
     quietTurn = null;
     quietOutcome = null;
     turnId = null;
+    turnModelSelection = null;
     genNode = null;
     priorSections = new WeakSet();
     priorMarks = [];
@@ -1803,14 +1808,13 @@
     // document has seen running. An adopted one it has not has no document-side evidence of
     // finishing at all, and its visible prose is whatever was committed before the reload.
     // See unwitnessedGeneration. Pro can hide its Stop control while still thinking:
-    // it requires native end_turn even without Fiber. A closed picker supplies no current
-    // model proof either; never treat that absence as proof of a non-Pro turn. Read the
-    // existing passive picker authority, without opening it or trusting a cached selection.
-    const selection = CLF_DOM.visibleModelSelection?.();
+    // it requires native end_turn even without Fiber. A later picker change belongs to
+    // the next send, never this turn. An adopted/unknown send has no non-Pro proof.
+    const selection = turnModelSelection;
     const model = (selection?.model || '').trim().toLowerCase().replace(/\s+/g, '-');
     // Exact aliases match shared/chat-models.ts::isProModel (the extension is plain JS).
-    const pro = /^(?:astra|gpt-?6-astra|gpt-?\d+(?:[.-]\d+)?-pro)$/.test(model) ||
-      (/^(?:gpt-?6(?:\.0)?|gpt-?5\.6(?:-sol)?)$/.test(model) && selection?.reasoningEffort === 'pro');
+    const pro = selection?.reasoningEffort === 'pro' ||
+      /^(?:astra|gpt-?6-astra|gpt-?\d+(?:[.-]\d+)?-pro)$/.test(model);
     if (!fiberPresent && !unwitnessedGeneration && model && !pro && answerText(turn).length > 0) return { outcome: 'completed' };
     if (turnStalled()) {
       return { outcome: 'stalled', detail: 'no visible output and no progress for ten minutes' };
@@ -2300,6 +2304,7 @@
       stallReported = false;
       genCount++;
       turnId = `g-${RUN_ID}-${epoch}-${genCount}`;
+      turnModelSelection = newUserMessage.modelSelection || null;
       unwitnessedGeneration = false;
       bindResumeGoalTurn(turnId);
       genNode = null;

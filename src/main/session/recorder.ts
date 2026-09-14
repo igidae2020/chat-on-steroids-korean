@@ -1667,7 +1667,7 @@ export function recordChatObservations(
 ): Promise<{
   sessionId: string | null;
   stored: number;
-  activity: { meaningful: boolean; working: boolean; terminal: boolean; at?: number; toolStartedAt?: number; endedTurnId?: string };
+  activity: { meaningful: boolean; working: boolean; terminal: boolean; at?: number; toolStartedAt?: number; startedTurnId?: string; endedTurnId?: string };
   goalCandidates: Array<{ replyId: string; turnId: string; eventSeq: number }>;
 }> {
   const prior = observationChains.get(conversationId) ?? Promise.resolve();
@@ -1771,10 +1771,10 @@ async function recordChatObservationsNow(
 ): Promise<{
   sessionId: string | null;
   stored: number;
-  activity: { meaningful: boolean; working: boolean; terminal: boolean; at?: number; toolStartedAt?: number; endedTurnId?: string };
+  activity: { meaningful: boolean; working: boolean; terminal: boolean; at?: number; toolStartedAt?: number; startedTurnId?: string; endedTurnId?: string };
   goalCandidates: Array<{ replyId: string; turnId: string; eventSeq: number }>;
 }> {
-  const activity: { meaningful: boolean; working: boolean; terminal: boolean; at?: number; toolStartedAt?: number; endedTurnId?: string } = { meaningful: false, working: false, terminal: false };
+  const activity: { meaningful: boolean; working: boolean; terminal: boolean; at?: number; toolStartedAt?: number; startedTurnId?: string; endedTurnId?: string } = { meaningful: false, working: false, terminal: false };
   if (!recordingEnabled()) return { sessionId: null, stored: 0, activity, goalCandidates: [] };
   if (!conversations.has(conversationId)) {
     const lineage = await supersededLineage(conversationId);
@@ -2010,6 +2010,12 @@ async function recordChatObservationsNow(
           live.endedTurn = null;
         }
         activity.meaningful = true; activity.at = Math.max(activity.at ?? 0, item.time);
+        // One journal delivery may end A and start B. Its activity verdict belongs
+        // to the latest accepted generation, not the union of both lifecycles.
+        activity.startedTurnId = item.turnId;
+        activity.terminal = false;
+        delete activity.endedTurnId;
+        delete activity.toolStartedAt;
         activity.working = true;
         break;
       // Also not stored, and for the same reason: this is the page describing which calls
@@ -2026,6 +2032,7 @@ async function recordChatObservationsNow(
         // the turn it names, but it must not tear down a newer active generation.
         if (!item.turnId) continue;
         if (live?.knownTurnEnds.has(item.turnId)) continue;
+        const endingCurrentTurn = live?.turnId === item.turnId;
         await appendEvent(sessionId, {
           ...base,
           kind: 'turn_end',
@@ -2053,7 +2060,7 @@ async function recordChatObservationsNow(
             live.turnId = null;
           }
         }
-        if (item.outcome !== 'unknown') {
+        if (endingCurrentTurn && item.outcome !== 'unknown') {
           activity.meaningful = true;
           activity.at = Math.max(activity.at ?? 0, item.time);
           activity.terminal = true;

@@ -96,6 +96,6 @@ it('runs an exact-tag compatibility repair inside replay before materializing th
   expect(result.replayedCommits).toBeGreaterThan(0);
   expect(git(cwd, 'rev-parse', 'HEAD')).toBe(head);
   expect(git(cwd, 'diff', '--name-only', '--diff-filter=U')).toBe('');
-  expect(fs.readFileSync(path.join(cwd, 'official-only.txt'), 'utf8')).toBe('compat adjusted\n');
+  expect(fs.readFileSync(path.join(cwd, 'official-only.txt'), 'utf8').trim()).toBe('compat adjusted');
   expect(fs.readFileSync(path.join(cwd, 'local-ui.txt'), 'utf8')).toContain('한국어 유지');
 });

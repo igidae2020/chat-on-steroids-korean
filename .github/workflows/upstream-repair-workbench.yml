@@ -3,12 +3,13 @@ name: Upstream repair workbench
 on:
   push:
     branches: [repair/upstream-v2.1.11-workbench]
+    paths: [.repair/ready]
 
 permissions:
-  contents: read
+  contents: write
 
 jobs:
-  inspect:
+  reconstruct:
     if: github.repository == 'igidae2020/chat-on-steroids-korean'
     runs-on: ubuntu-24.04
     timeout-minutes: 10
@@ -16,32 +17,72 @@ jobs:
       - uses: actions/checkout@fbc6f3992d24b796d5a048ff273f7fcc4a7b6c09
         with:
           fetch-depth: 0
-          persist-credentials: false
-      - name: Export public source history and reproduce conflicts without publishing
+      - name: Reconstruct exact reviewed tree without changing main or tags
         shell: bash
         run: |
           set -euo pipefail
+          cp -r .repair "$RUNNER_TEMP/reviewed-resolution"
           git config user.name 'github-actions[bot]'
           git config user.email '41898282+github-actions[bot]@users.noreply.github.com'
           git remote add upstream https://github.com/totec448-spec/chat-on-steroids.git
           git fetch --no-tags upstream refs/tags/v2.1.11:refs/remotes/upstream/v2.1.11
-          git bundle create "$RUNNER_TEMP/upstream-repair.bundle" --all
-          git log --oneline --first-parent -40 > "$RUNNER_TEMP/upstream-repair-report.txt"
-          git merge-base HEAD refs/remotes/upstream/v2.1.11 >> "$RUNNER_TEMP/upstream-repair-report.txt"
-          set +e
-          git merge --no-commit --no-ff refs/remotes/upstream/v2.1.11 >> "$RUNNER_TEMP/upstream-repair-report.txt" 2>&1
-          status=$?
-          set -e
-          test "$status" -le 1
-          git diff --name-only --diff-filter=U >> "$RUNNER_TEMP/upstream-repair-report.txt"
-          git diff --cc > "$RUNNER_TEMP/upstream-repair-conflicts.patch"
-          cat "$RUNNER_TEMP/upstream-repair-report.txt"
-      - uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02
-        with:
-          name: upstream-repair-source
-          path: |
-            ${{ runner.temp }}/upstream-repair.bundle
-            ${{ runner.temp }}/upstream-repair-report.txt
-            ${{ runner.temp }}/upstream-repair-conflicts.patch
-          if-no-files-found: error
-          retention-days: 1
+          python3 - <<'PY'
+          import base64, gzip, hashlib, json, os, pathlib, re, subprocess
+          def git(*args, check=True):
+              return subprocess.run(['git', *args], check=check, text=True, capture_output=True)
+          directory = pathlib.Path(os.environ['RUNNER_TEMP']) / 'reviewed-resolution'
+          encoded = ''.join((directory / f'part-{i}.b64').read_text().strip() for i in range(1, 7))
+          raw = gzip.decompress(base64.b64decode(encoded, validate=True))
+          assert hashlib.sha256(raw).hexdigest() == '1ceb698086150fcba75e76c568a11693bd8382d4653578b6203290609cef57bd', 'Resolution payload hash mismatch'
+          payload = json.loads(raw)
+          ours, theirs = payload['parents']
+          assert git('rev-parse', 'origin/main').stdout.strip() == ours, 'main changed; review again'
+          assert git('rev-parse', 'refs/remotes/upstream/v2.1.11^{commit}').stdout.strip() == theirs, 'Upstream tag moved'
+          git('checkout', '--detach', ours)
+          merge = git('merge', '--no-commit', '--no-ff', theirs, check=False)
+          print(merge.stdout, merge.stderr)
+          assert merge.returncode in (0, 1)
+          if merge.returncode:
+              assert git('diff', '--name-only', '--diff-filter=U').stdout.strip(), 'Merge failed without conflicts'
+          conflict = re.compile(r'^<<<<<<< [^\n]*\n(.*?)^=======\n(.*?)^>>>>>>> [^\n]*\n', re.M | re.S)
+          def at(ref, name):
+              result = git('show', f'{ref}:{name}', check=False)
+              if result.returncode:
+                  assert result.returncode == 128
+                  return ''
+              return result.stdout
+          for name, spec in payload['files'].items():
+              target = pathlib.Path(name)
+              assert not target.is_absolute() and '..' not in target.parts
+              basis = spec['base']
+              if basis in ('ours', 'theirs'):
+                  text = at(ours if basis == 'ours' else theirs, name)
+              elif basis == 'empty':
+                  text = ''
+              else:
+                  assert basis in ('auto', 'auto-ours', 'auto-theirs')
+                  text = target.read_text() if target.exists() else ''
+                  if basis != 'auto':
+                      side = 1 if basis == 'auto-ours' else 2
+                      text = conflict.sub(lambda match: match.group(side), text)
+              assert hashlib.sha256(text.encode()).hexdigest() == spec['sha256'], f'Unexpected basis for {name}'
+              lines = text.splitlines(True)
+              for start, end, replacement in reversed(spec['edits']):
+                  assert 0 <= start <= end <= len(lines)
+                  lines[start:end] = [replacement]
+              target.parent.mkdir(parents=True, exist_ok=True)
+              target.write_text(''.join(lines))
+              print('Resolved', name)
+          git('add', '-A')
+          assert not git('diff', '--name-only', '--diff-filter=U').stdout.strip()
+          git('diff', '--cached', '--check')
+          tree = git('write-tree').stdout.strip()
+          assert tree == payload['tree'], f'Tree mismatch: {tree}'
+          assert tree == '13bb1ac7833f924f15956250645f32402414a1d0'
+          message = 'Merge official v2.1.11 while preserving the Korean distribution\n\nResolve upstream conflicts, migrate Korean UI to the official i18n engine, and retain OpenCodex and conservative recovery safeguards.\n\nRefs #7. Source candidate requires full CI before main integration.'
+          commit = git('commit-tree', tree, '-p', ours, '-p', theirs, '-m', message).stdout.strip()
+          git('push', 'origin', f'{commit}:refs/heads/fix/upstream-v2.1.11-korean')
+          print('CANDIDATE_COMMIT=' + commit)
+          with open(os.environ['GITHUB_STEP_SUMMARY'], 'a') as summary:
+              summary.write(f'Candidate `{commit}` on `fix/upstream-v2.1.11-korean`. Exact reviewed tree `{tree}`. Main and tags unchanged.\n')
+          PY

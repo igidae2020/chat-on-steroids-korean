@@ -1323,20 +1323,34 @@
   /** Picker data is account-evaluated state, never a scraped English announcement.
    * Copy only selection metadata; no conversation, account object or callbacks cross worlds. */
   function pickerSnapshot() {
-    const node = document.querySelector('[data-testid="composer-intelligence-picker-content"]');
-    let state = null;
-    try { state = readPickerSnapshot(node); } catch { /* Unknown state invalidates prior proof. */ }
+    const panel = document.querySelector('[data-testid="composer-intelligence-picker-content"]');
+    const form = document.querySelector('#prompt-textarea')?.closest('form');
+    const triggers = [...(form?.querySelectorAll('button[aria-haspopup="menu"]') || [])]
+      .filter(node => !node.closest(OWN_SURFACES));
+    const nodes = [...(panel ? [panel] : []), ...triggers];
+    // ChatGPT unmounts the menu when closed. Its mounted trigger still owns the same
+    // account-evaluated picker as dropdownContent.props; never retain an old menu snapshot.
+    const readings = triggers.length <= 12 ? nodes.map(node => {
+      try { return readPickerSnapshot(node, node !== panel); } catch { return null; }
+    }) : nodes.map(() => null);
+    const known = readings.filter(Boolean);
+    const sameRows = (a, b, keys) => a.length === b.length && a.every((row, i) => keys.every(key => row[key] === b[i][key]));
+    const state = known.length && known.every(value => value.version === known[0].version && value.currentBucket === known[0].currentBucket &&
+      sameRows(value.versions, known[0].versions, ['id', 'label']) &&
+      sameRows(value.choices, known[0].choices, ['bucket', 'id', 'label', 'effort', 'familyId', 'familyLabel', 'available'])) ? known[0] : null;
     const selected = state?.choices.find(choice => choice.bucket === state.currentBucket && choice.available);
-    for (const [attribute, value] of [['data-clf-selected-model', selected?.id], ['data-clf-selected-effort', selected?.effort]]) {
-      if (!value) node?.removeAttribute(attribute);
-      else if (node.getAttribute(attribute) !== value) node.setAttribute(attribute, value);
+    for (let i = 0; i < nodes.length; i++) {
+      for (const [attribute, value] of [['data-clf-selected-model', selected?.id], ['data-clf-selected-effort', selected?.effort]]) {
+        if (!value || !readings[i]) nodes[i].removeAttribute(attribute);
+        else if (nodes[i].getAttribute(attribute) !== value) nodes[i].setAttribute(attribute, value);
+      }
     }
     return state;
   }
-  function readPickerSnapshot(node) {
+  function readPickerSnapshot(node, trigger = false) {
     let fiber = node && fiberOf(node);
     for (let up = 0; fiber && up < MAX_CLIMB; up++, fiber = fiber.return) {
-      const props = fiber.memoizedProps;
+      const props = trigger ? fiber.memoizedProps?.dropdownContent?.props : fiber.memoizedProps;
       const state = props?.composerIntelligencePickerState, data = props?.modelsData;
       if (!state || !Array.isArray(data?.versions)) continue;
       if (data.versions.length > 20 || !Array.isArray(state.bucketSelections) || state.bucketSelections.length > 12) return null;
@@ -1466,6 +1480,9 @@
   // Re-execution is a repair, not a marker check. A stale primitive marker could survive
   // while its listener did not, so keep the actual listener and always replace it.
   const prior = window[ACTIVE_HELPER];
+  if (typeof prior?.pickerSyncListener === 'function') {
+    document.removeEventListener('clf-picker-sync', prior.pickerSyncListener);
+  }
   if (prior && prior.version === VERSION && typeof prior.listener === 'function') {
     try {
       window.removeEventListener('message', prior.listener);
@@ -1474,5 +1491,9 @@
     }
   }
   window.addEventListener('message', listener);
-  window[ACTIVE_HELPER] = { version: VERSION, listener };
+  const pickerSyncListener = () => {
+    try { pickerSnapshot(); } catch { /* The caller cleared old evidence before dispatch. */ }
+  };
+  document.addEventListener('clf-picker-sync', pickerSyncListener);
+  window[ACTIVE_HELPER] = { version: VERSION, listener, pickerSyncListener };
 })();

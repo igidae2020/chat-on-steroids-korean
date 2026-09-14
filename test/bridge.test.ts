@@ -6371,6 +6371,57 @@ describe('unattributed activity recovery', () => {
     }
   });
 
+  it('recovers consecutive submitted non-Pro turns even when the unchanged picker arrived in a separate batch', async () => {
+    const previous = getConfig();
+    await saveConfig({ ...previous, goal: { ...previous.goal, enabled: true, mode: 'loop' } });
+    await setSecret('openRouterApiKey', 'sk-or-silence');
+    resetGoalStateForTests(); vi.useFakeTimers();
+    try {
+      await pair();
+      const modelSelection = { model: 'gpt-5-6-thinking', reasoningEffort: 'xhigh' };
+      await events(OTHER, [{ kind: 'model_selection', ...modelSelection, time: Date.now() }]);
+      await events(OTHER, [{ kind: 'turn_start', turnId: 'submitted-first', time: Date.now(), modelSelection }]);
+      await events(OTHER, [{ kind: 'turn_end', turnId: 'submitted-first', outcome: 'interrupted', time: Date.now() }]);
+      await events(OTHER, [{ kind: 'turn_start', turnId: 'submitted-second', time: Date.now(), modelSelection }]);
+      await vi.advanceTimersByTimeAsync(CHAT_SILENCE_MS);
+      await sweepStaleSwarm(Date.now());
+      const reload = await maintenance();
+      expect(reload).toMatchObject({ conversationId: OTHER, reason: 'silence' });
+      await maintenance(reload!.token);
+      await vi.advanceTimersByTimeAsync(60_000);
+      await sweepStaleSwarm(Date.now());
+      expect(goalPendingReplyFor(OTHER)?.turnId).toMatch(/^g-silence-/);
+    } finally { resetGoalStateForTests(); await setSecret('openRouterApiKey', ''); await saveConfig(previous); vi.useRealTimers(); }
+  });
+
+  it.each([null, { model: 'invalid/model', reasoningEffort: 'xhigh' }, { model: 'gpt-5-6-thinking', reasoningEffort: 'invalid' },
+    { model: 'gpt-6-pro', reasoningEffort: 'pro' }])('does not replace submitted %j with an adjacent non-Pro picker', async modelSelection => {
+    const turnId = `submitted-conservative-${modelSelection?.reasoningEffort ?? 'unknown'}`;
+    const previous = getConfig();
+    await saveConfig({ ...previous, goal: { ...previous.goal, enabled: true, mode: 'loop' } });
+    await setSecret('openRouterApiKey', 'sk-or-silence');
+    resetGoalStateForTests(); vi.useFakeTimers();
+    try {
+      await pair();
+      await events(OTHER, [
+        { kind: 'model_selection', model: 'gpt-5-6-thinking', reasoningEffort: 'xhigh', time: Date.now() },
+        { kind: 'turn_start', turnId, time: Date.now(), modelSelection }
+      ]);
+      expect((await request('GET', `/activity?conversationId=${OTHER}`)).body.activeTurnId).toBe(turnId);
+      await vi.advanceTimersByTimeAsync(CHAT_SILENCE_MS);
+      await sweepStaleSwarm(Date.now());
+      expect(await maintenance()).toBeNull();
+      await vi.advanceTimersByTimeAsync(PRO_SILENCE_MS - CHAT_SILENCE_MS);
+      await sweepStaleSwarm(Date.now());
+      const reload = await maintenance();
+      expect(reload).toMatchObject({ reason: 'silence' });
+      await maintenance(reload!.token);
+      await vi.advanceTimersByTimeAsync(60_000);
+      await sweepStaleSwarm(Date.now());
+      expect(goalPendingReplyFor(OTHER)).toBeNull();
+    } finally { resetGoalStateForTests(); await setSecret('openRouterApiKey', ''); await saveConfig(previous); vi.useRealTimers(); }
+  });
+
   for (const model of ['GPT-6 Pro', 'GPT-5.6 Pro', 'gpt-5-6-pro', 'gpt-5-5-pro']) it(`keeps ${model} silent until ten minutes without inventing a Goal final`, async () => {
     const previous = getConfig();
     await saveConfig({ ...previous, goal: { ...previous.goal, enabled: true, mode: 'loop' } });

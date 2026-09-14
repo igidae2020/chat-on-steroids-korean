@@ -2342,6 +2342,51 @@ describe('recording authored message text', () => {
     expect(emitted(live.sent, 'conversation_title')).toHaveLength(1);
   });
 
+  it('attaches the unchanged submitted model to every new turn after picker changes were flushed', async () => {
+    live = await harness();
+    const model = { model: 'gpt-5-6-thinking', reasoningEffort: 'xhigh' };
+    (live.window as any).CLF_DOM.visibleModelSelection = () => model;
+    live.hook.observe();
+    await live.hook.flush();
+    for (const id of ['first', 'second']) {
+      userTurn(live.document, id, `continue ${id}`);
+      live.hook.observe();
+      await live.hook.flush();
+    }
+    const starts = emitted(live.sent, 'turn_start');
+    expect(starts).toHaveLength(2);
+    expect(starts[0]!.event.turnId).not.toBe(starts[1]!.event.turnId);
+    expect(starts.map(entry => entry.event.modelSelection))
+      .toEqual([model, model]);
+    expect(emitted(live.sent, 'model_selection')).toHaveLength(1);
+  });
+
+  it.each([null, { model: 'gpt-6-pro', reasoningEffort: 'pro' }])(
+    'retains the submitted model when the picker becomes %j before the bubble mounts', async (nextSelection) => {
+      live = await harness();
+      let selection: { model: string; reasoningEffort: string } | null = { model: 'gpt-5-6-thinking', reasoningEffort: 'xhigh' };
+      (live.window as any).CLF_DOM.visibleModelSelection = () => selection;
+      userTurn(live.document, 'send-before-picker-change', 'continue the requested work');
+      selection = nextSelection;
+      live.hook.observe();
+      await live.hook.flush();
+      expect(emitted(live.sent, 'turn_start').map(entry => entry.event)).toEqual([
+        expect.objectContaining({ modelSelection: { model: 'gpt-5-6-thinking', reasoningEffort: 'xhigh' } })
+      ]);
+    }
+  );
+
+  it('does not assign a later picker to a send whose model was unknown', async () => {
+    live = await harness();
+    userTurn(live.document, 'unknown-model-send', 'continue the requested work');
+    (live.window as any).CLF_DOM.visibleModelSelection = () => ({ model: 'gpt-5-6-thinking', reasoningEffort: 'xhigh' });
+    live.hook.observe();
+    await live.hook.flush();
+    const starts = emitted(live.sent, 'turn_start');
+    expect(starts).toHaveLength(1);
+    expect(starts[0]!.event.modelSelection).toBeNull();
+  });
+
   it('does not persist Show more / Show less controls as part of a user message', async () => {
     live = await harness();
     const section = userTurn(live.document, 'turn-user-chrome', 'the exact authored message');

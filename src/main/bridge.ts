@@ -864,6 +864,18 @@ function parseObservations(input: unknown): ChatObservation[] {
         observation.reasoningEffort = item['reasoningEffort'];
       }
     }
+    if (kind === 'turn_start' && Object.hasOwn(item, 'modelSelection')) {
+      observation.modelSelection = null;
+      const selection = item['modelSelection'];
+      if (selection && typeof selection === 'object' && !Array.isArray(selection)) {
+        const value = selection as Record<string, unknown>;
+        if (typeof value['model'] === 'string' && /^[a-zA-Z0-9 ._-]{1,80}$/.test(value['model']) &&
+            (value['reasoningEffort'] === undefined || isReasoningEffort(value['reasoningEffort']))) {
+          observation.modelSelection = { model: value['model'],
+            ...(isReasoningEffort(value['reasoningEffort']) ? { reasoningEffort: value['reasoningEffort'] } : {}) };
+        }
+      }
+    }
     // Long final handoff-style answers are valid transcript content too. Keep this aligned
     // with the page-side assistant bound so the bridge does not silently become the next
     // truncation point after Fiber/content.js accepted the whole message.
@@ -5551,8 +5563,11 @@ async function noteRecoveryObservations(
       for (const item of observations) {
         if (item.kind === 'model_selection') selection = item;
         if (item.kind === 'turn_start' && item.turnId === liveTurn && previous?.turnId !== item.turnId) {
-          turn = { turnId: item.turnId ?? null, model: selection?.kind === 'model_selection' && selection.model ?
-            isProModel(selection.model, selection.reasoningEffort) ? 'pro' : 'other' : provenModel };
+          // New senders bind the picker to the send itself, including explicit unknown.
+          // Only legacy starts use the adjacent change event; journal batches are not turns.
+          const submitted = item.modelSelection !== undefined ? item.modelSelection : selection;
+          turn = { turnId: item.turnId ?? null, model: submitted?.model ?
+            isProModel(submitted.model, submitted.reasoningEffort) ? 'pro' : 'other' : provenModel };
         }
         // A batched journal can contain multiple turns; one picker observation proves only
         // the next start, never a later turn whose own picker was unavailable.

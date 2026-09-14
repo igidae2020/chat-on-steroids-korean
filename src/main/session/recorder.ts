@@ -1559,6 +1559,8 @@ export interface ChatObservation {
   /** Current native selection evidence, not a historical message or requested worker model. */
   model?: string;
   reasoningEffort?: import('../../shared/session.js').ReasoningEffort;
+  /** Exact submitted-turn selection; null means observed unknown, absent means legacy sender. */
+  modelSelection?: { model: string; reasoningEffort?: import('../../shared/session.js').ReasoningEffort } | null;
   /** True when `time` is ChatGPT's own authored create_time, not local observation time. */
   authoredTime?: boolean;
   /** True only for the newest DOM user row that this document proved was just sent. */

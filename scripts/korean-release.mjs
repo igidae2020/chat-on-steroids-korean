@@ -68,7 +68,7 @@ export function mergeVersionConflict(file, base, ours, theirs, version) {
 }
 function readVersion(cwd, ref) { return JSON.parse(git(cwd, ['show', `${ref}:package.json`])).version; }
 
-function replayDistributionHistory(cwd, currentHead, upstreamCommit) {
+function replayDistributionHistory(cwd, currentHead, upstreamCommit, upstreamTag) {
   const base = git(cwd, ['merge-base', currentHead, upstreamCommit]).trim();
   const commits = git(cwd, ['rev-list', '--reverse', '--topo-order', '--no-merges', `${base}..${currentHead}`])
     .trim().split('\n').filter(Boolean);
@@ -91,6 +91,28 @@ function replayDistributionHistory(cwd, currentHead, upstreamCommit) {
         throw new Error(`Unable to replay local commit ${commit}${conflicts ? `; conflicts: ${conflicts.replaceAll('\n', ', ')}` : ''}\n${result.stderr}`);
       }
     }
+
+    const compatibilityFix = `scripts/upstream-compat/${upstreamTag}.mjs`;
+    const compatibilityPath = path.join(directory, compatibilityFix);
+    let appliedCompatibilityFix = null;
+    if (fs.existsSync(compatibilityPath)) {
+      try {
+        execFileSync(process.execPath, [compatibilityPath], {
+          cwd: directory,
+          encoding: 'utf8',
+          stdio: ['ignore', 'pipe', 'pipe'],
+          maxBuffer: 64 * 1024 * 1024,
+        });
+      } catch (error) {
+        const detail = error && typeof error === 'object' && 'stderr' in error ? String(error.stderr || '') : error instanceof Error ? error.message : String(error);
+        throw new Error(`Compatibility repair ${compatibilityFix} failed: ${detail}`);
+      }
+      git(directory, ['add', '-u']);
+      if (succeeds(directory, ['diff', '--cached', '--quiet'])) throw new Error(`Compatibility repair ${compatibilityFix} made no tracked changes`);
+      git(directory, ['commit', '--no-verify', '-m', `Apply Korean compatibility repair for ${upstreamTag}`]);
+      appliedCompatibilityFix = compatibilityFix;
+    }
+
     const replayHead = git(directory, ['rev-parse', 'HEAD']).trim();
     const patch = execFileSync('git', ['diff', '--binary', currentHead, replayHead], {
       cwd,
@@ -106,7 +128,7 @@ function replayDistributionHistory(cwd, currentHead, upstreamCommit) {
       try { git(cwd, ['merge', '--abort']); } catch {}
       throw applied.error ?? new Error(applied.stderr?.toString() || 'Unable to materialize replayed upstream tree');
     }
-    return { base, replayedCommits: commits.length };
+    return { base, replayedCommits: commits.length, compatibilityFix: appliedCompatibilityFix };
   } finally {
     if (worktreeAdded) {
       try { git(cwd, ['worktree', 'remove', '--force', directory]); } catch {}
@@ -128,12 +150,11 @@ export function prepareKoreanRelease(cwd, upstreamRef, upstreamTag) {
   const version = nextDistributionVersion(current, upstreamVersion), releaseTag = `v${version}`;
   if (succeeds(cwd, ['show-ref', '--verify', '--quiet', `refs/tags/${releaseTag}`])) throw new Error(`Release tag ${releaseTag} already exists`);
 
-  // Rebuild from the new official release, then replay each local non-merge commit in
-  // chronological order. Conflict preference is local per commit, which preserves the
-  // intent of the Korean/OpenCodex patch without discarding unrelated upstream edits.
-  // The final tree is attached to the current branch as an ordinary two-parent merge so
-  // future ancestry checks recognize the imported official release.
-  const replay = replayDistributionHistory(cwd, currentHead, commit);
+  // Rebuild from the new official release, replay local distribution commits, then run
+  // an exact-tag compatibility repair only when one is checked into that replayed tree.
+  // Repairs validate their expected broken fingerprints before touching source, so a
+  // future upstream shape cannot silently receive an obsolete workaround.
+  const replay = replayDistributionHistory(cwd, currentHead, commit, upstreamTag);
 
   for (const file of VERSION_FILES) {
     const target = path.join(cwd, file);
@@ -157,7 +178,7 @@ export function prepareKoreanRelease(cwd, upstreamRef, upstreamTag) {
   if (!baseline.test(readme)) throw new Error('Missing Korean README upstream baseline');
   fs.writeFileSync(readmePath, readme.replace(baseline, `> **한국어 · OpenCodex 배포판 ${version}** — 공식 ${upstreamTag} (${commit}) 기반입니다.`));
   git(cwd, ['add', '--', ...VERSION_FILES, notesFile, 'CHANGELOG.md', 'README.md']);
-  return { changed: true, version, releaseTag, upstreamTag, upstreamCommit: commit, replayedCommits: replay.replayedCommits };
+  return { changed: true, version, releaseTag, upstreamTag, upstreamCommit: commit, replayedCommits: replay.replayedCommits, compatibilityFix: replay.compatibilityFix };
 }
 
 if (process.argv[1] && import.meta.url === pathToFileURL(path.resolve(process.argv[1])).href) {

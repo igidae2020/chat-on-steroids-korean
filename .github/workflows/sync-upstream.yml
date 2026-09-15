@@ -6,6 +6,8 @@ on:
     branches: [main]
     paths:
       - '.github/workflows/sync-upstream.yml'
+      - 'scripts/korean-release.mjs'
+      - 'scripts/upstream-compat/**'
   schedule:
     - cron: '23 3 * * *'
 
@@ -47,8 +49,8 @@ jobs:
           git config user.name 'github-actions[bot]'
           git config user.email '41898282+github-actions[bot]@users.noreply.github.com'
           # Ancestry decides whether official changes are new. The release helper rebuilds
-          # from the incoming official tag and replays Korean/OpenCodex distribution history
-          # commit-by-commit, while keeping the distribution version above the official tag.
+          # from the incoming official tag, replays Korean/OpenCodex distribution history,
+          # then applies an audited exact-tag compatibility repair when one exists.
           node scripts/korean-release.mjs "$commit" "$tag"
       - name: Install exact dependencies
         if: steps.upstream.outputs.changed == 'true'

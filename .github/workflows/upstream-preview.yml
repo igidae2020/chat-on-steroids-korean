@@ -1,0 +1,79 @@
+name: Upstream integration preview
+
+on:
+  pull_request:
+    paths:
+      - '.github/workflows/upstream-preview.yml'
+      - '.github/workflows/sync-upstream.yml'
+      - 'scripts/korean-release.mjs'
+      - 'scripts/upstream-compat/**'
+      - 'test/upstream-compat.test.ts'
+      - 'test/korean-release.test.ts'
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+concurrency:
+  group: upstream-preview-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  preview:
+    name: Verify actual upstream integration
+    runs-on: ubuntu-24.04
+    timeout-minutes: 30
+    steps:
+      - uses: actions/checkout@fbc6f3992d24b796d5a048ff273f7fcc4a7b6c09
+        with:
+          fetch-depth: 0
+          persist-credentials: false
+      - uses: actions/setup-node@a0853c24544627f65ddf259abe73b1d18a591444
+        with:
+          node-version: 22
+          cache: npm
+      - name: Fetch the official release
+        id: official
+        env:
+          GH_TOKEN: ${{ github.token }}
+        shell: bash
+        run: |
+          set -euo pipefail
+          tag="$(gh api repos/totec448-spec/chat-on-steroids/releases/latest --jq .tag_name)"
+          [[ "$tag" =~ ^v[0-9]+\.[0-9]+\.[0-9]+$ ]] || { echo 'Invalid upstream release tag'; exit 1; }
+          git remote add upstream https://github.com/totec448-spec/chat-on-steroids.git
+          git fetch --no-tags upstream main:refs/remotes/upstream/main "refs/tags/$tag:refs/remotes/upstream/releases/$tag"
+          echo "tag=$tag" >> "$GITHUB_OUTPUT"
+      - name: Prepare without pushing or tagging
+        env:
+          UPSTREAM_TAG: ${{ steps.official.outputs.tag }}
+        shell: bash
+        run: |
+          set -euo pipefail
+          git config user.name 'github-actions[bot]'
+          git config user.email '41898282+github-actions[bot]@users.noreply.github.com'
+          node scripts/korean-release.mjs "refs/remotes/upstream/releases/$UPSTREAM_TAG" "$UPSTREAM_TAG"
+      - name: Install exact integrated dependencies
+        run: npm ci
+      - name: Verify integrated source
+        run: npm run verify
+      - name: Build integrated source
+        run: npm run build
+      - name: Save source-only reproduction
+        if: always() && !cancelled()
+        shell: bash
+        run: |
+          set -euo pipefail
+          git bundle create "$RUNNER_TEMP/upstream-preview.bundle" --all
+          git diff --binary HEAD > "$RUNNER_TEMP/upstream-preview.patch"
+          git rev-parse HEAD > "$RUNNER_TEMP/upstream-preview-head.txt"
+      - uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02
+        if: always() && !cancelled()
+        with:
+          name: upstream-preview-source
+          path: |
+            ${{ runner.temp }}/upstream-preview.bundle
+            ${{ runner.temp }}/upstream-preview.patch
+            ${{ runner.temp }}/upstream-preview-head.txt
+          if-no-files-found: error
+          retention-days: 1

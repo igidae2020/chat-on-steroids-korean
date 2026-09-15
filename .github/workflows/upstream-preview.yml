@@ -56,7 +56,13 @@ jobs:
       - name: Install exact integrated dependencies
         run: npm ci
       - name: Verify integrated source
-        run: npm run verify
+        shell: bash
+        run: |
+          set +e
+          npm run verify > "$RUNNER_TEMP/upstream-verify.log" 2>&1
+          status=$?
+          tail -n 150 "$RUNNER_TEMP/upstream-verify.log"
+          exit "$status"
       - name: Build integrated source
         run: npm run build
       - name: Save source-only reproduction
@@ -75,5 +81,20 @@ jobs:
             ${{ runner.temp }}/upstream-preview.bundle
             ${{ runner.temp }}/upstream-preview.patch
             ${{ runner.temp }}/upstream-preview-head.txt
+            ${{ runner.temp }}/upstream-verify.log
           if-no-files-found: error
+          retention-days: 1
+      - name: Package exact dependencies for failed-run reproduction
+        if: failure()
+        shell: bash
+        run: |
+          if test -d node_modules; then
+            tar -czf "$RUNNER_TEMP/upstream-dependencies.tgz" node_modules
+          fi
+      - uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02
+        if: failure()
+        with:
+          name: upstream-preview-dependencies
+          path: ${{ runner.temp }}/upstream-dependencies.tgz
+          if-no-files-found: ignore
           retention-days: 1

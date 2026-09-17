@@ -1290,7 +1290,9 @@ hot/stalled chat blocking another. Command ACK custody precedes later observatio
 route. A fresh Resume retains its observation gate across only the first concrete route
 acquired by its exact native Send click (source conversation, epoch and draft must match).
 Preflight permission/dispatch waits do not authorize route adoption; refusal or navigation
-before the click releases the gate. Marker/activity proof releases the successful Resume gate.
+before the click releases the gate. Marker/activity proof releases the successful Resume gate. A pending exact clicked Resume
+wakes the existing observation/canonical-scan path from native DOM mutations without waiting
+for the background transcript debounce; canonical full-text and marker authority stay intact.
 Reconnection restores eligible documents before creating new work; browser restart is
 a different lifetime from MV3 suspension (§2).
 

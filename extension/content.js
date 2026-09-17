@@ -2811,6 +2811,64 @@
         record.type === 'characterData'
           ? nativeAuthoredNode(record.target)
           : [...(record.addedNodes || []), ...(record.removedNodes || [])].some(nativeAuthoredNode));
+      // The first native user row in a resumed chat is both the send receipt and the
+      // transaction marker that moves durable ownership to its newly assigned route. Hidden
+      // tabs may defer the ordinary 250 ms transcript coalescer past the send deadline and the
+      // recorder's attribution grace period. Prioritise only an exact claimed Resume whose
+      // final native click was witnessed; observe() remains the sole route election and
+      // refreshFiber() remains the sole canonical-text/marker authority.
+      const pendingResume = (() => {
+        const attempt = commandAttempt;
+        const prepared = attempt?.continuationSend;
+        const elected = attempt?.continuationRoute;
+        const destination = CLF_DOM.conversationId();
+        if (
+          !destination ||
+          !continuationJournalPending ||
+          !commandJournalGate ||
+          attempt?.phase !== 'claimed' ||
+          !prepared?.invoked ||
+          !elected ||
+          elected.sourceConversationId !== prepared.sourceConversationId ||
+          elected.sourceEpoch !== prepared.sourceEpoch
+        ) return null;
+        const acquiring =
+          !elected.destinationConversationId &&
+          conversationId === elected.sourceConversationId &&
+          epoch === elected.sourceEpoch &&
+          destination !== elected.sourceConversationId;
+        const acquired =
+          elected.destinationConversationId === destination &&
+          conversationId === destination;
+        return acquiring || acquired ? { attempt, prepared, elected, destination } : null;
+      })();
+      if (pendingResume) {
+        if (timer !== null) {
+          clearTimeout(timer);
+          timer = null;
+        }
+        if (!urgentQueued) {
+          urgentQueued = true;
+          void Promise.resolve().then(() => {
+            urgentQueued = false;
+            const { attempt, prepared, elected, destination } = pendingResume;
+            if (
+              !alive ||
+              commandAttempt !== attempt ||
+              attempt.phase !== 'claimed' ||
+              attempt.continuationSend !== prepared ||
+              attempt.continuationRoute !== elected ||
+              prepared.invoked !== true ||
+              !continuationJournalPending ||
+              !commandJournalGate ||
+              CLF_DOM.conversationId() !== destination ||
+              (elected.destinationConversationId && elected.destinationConversationId !== destination)
+            ) return;
+            observe();
+          });
+        }
+        return;
+      }
       // end_turn closes execution, not the provider's final rendered revision.
       // A hidden tab may hydrate the remaining final text after the request-id
       // settle window has ended. Reuse this observer and its exact settled owner

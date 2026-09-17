@@ -205,7 +205,9 @@ async function harness(
   replies: Record<string, (message: Record<string, any>) => unknown> = {},
   before: (document: Document, dom: JSDOM) => void = () => undefined,
   confirmedNonPro = false,
-  holdSendDeadline = false
+  holdSendDeadline = false,
+  holdTranscriptDebounce = false,
+  holdFiberDeadline = false
 ): Promise<Harness> {
   const dom = new JSDOM(PAGE, { url, runScripts: 'outside-only', pretendToBeVisual: true });
   const window = dom.window as unknown as Window & typeof globalThis & Record<string, any>;
@@ -308,6 +310,8 @@ async function harness(
   const nativeTimeout = window.setTimeout.bind(window);
   window.setTimeout = ((fn: () => void, ms?: number) => {
     if (holdSendDeadline && ms === 30000) return 0;
+    if (holdTranscriptDebounce && ms === 250) return 0;
+    if (holdFiberDeadline && ms === 1500) return 0;
     // Native readiness now authorizes through an async app reply. A deadline must
     // expire after those microtasks, just as a real browser timer does.
     if (ms === 30000) return nativeTimeout(fn, 0);
@@ -12499,6 +12503,83 @@ describe('the fresh chat the app opened', () => {
         conversationId: '11111111-2222-3333-4444-555555555555'
       })
     ]);
+  });
+
+  it('acknowledges a resume whose native user bubble rendered its Markdown', async () => {
+    const commandId = 'cmd-rendered-resume';
+    const destination = '11111111-2222-4333-8444-555555555555';
+    const marker = '[[CLF-RESUME:0123456789abcdef0123456789abcdef]]';
+    const bootstrap = `${marker}\n\nRead [the source](https://example.com/source) and run \`npm test\`.`;
+    let user: HTMLElement | null = null;
+    live = await harness(`https://chatgpt.com/?clf=${commandId}#clf=${commandId}`, {
+      redeem: () => ({ ok: true, command: { id: commandId, type: 'resume', text: bootstrap, agent: null } }),
+      compact: message => message.destinationMessageId
+        ? { ok: true, data: { committed: true, commandId } }
+        : undefined,
+      ack: () => ({ ok: true })
+    }, (document, dom) => {
+      const postMessage = dom.window.postMessage.bind(dom.window);
+      dom.window.postMessage = ((message: unknown, targetOrigin: string) => {
+        if ((message as any)?.source !== 'clf-fiber-ask' || !user) return postMessage(message, targetOrigin);
+        const scanToken = (message as any).nonce;
+        user.setAttribute('data-clf-fiber-turn', `${scanToken}:0`);
+        dom.window.dispatchEvent(new dom.window.MessageEvent('message', { source: dom.window as unknown as Window, data: {
+          source: 'clf-fiber-reply', nonce: scanToken, scanToken, v: 12, scanOk: true, rows: [], turns: [{
+            index: 0,
+            turnId: 'rendered-resume',
+            conversationId: destination,
+            calls: [],
+            activities: [],
+            messages: [{
+              role: 'user',
+              stable: true,
+              messageId: 'm-rendered-resume',
+              rawMessageId: 'm-rendered-resume',
+              rawText: bootstrap
+            }]
+          }]
+        }}));
+      }) as typeof dom.window.postMessage;
+      document.querySelector('[data-testid="send-button"]')!.addEventListener('click', () => {
+        dom.reconfigure({ url: `https://chatgpt.com/c/${destination}` });
+        // The live ChatGPT user bubble keeps the continuation marker but renders Markdown:
+        // link destinations and code delimiters are no longer present in DOM textContent.
+        user = userTurn(document, 'rendered-resume', `${marker}\n\nRead the source and run npm test.`, { sent: false });
+      });
+    }, false, true, true, true);
+
+    await settle(500);
+
+    expect(live.sent.filter(message => message.type === 'ack')).toEqual([
+      expect.objectContaining({ type: 'ack', id: commandId, status: 'sent', conversationId: destination })
+    ]);
+    const committedAt = live.sent.findIndex(message =>
+      message.type === 'compact' && message.destinationMessageId === 'm-rendered-resume');
+    const acknowledgedAt = live.sent.findIndex(message => message.type === 'ack' && message.id === commandId);
+    expect(committedAt).toBeGreaterThanOrEqual(0);
+    expect(acknowledgedAt).toBeGreaterThan(committedAt);
+  });
+
+  it('does not accept a rendered user bubble carrying another continuation token', async () => {
+    const commandId = 'cmd-foreign-rendered-resume';
+    const destination = '11111111-2222-4333-8444-555555555555';
+    const marker = '[[CLF-RESUME:0123456789abcdef0123456789abcdef]]';
+    live = await harness(`https://chatgpt.com/?clf=${commandId}#clf=${commandId}`, {
+      redeem: () => ({ ok: true, command: {
+        id: commandId, type: 'resume', text: `${marker}\n\nRead [the source](https://example.com/source).`, agent: null
+      } }),
+      ack: () => ({ ok: true })
+    }, (document, dom) => {
+      document.querySelector('[data-testid="send-button"]')!.addEventListener('click', () => {
+        dom.reconfigure({ url: `https://chatgpt.com/c/${destination}` });
+        userTurn(document, 'foreign-rendered-resume',
+          '[[CLF-RESUME:fedcba9876543210fedcba9876543210]]\n\nRead the source.', { sent: false });
+      });
+    });
+
+    await settle(500);
+
+    expect(live.sent.filter(message => message.type === 'ack')).toEqual([]);
   });
 
   it('keeps a fresh resume journal fenced while an id-less reused document acquires its first route', async () => {

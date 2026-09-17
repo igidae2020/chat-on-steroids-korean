@@ -1,5 +1,11 @@
 # Changelog
 
+## [2.1.17] — Korean distribution revision 4
+
+- Fix completed Goal/Loop replies remaining on Answer settling after historical message metadata is re-observed.
+- Preserve the existing completion evidence for new messages, changed final content, tools, turn boundaries and session ownership.
+- Based on official v2.1.13; see [release notes](docs/release-notes/v2.1.17.md).
+
 ## [2.1.16] — Korean distribution revision 3
 
 - Based on official v2.1.13; upstream behavior wins over conflicting legacy fork policies.

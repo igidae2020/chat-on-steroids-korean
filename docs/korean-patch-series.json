@@ -163,6 +163,20 @@
       ],
       "label": "2.1.16 버전·배포 기록",
       "portable": false
+    },
+    {
+      "id": "historical-completion-gate",
+      "commit": "39345e78fcc23fb291d9b27ad6c3dafaee33d63c",
+      "title": "fix(session): ignore historical metadata in completion checks",
+      "dependsOn": [],
+      "files": [
+        "src/main/session/store.ts",
+        "test/recorder-final-identity.test.ts",
+        "test/bridge.test.ts",
+        "AGENTS.md"
+      ],
+      "label": "Historical message replay completion gate",
+      "portable": true
     }
   ]
 }

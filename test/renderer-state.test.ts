@@ -595,6 +595,32 @@ it('uses the OpenRouter default when opened directly on an unrelated custom depl
   expect(mounted.calls[0].goal).toMatchObject({ provider: { kind: 'openrouter' }, model: DEFAULT_GOAL_MODEL });
 });
 
+it('applies OpenCodex only when selected and preserves saved endpoint models on repaint', async () => {
+  const mounted = await mountChat();
+  const w = mounted.window;
+  const provider = w.document.getElementById('goalProvider') as HTMLSelectElement;
+  provider.value = 'opencodex';
+  provider.dispatchEvent(new w.Event('change', { bubbles: true }));
+  await vi.waitFor(() => expect(mounted.calls).toHaveLength(1));
+  expect(mounted.calls[0].goal).toMatchObject({
+    provider: { kind: 'custom', baseUrl: 'http://127.0.0.1:10100/v1' },
+    model: 'gpt-6-astra', reasoning: 'high'
+  });
+  const model = w.document.getElementById('goalCustomModel') as HTMLInputElement;
+  model.value = 'google-vertex/gemini-3.8-flash';
+  model.dispatchEvent(new w.Event('change', { bubbles: true }));
+  await vi.waitFor(() => expect(mounted.calls).toHaveLength(2));
+  mounted.push({ ...mounted.state, hasCustomProviderKey: true });
+  expect(provider.value).toBe('opencodex');
+  expect(model.value).toBe('google-vertex/gemini-3.8-flash');
+  expect(w.document.getElementById('goalCustomPanel')?.hidden).toBe(false);
+  provider.value = 'openrouter';
+  provider.dispatchEvent(new w.Event('change', { bubbles: true }));
+  await vi.waitFor(() => expect(mounted.calls).toHaveLength(3));
+  expect(mounted.calls[2].goal.provider.kind).toBe('openrouter');
+  expect(mounted.calls[2].goal.model).not.toBe('google-vertex/gemini-3.8-flash');
+});
+
 it('saves a custom deployment id and returns to the known OpenRouter model', async () => {
   const mounted = await mountChat();
   const w = mounted.window;

@@ -2815,14 +2815,14 @@ export function chatSettingsPatch(current: Config): {
       helperModel: $<HTMLSelectElement>('helperModel').value || current.goal.helperModel || 'gpt-5.6-sol',
       helperReasoning: ($<HTMLSelectElement>('helperReasoning').value || current.goal.helperReasoning || 'high') as Config['goal']['helperReasoning'],
       provider: {
-        kind: ($<HTMLSelectElement>('goalProvider').value || current.goal.provider?.kind || 'openrouter') as Config['goal']['provider']['kind'],
+        kind: customGoalProvider() ? 'custom' : 'openrouter',
         baseUrl: $<HTMLInputElement>('goalBaseUrl').value
       },
       // The api-backend model is picked from the catalogue and never typed, except on a
       // custom endpoint whose id is typed in its own field instead. `current` is the
       // fallback for the first save after a repaint.
       model:
-        $<HTMLSelectElement>('goalProvider').value === 'custom'
+        customGoalProvider()
           ? $<HTMLInputElement>('goalCustomModel').value.trim() || current.goal.model
           : goalModel || current.goal.model,
       reasoning: $<HTMLSelectElement>('goalReasoning').value as Config['goal']['reasoning'],
@@ -2856,6 +2856,15 @@ let goalCatalogEpoch = 0;
 let goalTotal = 0;
 let goalLoading = false;
 
+const OPENCODEX_BASE_URL = 'http://127.0.0.1:10100/v1';
+function customGoalProvider(): boolean {
+  return ['custom', 'opencodex'].includes($<HTMLSelectElement>('goalProvider').value);
+}
+function goalProviderChoice(goal: Config['goal']): string {
+  if (goal.provider?.kind !== 'custom') return 'openrouter';
+  return goal.provider.baseUrl.trim().replace(/\/+$/, '') === OPENCODEX_BASE_URL ? 'opencodex' : 'custom';
+}
+
 function invalidateGoalModels(): void {
   goalCatalogEpoch++;
   goalModels = [];
@@ -2866,7 +2875,7 @@ function invalidateGoalModels(): void {
 function paintGoalReasoning(selected?: Config['goal']['reasoning'], changingModel = false): void {
   const select = $<HTMLSelectElement>('goalReasoning');
   const model = goalModels.find(model => model.id === goalModel) ?? (selectedGoalModel?.id === goalModel ? selectedGoalModel : undefined);
-  const custom = $<HTMLSelectElement>('goalProvider').value === 'custom';
+  const custom = customGoalProvider();
   renderGoalReasoning(select, custom ? undefined : model, custom,
     selected ?? (select.value || 'default') as Config['goal']['reasoning'], changingModel);
 }
@@ -3004,7 +3013,7 @@ function applyGoal(state: AppState, previous?: Config): void {
   // OpenRouter: a custom endpoint is often keyless, so a missing key never means custom.
   const customProvider = config.goal.provider?.kind === 'custom';
   const providerBaseUrl = config.goal.provider?.baseUrl ?? '';
-  applyChatValue($<HTMLSelectElement>('goalProvider'), customProvider ? 'custom' : 'openrouter', previous?.goal.provider?.kind);
+  applyChatValue($<HTMLSelectElement>('goalProvider'), goalProviderChoice(config.goal), previous ? goalProviderChoice(previous.goal) : undefined);
   applyChatValue($<HTMLInputElement>('goalBaseUrl'), providerBaseUrl, previous?.goal.provider?.baseUrl);
   applyChatValue($<HTMLInputElement>('goalCustomModel'), config.goal.model, previous?.goal.model);
   $('goalCustomPanel').hidden = !customProvider;
@@ -3083,7 +3092,7 @@ function wireGoal(save: () => Promise<void>): void {
   });
   $('goalMore').addEventListener('click', () => void loadGoalModels(false));
   $('goalReasoning').addEventListener('focus', () => {
-    if ($<HTMLSelectElement>('goalProvider').value !== 'custom' && !goalModels.some(model => model.id === goalModel) && selectedGoalModel?.id !== goalModel)
+    if (!customGoalProvider() && !goalModels.some(model => model.id === goalModel) && selectedGoalModel?.id !== goalModel)
       void loadGoalModels(true);
   });
   $('goalModelList').addEventListener('scroll', maybePageGoalModels);
@@ -4142,7 +4151,14 @@ export function initChat(next: Deps): void {
   });
 
   for (const id of CHAT_INPUTS) {
-    $(id).addEventListener('change', () => void deps.save());
+    $(id).addEventListener('change', () => {
+      if (id === 'goalProvider' && $<HTMLSelectElement>('goalProvider').value === 'opencodex') {
+        $<HTMLInputElement>('goalBaseUrl').value = OPENCODEX_BASE_URL;
+        $<HTMLInputElement>('goalCustomModel').value = 'gpt-6-astra';
+        paintGoalReasoning('high');
+      }
+      void deps.save();
+    });
   }
 
   wireGoal(() => deps.save());

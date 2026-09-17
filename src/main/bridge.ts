@@ -6110,7 +6110,7 @@ async function noteRecoveryObservations(
   conversationId: string,
   sessionId: string | null,
   observations: readonly ChatObservation[],
-  activity: { meaningful: boolean; working: boolean; terminal: boolean; at?: number; toolStartedAt?: number; endedTurnId?: string }
+  activity: { meaningful: boolean; working: boolean; terminal: boolean; at?: number; toolStartedAt?: number; startedTurnId?: string; endedTurnId?: string }
 ): Promise<void> {
   const accessLimit = (item: ChatObservation): boolean => item.kind === 'chat_error' &&
     (item.blocking === true ||
@@ -6171,19 +6171,21 @@ async function noteRecoveryObservations(
     noteGoalWatchActivity(conversationId);
     // A current-turn interim can push an existing deadline; historical transcript/page rows
     // never enter this verdict and therefore cannot keep a confirmed reload alive.
-    if (sessionId && !activity.terminal && (activity.working || (activeUntil.has(conversationId) && !activeUntil.get(conversationId)?.thinkingFailed))) {
+    // A newly committed start replaces the prior grant even when its own final shares
+    // this batch. The exact terminal proof below then consumes that new grant.
+    if (sessionId && (activity.startedTurnId || !activity.terminal) && (activity.working || (activeUntil.has(conversationId) && !activeUntil.get(conversationId)?.thinkingFailed))) {
       const liveTurn = liveConversations().find(entry => entry.conversationId === conversationId && entry.sessionId === sessionId)?.activeTurnId;
       const previous = activeUntil.get(conversationId);
       const [sourceBoundary] = !previous && !liveTurn && activity.working
         ? await readRecentEvents(sessionId, 1, { kinds: ['turn_start', 'turn_end'] }) : [];
-      const workingTurn = liveTurn ?? (sourceBoundary?.kind === 'turn_end' &&
+      const workingTurn = activity.startedTurnId ?? liveTurn ?? (sourceBoundary?.kind === 'turn_end' &&
         ['stalled', 'failed', 'unknown'].includes(sourceBoundary.outcome) ? sourceBoundary.turnId : null);
       let selection: ChatObservation | undefined;
       let turn: Pick<ActivityGrant, 'turnId' | 'model'> | undefined = !previous && workingTurn
         ? { turnId: workingTurn, model: provenModel } : undefined;
       for (const item of observations) {
         if (item.kind === 'model_selection') selection = item;
-        if (item.kind === 'turn_start' && item.turnId === liveTurn && previous?.turnId !== item.turnId) {
+        if (item.kind === 'turn_start' && item.turnId === workingTurn && previous?.turnId !== item.turnId) {
           turn = { turnId: item.turnId ?? null, model: selection?.kind === 'model_selection' && selection.model ?
             isProModel(selection.model, selection.reasoningEffort) ? 'pro' : 'other' : provenModel };
         }

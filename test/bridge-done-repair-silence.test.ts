@@ -255,3 +255,100 @@ describe('confirmed silence recovery has a finite lifetime', () => {
     }
   });
 });
+
+describe('consecutive response identity', () => {
+  it.each(['end-first', 'start-first'] as const)('keeps the next Sol response recoverable when a prior Pro end shares the batch (%s)', async order => {
+    const chat = order === 'end-first' ? 'f0f00005-1111-4111-8111-111111111111' : 'f0f00006-1111-4111-8111-111111111111';
+    vi.useFakeTimers();
+    try {
+      await pair();
+      await events([
+        { kind: 'model_selection', model: 'gpt-6-pro', reasoningEffort: 'pro', time: Date.now() },
+        { kind: 'turn_start', turnId: 'old-pro', time: Date.now() }
+      ], chat);
+      await vi.advanceTimersByTimeAsync(1_000);
+      const end = { kind: 'turn_end', turnId: 'old-pro', outcome: 'completed', time: Date.now() };
+      const start = { kind: 'turn_start', turnId: 'new-sol', time: Date.now() + 1 };
+      await events([
+        { kind: 'model_selection', model: 'GPT-5.6 Sol', reasoningEffort: 'high', time: Date.now() },
+        ...(order === 'end-first' ? [end, start] : [start, end])
+      ], chat);
+      expect((await request('GET', `/activity?conversationId=${chat}`)).body.activeTurnId).toBe('new-sol');
+      await vi.advanceTimersByTimeAsync(CHAT_SILENCE_MS + 1);
+      await sweepStaleSwarm(Date.now());
+      expect(await maintenance()).toMatchObject({ conversationId: chat, reason: 'silence' });
+    } finally {
+      vi.useRealTimers();
+    }
+  });
+});
+
+it('keeps a successor terminal when it also completes in the same batch', async () => {
+  const chat = 'f0f00007-1111-4111-8111-111111111111';
+  vi.useFakeTimers();
+  try {
+    await pair();
+    await events([
+      { kind: 'model_selection', model: 'GPT-5.6 Sol', reasoningEffort: 'high', time: Date.now() },
+      { kind: 'turn_start', turnId: 'first', time: Date.now() }
+    ], chat);
+    await vi.advanceTimersByTimeAsync(1_000);
+    await events([
+      { kind: 'turn_end', turnId: 'first', outcome: 'completed', time: Date.now() },
+      { kind: 'turn_start', turnId: 'second', time: Date.now() + 1 },
+      { kind: 'turn_end', turnId: 'second', outcome: 'completed', time: Date.now() + 2 }
+    ], chat);
+    expect((await request('GET', `/activity?conversationId=${chat}`)).body.activeTurnId).toBeNull();
+    await vi.advanceTimersByTimeAsync(10 * 60_000);
+    await sweepStaleSwarm(Date.now());
+    expect(await maintenance()).toBeNull();
+    // The journal may replay the accepted start after completion; it is not new work.
+    await events([{ kind: 'turn_start', turnId: 'second', time: Date.now() - 10 * 60_000 + 1 }], chat);
+    expect((await request('GET', `/activity?conversationId=${chat}`)).body.activeTurnId).toBeNull();
+    expect(await maintenance()).toBeNull();
+  } finally { vi.useRealTimers(); }
+});
+
+
+it.each(['end-first', 'start-first'] as const)('settles the exact successor final without an explicit end (%s)', async order => {
+  const chat = order === 'end-first' ? 'f0f00008-1111-4111-8111-111111111111' : 'f0f00009-1111-4111-8111-111111111111';
+  vi.useFakeTimers();
+  try {
+    await pair();
+    await events([
+      { kind: 'model_selection', model: 'gpt-6-pro', reasoningEffort: 'pro', time: Date.now() },
+      { kind: 'turn_start', turnId: 'prior-pro', time: Date.now() }
+    ], chat);
+    await vi.advanceTimersByTimeAsync(1_000);
+    const end = { kind: 'turn_end', turnId: 'prior-pro', outcome: 'completed', time: Date.now() };
+    const start = { kind: 'turn_start', turnId: 'finished-sol', time: Date.now() + 1 };
+    const final = { kind: 'assistant_message', turnId: 'finished-sol', messageId: 'sol-answer',
+      state: 'final', activeNow: true, text: 'The successor has completed.', time: Date.now() + 2 };
+    await events([
+      { kind: 'model_selection', model: 'GPT-5.6 Sol', reasoningEffort: 'high', time: Date.now() },
+      ...(order === 'end-first' ? [end, start] : [start, end]), final
+    ], chat);
+    expect((await request('GET', `/activity?conversationId=${chat}`)).body.activeTurnId).toBeNull();
+    await vi.advanceTimersByTimeAsync(10 * 60_000);
+    await sweepStaleSwarm(Date.now());
+    expect(await maintenance()).toBeNull();
+    // Replaying the completed start/final must neither reopen it nor create a repair.
+    await events([start, final], chat);
+    expect((await request('GET', `/activity?conversationId=${chat}`)).body.activeTurnId).toBeNull();
+    await sweepStaleSwarm(Date.now());
+    expect(await maintenance()).toBeNull();
+    const session = await findSessionByConversation(chat);
+    expect((await readEvents(session!.id, { kinds: ['turn_end'] })).filter(item => item.turnId === 'finished-sol'))
+      .toMatchObject([{ kind: 'turn_end', outcome: 'completed' }]);
+    // The canonical old final also cannot consume a newer turn's recovery grant.
+    await events([
+      { kind: 'model_selection', model: 'GPT-5.6 Sol', reasoningEffort: 'high', time: Date.now() },
+      { kind: 'turn_start', turnId: 'next-sol', time: Date.now() },
+      { ...final, turnId: 'next-sol', time: Date.now() + 1 }
+    ], chat);
+    expect((await request('GET', `/activity?conversationId=${chat}`)).body.activeTurnId).toBe('next-sol');
+    await vi.advanceTimersByTimeAsync(CHAT_SILENCE_MS + 1);
+    await sweepStaleSwarm(Date.now());
+    expect(await maintenance()).toMatchObject({ conversationId: chat, reason: 'silence' });
+  } finally { vi.useRealTimers(); }
+});

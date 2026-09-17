@@ -308,6 +308,43 @@ it('preserves final acceptance across metadata, late call recording and restart,
   } finally { clock.mockRestore(); }
 });
 
+it.each(['question', 'interim', 'final'] as const)('keeps completion across historical %s metadata revisions and restart', async revised => {
+  const conversationId = `historical-completion-${revised}`;
+  const history = {
+    question: { kind: 'user_message' as const, time: 1, turnId: 'provider-question', messageId: 'old-question', text: 'Earlier task' },
+    interim: { kind: 'assistant_message' as const, time: 2, turnId: 'old-turn', messageId: 'old-interim', text: 'Earlier progress', state: 'streaming' as const },
+    final: { kind: 'assistant_message' as const, time: 3, turnId: 'old-turn', messageId: 'old-final', text: 'Earlier answer', state: 'final' as const, final: true }
+  };
+  const opened = await recordChatObservations(conversationId, [
+    history.question, history.interim, history.final,
+    { kind: 'user_message', time: 4, messageId: 'current-question', text: 'Current task' },
+    { kind: 'turn_start', time: 5, turnId: 'current-turn' },
+    { kind: 'assistant_message', time: 6, turnId: 'current-turn', messageId: 'current-final', text: 'Current answer', state: 'final', final: true },
+    { kind: 'turn_end', time: 7, turnId: 'current-turn', outcome: 'completed' }
+  ]);
+  const id = opened.sessionId!;
+  const accepted = await readCompletedFinal(id, conversationId, 'current-turn');
+  expect(accepted).toMatchObject({ messageId: 'current-final' });
+  await recordChatObservations(conversationId, [{ ...history[revised],
+    ...(revised === 'question' ? { turnId: 'provider-rebound-question' } : {}),
+    renderedHtml: '<p>Historical rendering</p>' }]);
+  const replayed = (await readEvents(id)).find(event => 'messageId' in event && event.messageId === history[revised].messageId);
+  expect(replayed!.seq).toBeGreaterThan(accepted!.contentSeq);
+  expect(await readCompletedFinal(id, conversationId, 'current-turn')).toEqual(accepted);
+  await flushSessions(); resetRecorderForTests(); resetSessionStoreForTests();
+  expect(await readCompletedFinal(id, conversationId, 'current-turn')).toEqual(accepted);
+
+  if (revised === 'final') {
+    await recordChatObservations(conversationId, [{ ...history.final, text: 'Changed final content' }]);
+    expect(await readCompletedFinal(id, conversationId, 'current-turn')).toBeNull();
+  } else {
+    await recordChatObservations(conversationId, [revised === 'question'
+      ? { kind: 'user_message', time: 8, messageId: 'new-question', text: 'New work', authoredNow: true }
+      : { kind: 'assistant_message', time: 8, messageId: 'new-interim', text: 'New work', state: 'streaming' }]);
+    expect(await readCompletedFinal(id, conversationId, 'current-turn')).toBeNull();
+  }
+});
+
 it.each(['question', 'rebind'] as const)('rejects a final snapshot when %s changes during its disk read', async change => {
   const conversationId = `completion-race-${change}`;
   const opened = await recordChatObservations(conversationId, [

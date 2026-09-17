@@ -8301,6 +8301,47 @@ describe('unattributed activity recovery', () => {
     }
   });
 
+  it('drafts a completed Loop reply after historical messages gain metadata', async () => {
+    const previous = getConfig();
+    const realFetch = globalThis.fetch;
+    const chat = 'cafe0091-0000-4000-8000-000000000091';
+    await saveConfig({ ...previous, goal: { ...previous.goal, enabled: true, mode: 'loop', backend: 'api', loopBackend: 'api' } });
+    await setSecret('openRouterApiKey', 'sk-or-history-replay');
+    resetGoalStateForTests();
+    globalThis.fetch = (async () => Response.json({ choices: [{ message: {
+      content: JSON.stringify({ action: 'continue', reply: 'Continue the requested verification.' })
+    } }] })) as never;
+    vi.useFakeTimers();
+    try {
+      await pair();
+      const question = { kind: 'user_message', time: Date.now(), messageId: 'history-question', text: 'Verify the work' };
+      const interim = { kind: 'assistant_message', time: Date.now(), turnId: 'history-turn',
+        messageId: 'history-interim', text: 'Checking the work', state: 'streaming' };
+      await events(chat, [question, openTurn('history-turn'), interim]);
+      await attributed(chat, false, Date.now());
+      await vi.advanceTimersByTimeAsync(1);
+      await recordFinalForTest(chat, 'history-turn');
+      await events(chat, [endTurn('history-turn', 'completed')]);
+      // Replay changes delivery cursors, but these are the same authored messages.
+      await events(chat, [
+        { ...question, turnId: 'provider-question-id', model: 'gpt-5-6-thinking' },
+        { ...interim, renderedHtml: '<p>Checking the work</p>' }
+      ]);
+      const drafted = await request('POST', '/goal/draft', {
+        body: { conversationId: chat, turnId: 'history-turn', clientId: 'history-page' }
+      });
+      expect(drafted.body.error).toBeUndefined();
+      expect(drafted.status).toBe(200);
+      expect(drafted.body.goal).toMatchObject({ turnId: 'history-turn' });
+    } finally {
+      resetGoalStateForTests();
+      globalThis.fetch = realFetch;
+      await setSecret('openRouterApiKey', '');
+      await saveConfig(previous);
+      vi.useRealTimers();
+    }
+  });
+
   /**
    * The silence ticket is the route a chat whose page lost its answer takes to the next message,
    * and its turn is exactly the one nobody is left to close: the reload, the minute of nothing,

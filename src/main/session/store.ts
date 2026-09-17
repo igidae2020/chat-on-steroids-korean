@@ -1612,7 +1612,12 @@ export async function readCompletedFinal(sessionId: string, conversationId: stri
   const nativeReopen = !!final.providerMessageId && last?.kind === 'turn_start' && last.source === 'app' &&
     last.turnId === final.turnId && prior?.kind === 'turn_end' && prior.turnId === final.turnId && prior.outcome === 'completed';
   if (recent.some(event => {
-    if (event === final || workSequence(event) <= seq) return false;
+    // Replaying old transcript metadata advances its delivery cursor, not its
+    // authored position. Only a changed final body carries a newer completion
+    // sequence; it must still invalidate the previously accepted answer.
+    const workAt = event.kind === 'assistant_message'
+      ? event.finalContentSeq ?? positionOf(event) : positionOf(event);
+    if (event === final || workAt <= seq) return false;
     if (event.kind === 'tool_call') return event.time > completedAt;
     if (event.kind === 'turn_end') return event.turnId !== final.turnId || event.outcome !== 'completed';
     if (event.kind === 'turn_start') return !(nativeReopen && event === last);

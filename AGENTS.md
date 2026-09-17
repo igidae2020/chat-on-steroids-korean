@@ -1855,6 +1855,9 @@ a draft exists, then the generated continuation text and delivery state. Both ap
 the extension project the same pending reply and activity/listening deadlines. Display countdowns
 grant no execution authority. A full canonical final consumes silence immediately, including an
 exact final first backfilled after a completed turn; interim prose and Stop/Send changes never do.
+Completion checks compare canonical messages by authored position, not their later delivery
+cursor. Historical metadata/HTML replay cannot reopen work; changed final content retains its
+own completion sequence and genuine newer messages, tools and turn boundaries still veto it.
 A completed MCP-backed response without final text is a recovery indication, not a terminal error:
 normal chats use two minutes before reload and one minute of listening after confirmed reload.
 Expired recovery debt goes directly to decision preparation without another Answer Settling wait.

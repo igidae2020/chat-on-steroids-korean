@@ -23,6 +23,8 @@
 
 import type { Capabilities } from '../../shared/types.js';
 import { desktopAutomationSupported } from '../platform.js';
+import { WINDOWS_COMPUTER_METHODS, WINDOWS_COMPUTER_READ_METHODS, WINDOWS_COMPUTER_INPUT_METHODS } from '../../shared/windows-computer.js';
+import { BROWSER_TOOLS, BROWSER_READ_TOOLS, BROWSER_WRITE_TOOLS } from '../../shared/browser-control.js';
 
 export const SURFACE_IDS = ['core', 'desktop', 'plugins'] as const;
 export type SurfaceId = (typeof SURFACE_IDS)[number];
@@ -80,20 +82,16 @@ export interface SurfaceDefinition {
 /**
  * Core — the coding loop.
  *
- * `session` and `agents` live here rather than on surfaces of their own, and that is a
- * decision with a concrete reason rather than a tidiness preference:
+ * Workers are part of the coding loop:
  *
- *  - `session` is how a chat discovers and reads local recordings of past or concurrently
- *    running work — including exact authored messages and the arguments/result of one call.
- *    That is part of the coding loop rather than an extra connector.
  *  - `agents` is one flat tool and is registered only while multi-agent mode is on.
  *    Fresh installs enable it; an existing config that keeps it off still pays nothing for
  *    it here. A dedicated connector for one conditional schema is pure setup overhead with
  *    no discovery benefit.
  *
- * Core declares 10 possible tool names below, but at most 9 schemas are live at once.
+ * Each surface also exposes JavaScript exec, restricted to that surface's own tools.
  * `find` and the exec pair are mutually exclusive — `find` exists only when command
- * execution is off — so no runtime tools/list reaches all 10 declarations.
+ * execution is off — so not all declarations are exposed together.
  */
 const CORE: SurfaceDefinition = {
   id: 'core',
@@ -104,19 +102,19 @@ const CORE: SurfaceDefinition = {
     'Use for: opening and reading files, searching a repository, applying patches, creating, renaming and deleting files, ' +
     'running builds, tests, linters, git, npm and shell commands, continuing long-running or interactive terminal sessions, ' +
     'and saving images and files ChatGPT generates onto this computer. ' +
-    'Also searches and reads local recordings of previous or concurrently running ChatGPT work, and — when the user has ' +
+    'Also displays task plans and — when the user has ' +
     'enabled it — spawns and coordinates worker agents, subagents or a parallel swarm across several ChatGPT conversations.',
   cardSummary: 'Files, patches and the terminal. Required — this is the coding connector.',
   required: true,
-  tools: ['read', 'view_image', 'find', 'apply_patch', 'exec_command', 'write_stdin', 'download_artifact', 'session', 'agents', 'session_finish']
+  tools: ['read', 'view_image', 'find', 'apply_patch', 'exec_command', 'write_stdin', 'update_plan', 'agents', 'session_finish', 'exec']
 };
 
 /**
  * Desktop — seeing and driving the native desktop.
  *
  * This one earns its boundary twice over. It is gated on permissions the user grants
- * separately and can switch off independently; its two schemas are the largest we publish, since
- * `computer` alone carries thirteen action variants; and the majority of coding sessions
+ * separately and can switch off independently; Windows has the Window2 app/window API,
+ * while macOS retains observe/computer. The majority of coding sessions
  * never touch the desktop at all. Folding it into Core would put its weight into every
  * no-query discovery of the coding surface, for a capability most conversations do not
  * want.
@@ -126,14 +124,15 @@ const DESKTOP: SurfaceDefinition = {
   serverName: 'chat-on-steroids-desktop',
   connectorName: `${CONNECTOR_BRAND} Desktop`,
   description:
-    'See and control this computer desktop, including its clipboard. ' +
-    'Use for: taking a screenshot, reading what is on screen, listing and finding windows, inspecting buttons, fields and other UI controls, ' +
+    'Control browser tabs in the background and this computer desktop, including its clipboard. ' +
+    'Attach existing Chrome/Edge/Brave tabs or open new tabs; inspect DOM refs, page screenshots, JavaScript, console errors and network requests; click, fill forms and navigate without foreground activation. ' +
+    'Use for: listing and launching apps, taking background window screenshots, reading what is on screen, listing and finding windows, inspecting buttons, fields and other UI controls, ' +
     'clicking, typing, pressing keys, scrolling and dragging in native applications, ' +
     'and reading the clipboard or copying and pasting text between programs.',
   cardSummary:
-    'Screenshots, windows, mouse/keyboard control and the clipboard. Optional — connect it only if you want desktop automation.',
+    'Browser tabs, DOM, console, network and background screenshots; native apps, input and clipboard where supported.',
   required: false,
-  tools: ['observe', 'computer']
+  tools: [...BROWSER_TOOLS, ...WINDOWS_COMPUTER_METHODS, 'read_clipboard', 'write_clipboard', 'observe', 'computer', 'exec']
 };
 
 const PLUGINS: SurfaceDefinition = {
@@ -143,7 +142,7 @@ const PLUGINS: SurfaceDefinition = {
   cardSummary: 'One shared connector for your enabled external MCP plugins.',
   required: false,
   // Dynamic declarations are owned and bounded by the plugin manager.
-  tools: []
+  tools: ['exec']
 };
 
 export const SURFACES: Record<SurfaceId, SurfaceDefinition> = { core: CORE, desktop: DESKTOP, plugins: PLUGINS };
@@ -152,6 +151,20 @@ export const SURFACE_LIST: readonly SurfaceDefinition[] = [CORE, DESKTOP, PLUGIN
 
 export function surfaceDefinition(id: SurfaceId): SurfaceDefinition {
   return SURFACES[id];
+}
+
+/** Platform/capability projection used by setup; each registrar enforces the same split. */
+export function desktopToolNames(caps: Capabilities, platform: NodeJS.Platform = process.platform): string[] {
+  const browser = [...(caps.screen ? BROWSER_READ_TOOLS : []), ...(caps.control ? BROWSER_WRITE_TOOLS : [])];
+  if (!desktopAutomationSupported(platform)) return browser;
+  if (platform !== 'win32') return [...browser, ...(caps.screen ? ['observe'] : []), ...(caps.control || caps.clipboardRead || caps.clipboardWrite ? ['computer'] : [])];
+  return [
+    ...browser,
+    ...(caps.screen ? WINDOWS_COMPUTER_READ_METHODS : []),
+    ...(caps.control ? WINDOWS_COMPUTER_INPUT_METHODS : []),
+    ...(caps.clipboardRead ? ['read_clipboard'] : []),
+    ...(caps.clipboardWrite ? ['write_clipboard'] : [])
+  ];
 }
 
 /**
@@ -175,8 +188,7 @@ export function surfaceIsUseful(
   // still gives this surface something real to advertise.
   if (id === 'desktop') {
     return (
-      desktopAutomationSupported(platform, release) &&
-      (caps.screen || caps.control || caps.clipboardRead || caps.clipboardWrite)
+      caps.screen || caps.control || (desktopAutomationSupported(platform, release) && (caps.clipboardRead || caps.clipboardWrite))
     );
   }
   return true;

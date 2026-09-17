@@ -1,5 +1,6 @@
 import { promises as fs } from 'node:fs';
 import path from 'node:path';
+import { prependUserPrompt } from '../src/shared/user-prompt.js';
 import { afterAll, afterEach, beforeAll, beforeEach, expect, it, vi } from 'vitest';
 
 vi.mock('electron', () => ({
@@ -29,6 +30,12 @@ const { makeTempDir, removeTempDir } = await import('./helpers.js');
 
 let dir: string;
 const realFetch = globalThis.fetch;
+
+function referenceTranscript(messages: Array<{ role: string; content: string }>): Array<{ role: string; content: string }> {
+  expect(messages.some(message => message.role === 'assistant')).toBe(false);
+  const reference = messages.find(message => message.role === 'user')!.content;
+  return JSON.parse(reference.slice(reference.indexOf('\n\n') + 2));
+}
 
 async function settled(conversationId: string): Promise<NonNullable<ReturnType<typeof goal.goalViewFor>>> {
   for (let attempt = 0; attempt < 200; attempt++) {
@@ -130,7 +137,7 @@ it('sends the Compact & Resume handoff to Goal as chat B actually received it', 
   expect((await settled(to)).stage).toBe('no-reply');
 
   // Inspect the actual provider payload, not just conversationMessages()/handoff metadata.
-  const transcript = requestMessages.filter((message) => message.role !== 'system');
+  const transcript = referenceTranscript(requestMessages);
   expect(transcript).toEqual([
     { role: 'user', content: original },
     { role: 'assistant', content: handoff.text },
@@ -239,7 +246,7 @@ it('anchors the last committed resume, never a later captured handoff whose cont
   goal.startGoalDraft({ sessionId: session.id, conversationId: to, turnId: 'goal-after-aborted-h2' });
   expect((await settled(to)).stage).toBe('no-reply');
 
-  const transcript = requestMessages.filter((message) => message.role !== 'system');
+  const transcript = referenceTranscript(requestMessages);
   expect(transcript[0]).toEqual({ role: 'user', content: original });
   expect(transcript.filter((message) => message.content === h1Bootstrap)).toHaveLength(1);
   expect(transcript.filter((message) => message.content === resumeBootstrapText(h2.text))).toHaveLength(0);
@@ -319,6 +326,10 @@ it('recovers a pre-provenance resumed session only from its exact durable bootst
 it('treats only known resume-bootstrap formatting artifacts as provenance-equivalent', () => {
   const handoff = 'Keep the exact task wording and continue the same work.';
   const bootstrap = resumeBootstrapText(handoff);
+  const framed = prependUserPrompt(resumeBootstrapText(handoff, 'token_0123456789abcdef'), 'Full guidance\nsecond line');
+  expect(resumeBootstrapMatches(framed, handoff)).toBe(true);
+  expect(resumeBootstrapMatches(framed.replace(/\n/g, '\r\n'), handoff)).toBe(true);
+  expect(resumeBootstrapMatches(framed.replace('same work', 'different work'), handoff)).toBe(false);
   expect(resumeBootstrapMatches(bootstrap.replace('exact task', `exact\u00a0task`), handoff)).toBe(true);
   expect(resumeBootstrapMatches(bootstrap.replace('exact task', `exact\u00c2\u00a0task`), handoff)).toBe(true);
   expect(resumeBootstrapMatches(bootstrap.replace(/\n/g, '\r\n'), handoff)).toBe(true);

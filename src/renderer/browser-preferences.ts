@@ -1,3 +1,4 @@
+import { ui, t } from './i18n.js';
 import type { BrowserPreferences } from '../shared/browser-preferences.js';
 import { $ } from './dom.js';
 
@@ -17,12 +18,12 @@ export function initBrowserPreferences(): void {
   };
   const request = async (patch: Partial<BrowserPreferences> = {}): Promise<void> => {
     if (busy) return;
-    busy = true; paint(); status.textContent = '확장의 응답 확인 대기 중…';
+    busy = true; paint(); ui(status, 'textContent', () => t("Waiting for the extension to confirm…"));
     try {
       const response = await window.api.browserPreferences(patch);
-      if (response.ok) { confirmed = response.data; status.textContent = '브라우저 확장에서 확인했습니다.'; }
+      if (response.ok) { confirmed = response.data; ui(status, 'textContent', () => t("Confirmed by the browser extension.")); }
       else { confirmed = null; status.textContent = response.error; }
-    } catch { confirmed = null; status.textContent = '확장에 연결할 수 없습니다. 연결 후 새로고침하세요.'; }
+    } catch { confirmed = null; ui(status, 'textContent', () => t("Unable to reach the extension. Connect it and refresh.")); }
     finally { busy = false; paint(); }
   };
   overwrite.addEventListener('change', () => void request({ overwrite: overwrite.checked }));

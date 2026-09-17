@@ -368,7 +368,7 @@ describe('ChatGPT DOM adapter', () => {
     const commentary = new FakeNode({ 'data-interrupted': 'false' }, 'Reading files');
     const answer = new FakeNode({ 'data-interrupted': 'false' }, 'Here is the summary');
     answer.with('.markdown', [new FakeNode({ class: 'markdown' }, 'Here is the summary')]);
-    const section = turn('assistant', 'request-answer').with('[data-interrupted]', [commentary, answer]);
+    const section = turn('assistant', 'request-answer').with('[data-interrupted], [data-clf-progress]', [commentary, answer]);
     const dom = loadDom([section]);
     const logical = dom.turns()[0]!;
 
@@ -454,6 +454,8 @@ interface WorkerHarness {
   closeTab(tabId: number): Promise<void>;
   /** Fires only Chrome's navigation-start signal, without inventing a replacement document. */
   startTabNavigation(tabId: number, url?: string): Promise<void>;
+  /** Completes navigation with no URL, as Chrome does outside granted hosts. */
+  completeTabNavigation(tabId: number): Promise<void>;
   /** Fires Chrome's tab URL-change lifecycle event. */
   navigateTab(tabId: number, url: string): Promise<void>;
   /** Fires the extension install/update lifecycle event. */
@@ -599,7 +601,9 @@ function loadWorker(options: {
     }
   };
   const fetch = options.fetch ?? (async () => response(503, {}));
-  vm.runInNewContext(backgroundSource, {
+  // This legacy VM harness exercises non-debugger hosts. The real MV3 entry fixture
+  // separately loads the unchanged module graph and verifies browser registration.
+  vm.runInNewContext(backgroundSource.replace(/^import .*$/gm, ''), {
     chrome,
     fetch,
     AbortController,
@@ -651,6 +655,11 @@ function loadWorker(options: {
     },
     async startTabNavigation(tabId: number, url?: string) {
       for (const fn of tabUpdatedListeners) fn(tabId, { ...(url ? { url } : {}), status: 'loading' });
+      await new Promise((resolve) => setTimeout(resolve, 0));
+      await new Promise((resolve) => setTimeout(resolve, 0));
+    },
+    async completeTabNavigation(tabId: number) {
+      for (const fn of tabUpdatedListeners) fn(tabId, { status: 'complete' });
       await new Promise((resolve) => setTimeout(resolve, 0));
       await new Promise((resolve) => setTimeout(resolve, 0));
     },
@@ -727,14 +736,20 @@ function journalOf(session: FakeStorageArea): any[] {
 }
 
 describe('accepted helper tab cleanup', () => {
-  for (const outcome of ['accepted', 'rejected', 'navigated'] as const) {
+  for (const outcome of ['accepted', 'rejected', 'navigated', 'pinned', 'busy', 'draft', 'pinned-during-proof'] as const) {
     it(`closes only the exact accepted helper document (${outcome})`, async () => {
       const helper = 'aaaaaaaa-bbbb-4ccc-8ddd-eeeeeeeeeeee';
       const other = '11111111-2222-4333-8444-555555555555';
       let url = `https://chatgpt.com/c/${helper}`;
+      let pinned = outcome === 'pinned';
       const worker = loadWorker({
         local: new FakeStorageArea({ port: 8765, token: 'paired-token' }), session: new FakeStorageArea(),
-        tabsGet: async () => ({ id: 1, url }),
+        tabsGet: async () => ({ id: 1, url, pinned }),
+        tabsSendMessage: async (_id, message) => {
+          if (message.type !== 'clf-tab-close-check') return { ok: true };
+          if (outcome === 'pinned-during-proof') pinned = true;
+          return { safe: outcome !== 'busy' && outcome !== 'draft', conversationId: helper, navigationEpoch: 0 };
+        },
         fetch: async (input) => {
           const route = new URL(input).pathname;
           if (route === '/hello') return response(200, { app: 'chat-on-steroids', paired: true });
@@ -846,6 +861,59 @@ describe('exact chat recovery from a fresh Chrome tab scan', () => {
     expect(worker.tabsReload).toHaveBeenCalledTimes(1);
   });
 
+  it.each(['unattributed', 'assistant-error'].flatMap(reason =>
+    ['unresolved', 'resolved-during-scan', 'claim-unavailable'].map(mode => ({ reason, mode }))))(
+    'claims $reason recovery after the tab scan: $mode', async ({ reason, mode }) => {
+      let armed = false;
+      let handed = false;
+      let resolved = false;
+      const trace: string[] = [];
+      const fetch = vi.fn(async (input: string, init: Record<string, unknown> = {}) => {
+        const url = new URL(input);
+        if (url.pathname === '/hello') return response(200, { app: 'chat-on-steroids', paired: true });
+        if (url.pathname === '/repairs/claim') {
+          trace.push('claim');
+          expect(init.method).toBe('POST');
+          expect(JSON.parse(String(init.body))).toEqual({ token: 'attribution-attempt' });
+          return mode === 'claim-unavailable' ? response(503, {}) : response(200, { allowed: !resolved });
+        }
+        if (url.pathname === '/status') {
+          if (url.searchParams.has('repaired')) trace.push('repaired');
+          if (armed && !handed) {
+            handed = true;
+            trace.push('handout');
+            return response(200, { repairs: [{ conversationId: CHAT, token: 'attribution-attempt', reason, requiresClaim: true }] });
+          }
+          return response(200, { repairs: [] });
+        }
+        return response(200, {});
+      });
+      const worker = loadWorker({ local: new FakeStorageArea(paired), session: new FakeStorageArea(), fetch,
+        tabsQuery: async () => {
+          if (handed) {
+            trace.push('scan');
+            if (mode === 'resolved-during-scan') resolved = true;
+          }
+          return [{ id: 21, url: `https://chatgpt.com/c/${CHAT}` }];
+        } });
+      await worker.registerTab(21);
+      await worker.send({ type: 'bind', conversationId: CHAT }, 21);
+      await worker.fireAlarm();
+      armed = true;
+      await worker.fireAlarm();
+      expect(trace.indexOf('scan')).toBeGreaterThan(trace.indexOf('handout'));
+      expect(trace.indexOf('claim')).toBeGreaterThan(trace.indexOf('scan'));
+      if (mode === 'unresolved') {
+        expect(worker.tabsReload).toHaveBeenCalledExactlyOnceWith(21);
+        expect(trace).toContain('repaired');
+      } else {
+        expect(worker.tabsReload).not.toHaveBeenCalled();
+        expect(trace).not.toContain('repaired');
+      }
+      expect(worker.tabsCreate).not.toHaveBeenCalled();
+    }
+  );
+
   /**
    * Two tabs of one chat used to end the repair: neither was reloaded and the duplicate stayed
    * open, so the chat was left broken *and* the tab spam was left standing. One chat is one tab,
@@ -873,11 +941,14 @@ describe('exact chat recovery from a fresh Chrome tab scan', () => {
 
   /** A reload that throws reports that attempt as failed, then the next pass retries it. */
   it('retries a repair whose reload failed', async () => {
-    const { fetch, asked, failedActions } = appWith(CHAT);
+    const { fetch, asked, failedActions, arm } = appWith(null);
     const worker = loadWorker({ local: new FakeStorageArea(paired), session: new FakeStorageArea(), fetch });
     await worker.registerTab(51);
     await worker.send({ type: 'bind', conversationId: CHAT }, 51);
+    await worker.fireAlarm();
+    asked.length = 0;
     worker.tabsReload.mockRejectedValueOnce(new Error('tab is gone'));
+    arm(CHAT);
 
     await worker.fireAlarm();
     expect(worker.tabsReload).toHaveBeenCalledTimes(1);
@@ -945,10 +1016,12 @@ describe('exact chat recovery from a fresh Chrome tab scan', () => {
   it('opens an active agent chat in the same close transaction instead of losing its retry alarm', async () => {
     const asked: string[] = [];
     let repaired = false;
+    let closed = false;
     const fetch = vi.fn(async (input: string, init: Record<string, unknown> = {}) => {
       const url = new URL(input);
       if (url.pathname === '/hello') return response(200, { app: 'chat-on-steroids', paired: true });
       if (url.pathname === '/closed' && init.method === 'POST') {
+        closed = true;
         return response(200, { ok: true });
       }
       if (url.pathname === '/status') {
@@ -957,8 +1030,8 @@ describe('exact chat recovery from a fresh Chrome tab scan', () => {
         if (receipt === 'close-repair') repaired = true;
         return response(200, {
           ok: true,
-          recoveryMonitoring: !repaired,
-          repairs: repaired ? [] : [{ conversationId: CHAT, token: 'close-repair' }]
+          recoveryMonitoring: closed && !repaired,
+          repairs: !closed || repaired ? [] : [{ conversationId: CHAT, token: 'close-repair' }]
         });
       }
       return response(404, {});
@@ -1110,6 +1183,7 @@ describe('active agent tab discard protection', () => {
           recoveryMonitoring: true,
           nonDiscardableConversations: [CHAT],
           managedConversations: [CHAT, OLD_WORKER, COMPACTED],
+          retiredConversations: [COMPACTED],
           tabsToKeepOpen: 1,
           closableConversations: [OLD_WORKER, COMPACTED]
         });
@@ -1170,8 +1244,8 @@ describe('active agent tab discard protection', () => {
 
 describe('app-owned retained tab pool', () => {
   const id = (n: number) => `aaaaaaaa-bbbb-4ccc-8ddd-${String(n).padStart(12, '0')}`;
-  async function budget(options: { safe?: (tab: number) => boolean; changed?: number; keep?: number; recent?: number; protectDuplicate?: boolean; reverseActivity?: boolean; retired?: boolean; idle?: boolean; ordinary?: number } = {}) {
-    const tabs = [1, 2, 3, 4, 5, 6].map(n => ({ id: n, windowId: n === 5 ? 9 : 7, url: `https://chatgpt.com/c/${id(n === 4 ? 3 : n)}`, active: n === 5, lastAccessed: n === options.recent ? Date.now() : 0 }));
+  async function budget(options: { safe?: (tab: number) => boolean; changed?: number; keep?: number; recent?: number; protectDuplicate?: boolean; reverseActivity?: boolean; retired?: boolean; idle?: boolean; ordinary?: number; pinned?: number } = {}) {
+    const tabs = [1, 2, 3, 4, 5, 6].map(n => ({ id: n, windowId: n === 5 ? 9 : 7, url: `https://chatgpt.com/c/${id(n === 4 ? 3 : n)}`, active: n === 5, pinned: n === options.pinned, lastAccessed: n === options.recent ? Date.now() : 0 }));
     const worker = loadWorker({
       local: new FakeStorageArea({ port: 8765, token: 'paired-token' }),
       session: new FakeStorageArea({ tabDocuments: Object.fromEntries(tabs.map(tab => [tab.id, `doc-${tab.id}`])), tabEpochs: Object.fromEntries(tabs.map(tab => [tab.id, 0])) }),
@@ -1195,6 +1269,10 @@ describe('app-owned retained tab pool', () => {
     expect(worker.tabsRemove).not.toHaveBeenCalledWith(1); // live app work
     expect(worker.tabsRemove).not.toHaveBeenCalledWith(6); // unrelated manual chat
   });
+  it('preserves a user-pinned duplicate while still retiring an unpinned terminal worker', async () => {
+    const worker = await budget({ pinned: 4, retired: true });
+    expect(worker.tabsRemove.mock.calls.map(call => call[0])).toEqual([2, 5]);
+  });
   it('retires explicitly terminal workers while preserving drafts and live work', async () => {
     const worker = await budget({ keep: 20, retired: true, safe: n => n !== 5 });
     expect(worker.tabsRemove.mock.calls.map(call => call[0])).toEqual([4, 2]);
@@ -1209,9 +1287,9 @@ describe('app-owned retained tab pool', () => {
     const worker = await budget({ ordinary: 1 });
     expect(worker.tabsRemove.mock.calls.map(call => call[0])).toEqual([4]);
   });
-  it('honors explicit terminal close authority independently of the former worker budget', async () => {
+  it('releases idle pages independently of worker capacity while keeping the selected page', async () => {
     const worker = await budget({ keep: 20, idle: true });
-    expect(worker.tabsRemove.mock.calls.map(call => call[0])).toEqual([4, 2, 3, 5]);
+    expect(worker.tabsRemove.mock.calls.map(call => call[0])).toEqual([4, 2, 3]);
   });
   it('does not use tab selection as model activity', async () => {
     const worker = await budget({ recent: 5 });
@@ -1277,7 +1355,7 @@ describe('worker settings authority', () => {
     expect(posted).toEqual([{ autoCompact: false, conversationId: CHAT }]);
   });
 
-  it('forwards compaction ticket and both irreversible dispatch checkpoints', async () => {
+  it('forwards compaction ticket, safe source loss, and both irreversible dispatch checkpoints', async () => {
     const posted: Record<string, unknown>[] = [];
     const fetch = vi.fn(async (input: string, init: Record<string, unknown> = {}) => {
       const url = new URL(input);
@@ -1295,14 +1373,49 @@ describe('worker settings authority', () => {
     const token = '0123456789abcdef0123456789abcdef';
 
     await worker.send({ type: 'compact', conversationId: CHAT, ticket: true, automatic: true }, 44);
+    await worker.send({ type: 'compact', conversationId: CHAT, token, sourceLost: true }, 44);
     await worker.send({ type: 'compact', conversationId: CHAT, token, sourceDispatch: true }, 44);
     await worker.send({ type: 'compact', conversationId: CHAT, token, destinationDispatch: true }, 44);
 
     expect(posted).toEqual([
       expect.objectContaining({ conversationId: CHAT, ticket: true, automatic: true }),
+      expect.objectContaining({ conversationId: CHAT, token, sourceLost: true }),
       expect.objectContaining({ conversationId: CHAT, token, sourceDispatch: true }),
       expect.objectContaining({ conversationId: CHAT, token, destinationDispatch: true })
     ]);
+  });
+
+  it('carries destinationLost, and still refuses anything not on the checkpoint list', async () => {
+    const posted: Record<string, unknown>[] = [];
+    const fetch = vi.fn(async (input: string, init: Record<string, unknown> = {}) => {
+      const url = new URL(input);
+      if (url.pathname === '/hello') return response(200, { app: 'chat-on-steroids', paired: true });
+      if (url.pathname === '/compact' && init.method === 'POST') {
+        posted.push(JSON.parse(String(init.body || '{}')));
+        return response(200, { ok: true });
+      }
+      return response(404, {});
+    });
+    const worker = loadWorker({ local: new FakeStorageArea(paired), session: new FakeStorageArea(), fetch,
+      tabsGet: async () => ({ id: 44, url: `https://chatgpt.com/c/${CHAT}` }) });
+    await worker.registerTab(44);
+    await worker.send({ type: 'bind', conversationId: CHAT }, 44);
+    const token = '0123456789abcdef0123456789abcdef';
+
+    // The page sends this and the app acts on it — it retires the lease and re-offers the brief
+    // to a fresh chat at once instead of waiting the lease out. The relay used to drop it.
+    await worker.send({ type: 'compact', conversationId: CHAT, token, destinationLost: true }, 44);
+    // A field nobody named must not ride along on a valid token.
+    await worker.send({ type: 'compact', conversationId: CHAT, token, sourceLost: true, invented: true }, 44);
+    // And a checkpoint without its token says nothing about any transaction.
+    await worker.send({ type: 'compact', conversationId: CHAT, destinationLost: true }, 44);
+
+    expect(posted).toHaveLength(3);
+    expect(posted[0]).toMatchObject({ conversationId: CHAT, token, destinationLost: true });
+    expect(posted[1]).toMatchObject({ conversationId: CHAT, token, sourceLost: true });
+    expect(posted[1]).not.toHaveProperty('invented');
+    expect(posted[2]).not.toHaveProperty('destinationLost');
+    expect(posted[2]).not.toHaveProperty('token');
   });
 
   it.each(['new-chat', 'other-chat', 'pending-navigation'])('checks the current Chrome route for compaction after %s', async scenario => {
@@ -1423,6 +1536,103 @@ describe('worker settings authority', () => {
     });
     expect(fetch.mock.calls.some(([input]) => new URL(String(input)).pathname === '/settings')).toBe(false);
   });
+
+  /**
+   * The half of this route that no test covered: the replacement chat's own checkpoints.
+   *
+   * Every case above sends `conversationId` alongside the token, because every one of them is
+   * the *source* chat — a conversation that exists. The destination is the opposite by
+   * construction: content.js asks for its permit from a page opened at `/?clf=<id>`, before
+   * ChatGPT has assigned anything, so it sends a token and a flag and no conversation id at
+   * all. Nothing here ever exercised that shape, and it is the shape the whole handoff depends
+   * on: refuse it and the page clears its composer and stops, with no ack and no log line
+   * anywhere — which is exactly what a stuck handoff looks like from the outside.
+   */
+  /**
+   * The replacement chat asks for its permit while ChatGPT is still loading.
+   *
+   * Measured in the browser on 2026-09-10: the tab redeemed at 04:39:55.218 and got the whole
+   * 48,975-character brief, then asked for `destinationAttempt` at 04:39:58.262 — three seconds
+   * into a freshly opened ChatGPT, which is still `loading`. The worker refused it as a stale
+   * document without ever calling the app, content.js read that as a denied permit, cleared the
+   * composer and returned without an ack. The app then waited out its whole deadline and gave up
+   * with "the chat this app opened did not report back in time", and nothing anywhere said why.
+   *
+   * The loading/pendingUrl guard is for a tab navigating *away* from what the message names. A
+   * checkpoint that names no conversation, from a document the worker still owns, is the
+   * opposite case: there is nothing to navigate away from yet.
+   */
+  it.each(['loading', 'pending'])('forwards a replacement chat permit while the tab is still %s', async state => {
+    const posted: Record<string, unknown>[] = [];
+    const fetch = vi.fn(async (input: string, init: Record<string, unknown> = {}) => {
+      const url = new URL(input);
+      if (url.pathname === '/hello') return response(200, { app: 'chat-on-steroids', paired: true });
+      if (url.pathname === '/compact' && init.method === 'POST') {
+        posted.push(JSON.parse(String(init.body || '{}')));
+        return response(200, { allowed: true });
+      }
+      return response(404, {});
+    });
+    const tab = state === 'loading'
+      ? { id: 47, url: 'https://chatgpt.com/?clf=cmd-successor', status: 'loading' }
+      : { id: 47, url: 'https://chatgpt.com/?clf=cmd-successor', pendingUrl: 'https://chatgpt.com/?clf=cmd-successor' };
+    const worker = loadWorker({ local: new FakeStorageArea(paired), session: new FakeStorageArea(), fetch,
+      tabsGet: async () => tab });
+    await worker.registerTab(47);
+    const token = '0123456789abcdef0123456789abcdef';
+
+    const commandId = 'cmd-successor', client = 'run-successor-document';
+    const reply = await worker.send({ type: 'compact', token, commandId, client, destinationAttempt: true }, 47);
+
+    expect(reply).not.toMatchObject({ error: 'stale_document' });
+    expect(posted).toEqual([expect.objectContaining({ token, commandId, client, destinationAttempt: true })]);
+  });
+
+  it('forwards the destination checkpoints a replacement chat sends, which name no conversation', async () => {
+    const posted: Record<string, unknown>[] = [];
+    const fetch = vi.fn(async (input: string, init: Record<string, unknown> = {}) => {
+      const url = new URL(input);
+      if (url.pathname === '/hello') return response(200, { app: 'chat-on-steroids', paired: true });
+      if (url.pathname === '/compact' && init.method === 'POST') {
+        posted.push(JSON.parse(String(init.body || '{}')));
+        return response(200, { allowed: true });
+      }
+      return response(404, {});
+    });
+    const worker = loadWorker({ local: new FakeStorageArea(paired), session: new FakeStorageArea(), fetch,
+      tabsGet: async () => ({ id: 46, url: 'https://chatgpt.com/?clf=cmd-successor' }) });
+    await worker.registerTab(46);
+    const token = '0123456789abcdef0123456789abcdef';
+
+    const commandId = 'cmd-successor', client = 'run-successor-document';
+    await worker.send({ type: 'compact', token, commandId, client, destinationAttempt: true }, 46);
+    await worker.send({ type: 'compact', token, commandId, client, destinationDispatch: true }, 46);
+    await worker.send({ type: 'compact', token, commandId, client, destinationLost: true }, 46);
+
+    expect(posted).toEqual([
+      expect.objectContaining({ token, commandId, client, destinationAttempt: true }),
+      expect.objectContaining({ token, commandId, client, destinationDispatch: true }),
+      expect.objectContaining({ token, commandId, client, destinationLost: true })
+    ]);
+  });
+
+  it.each(['conversation', 'pending-conversation', 'pending-foreign'])('refuses a replacement permit on a %s route', async state => {
+    const fetch = vi.fn(async (input: string) => new URL(input).pathname === '/hello'
+      ? response(200, { app: 'chat-on-steroids', paired: true }) : response(200, { allowed: true }));
+    const home = 'https://chatgpt.com/?clf=cmd-successor';
+    const chat = `https://chatgpt.com/c/${CHAT}`;
+    const tab = { id: 48, url: state === 'conversation' ? chat : home,
+      ...(state === 'pending-conversation' ? { pendingUrl: chat } : {}),
+      ...(state === 'pending-foreign' ? { pendingUrl: 'https://example.com/' } : {}) };
+    const worker = loadWorker({ local: new FakeStorageArea(paired), session: new FakeStorageArea(), fetch,
+      tabsGet: async () => tab });
+    await worker.registerTab(48);
+    expect(await worker.send({ type: 'compact', token: '0123456789abcdef0123456789abcdef',
+      commandId: 'cmd-successor', client: 'run-successor-document', destinationAttempt: true }, 48))
+      .toMatchObject({ ok: false, error: 'stale_document' });
+    expect(fetch.mock.calls.some(([input]) => new URL(input).pathname === '/compact')).toBe(false);
+  });
+
 
   /**
    * The mode a goal was written in, which the app turns into a durable per-chat switch.
@@ -1557,182 +1767,45 @@ describe('extension command delivery', () => {
     expect(backgroundSource).not.toContain("call('/commands'");
   });
 
-  it('recovers an invalidated idle document by native reload without hot-injecting runtime files', async () => {
-    const url = 'https://chatgpt.com/c/aaaaaaaa-bbbb-4ccc-8ddd-eeeeeeeeeeee';
-    const worker = loadWorker({ local: new FakeStorageArea(paired), session: new FakeStorageArea(),
-      tabsGet: async () => ({ id: 41, url, status: 'complete' }) });
-    worker.tabsQuery.mockResolvedValueOnce([{ id: 41, url, status: 'complete' }]);
-    worker.scriptingExecuteScript.mockResolvedValue([{ frameId: 0, documentId: 'old-document', result: { idle: true, url } }]);
+  it('re-injects the recorder into already-open ChatGPT tabs after an extension reload', async () => {
+    const local = new FakeStorageArea(paired);
+    const session = new FakeStorageArea();
+    const worker = loadWorker({ local, session });
+    worker.tabsQuery.mockResolvedValueOnce([{ id: 41 }, { id: 42 }]);
 
     await worker.installed('update');
 
-    const injections = worker.scriptingExecuteScript.mock.calls.map(([request]) => request);
-    expect(injections).toHaveLength(2);
-    expect(injections.every(request => typeof request.func === 'function' && !request.files)).toBe(true);
-    expect(injections[1].target).toEqual({ tabId: 41, documentIds: ['old-document'] });
-    expect(injections[0].args.at(-1)).toBe(false);
-    expect(injections[1].args.at(-1)).toBe(true);
-    expect(worker.scriptingInsertCSS).not.toHaveBeenCalled();
-    expect(worker.tabsCreate).not.toHaveBeenCalled();
-    expect(worker.tabsReload).not.toHaveBeenCalled();
+    expect(worker.tabsQuery).toHaveBeenCalledWith({
+      url: ['https://chatgpt.com/*', 'https://chat.openai.com/*']
+    });
+    expect(worker.scriptingExecuteScript.mock.calls).toEqual([
+      [{ target: { tabId: 41 }, files: ['chatgpt-dom.js'] }],
+      [{ target: { tabId: 41 }, world: 'MAIN', files: ['fiber.js'] }],
+      [{ target: { tabId: 41 }, files: ['content.js'] }],
+      [{ target: { tabId: 42 }, files: ['chatgpt-dom.js'] }],
+      [{ target: { tabId: 42 }, world: 'MAIN', files: ['fiber.js'] }],
+      [{ target: { tabId: 42 }, files: ['content.js'] }]
+    ]);
+    expect(worker.scriptingInsertCSS.mock.calls).toEqual([
+      [{ target: { tabId: 41 }, files: ['overlay.css'] }],
+      [{ target: { tabId: 42 }, files: ['overlay.css'] }]
+    ]);
   });
 
-  it('keeps a healthy current recorder and leaves Fiber repair to its on-demand path', async () => {
-    const worker = loadWorker({ local: new FakeStorageArea(paired), session: new FakeStorageArea() });
+  it('keeps a live recorder but revalidates the idempotent MAIN-world Fiber helper', async () => {
+    const local = new FakeStorageArea(paired);
+    const session = new FakeStorageArea();
+    const worker = loadWorker({ local, session });
     worker.tabsQuery.mockResolvedValueOnce([{ id: 41 }]);
-    worker.tabsSendMessage.mockResolvedValueOnce({ ok: true, recorderVersion: 14 });
+    worker.tabsSendMessage.mockResolvedValueOnce({ ok: true, recorderVersion: 13 });
+
     await worker.installed('update');
+
     expect(worker.tabsSendMessage).toHaveBeenCalledWith(41, { type: 'clf-recorder-ping' });
-    expect(worker.scriptingExecuteScript).not.toHaveBeenCalled();
+    expect(worker.scriptingExecuteScript.mock.calls).toEqual([
+      [{ target: { tabId: 41 }, world: 'MAIN', files: ['fiber.js'] }]
+    ]);
     expect(worker.scriptingInsertCSS).not.toHaveBeenCalled();
-    expect(worker.tabsReload).not.toHaveBeenCalled();
-  });
-
-  it('releases only a proven no-reload reservation after a final native draft race', async () => {
-    const url = 'https://chatgpt.com/c/aaaaaaaa-bbbb-4ccc-8ddd-eeeeeeeeeeee';
-    const reload = vi.fn();
-    const box = { isConnected: true, textContent: '', getAttribute: () => null };
-    const page = { CLF_DOM: { composer: () => box, composerVisible: () => true,
-      hasComposerAttachments: () => false, generating: () => false, stopButton: () => null },
-      document: { readyState: 'complete' }, location: { href: url, reload }, Date };
-    const code = backgroundSource.slice(backgroundSource.indexOf('function idleRecorderDocument('),
-      backgroundSource.indexOf('\nasync function boundedRecoveryCall('));
-    const inspect = vm.runInNewContext(`${code}\nidleRecorderDocument`, page);
-    const worker = loadWorker({ local: new FakeStorageArea(paired), session: new FakeStorageArea(),
-      tabsGet: async () => ({ id: 41, url, status: 'complete' }) });
-    worker.tabsQuery.mockResolvedValue([{ id: 41, url, status: 'complete' }]);
-    let first = true;
-    worker.scriptingExecuteScript.mockImplementation(async request => {
-      if (request.args.at(-1) && first) { first = false; box.textContent = 'user draft'; }
-      return [{ frameId: 0, documentId: 'old-document', result: inspect(...request.args) }];
-    });
-    await worker.installed('update');
-    expect(reload).not.toHaveBeenCalled();
-    expect(box.textContent).toBe('user draft');
-    box.textContent = '';
-    await worker.installed('update');
-    expect(reload).toHaveBeenCalledTimes(1);
-    expect(worker.scriptingExecuteScript).toHaveBeenCalledTimes(4);
-    expect(worker.tabsCreate).not.toHaveBeenCalled();
-  });
-
-  it.each(['rejected', 'lost', 'other-document', 'wrong-url', 'timeout'])(
-    'keeps the reload attempt spent after a final %s response', async scenario => {
-    let late: ((value: unknown) => void) | undefined;
-    try {
-      const url = 'https://chatgpt.com/c/aaaaaaaa-bbbb-4ccc-8ddd-eeeeeeeeeeee';
-      const worker = loadWorker({ local: new FakeStorageArea(paired), session: new FakeStorageArea(),
-        tabsGet: async () => ({ id: 41, url, status: 'complete' }) });
-      worker.tabsQuery.mockResolvedValue([{ id: 41, url, status: 'complete' }]);
-      let attempts = 0;
-      worker.scriptingExecuteScript.mockImplementation(async request => {
-        if (!request.args.at(-1)) return [{ frameId: 0, documentId: 'old-document', result: { idle: true, url } }];
-        attempts++;
-        if (scenario === 'rejected') throw new Error('injection rejected');
-        if (scenario === 'timeout') return new Promise(resolve => { late = resolve; });
-        if (scenario === 'lost') return null;
-        return [{ frameId: 0, documentId: scenario === 'other-document' ? 'other' : 'old-document',
-          result: { reloaded: false, url: scenario === 'wrong-url' ? 'https://chatgpt.com/' : url } }];
-      });
-      await worker.installed('update');
-      // onInstalled is a void listener; the fixture only drains immediate tasks.
-      // Let the actual bounded final call expire before supplying its late receipt.
-      if (scenario === 'timeout') await new Promise(resolve => setTimeout(resolve, 3100));
-      late?.([{ frameId: 0, documentId: 'old-document', result: { reloaded: false, url } }]);
-      await Promise.resolve();
-      await worker.installed('update');
-      expect(attempts).toBe(1);
-      expect(worker.tabsCreate).not.toHaveBeenCalled();
-      expect(worker.tabsReload).not.toHaveBeenCalled();
-    } finally { late?.([]); }
-  });
-
-  it('elects only one reload when concurrent recovery checks await the same current tab', async () => {
-    const url = 'https://chatgpt.com/c/aaaaaaaa-bbbb-4ccc-8ddd-eeeeeeeeeeee';
-    const tab = { id: 41, url, status: 'complete' };
-    const gates: Array<(value: typeof tab) => void> = [];
-    let checks = 0;
-    const executeScript = vi.fn(async _request => [{ frameId: 0, documentId: 'same-document',
-      result: { idle: true, url } }]);
-    const code = backgroundSource.slice(backgroundSource.indexOf('async function boundedRecoveryCall('),
-      backgroundSource.indexOf('\nasync function restoreOpenChatgptTabs('));
-    const restore = vm.runInNewContext(`${code}\nrestoreChatgptTab`, {
-      setTimeout, clearTimeout, Date, Map, PAGE_RECORDER_VERSION: 12,
-      tabDocuments: {}, tabEpochs: {}, idleRecorderDocument: () => {}, isChatGptUrl: () => true,
-      chrome: { tabs: { sendMessage: async () => null,
-        get: async () => ++checks <= 2 ? tab : new Promise(resolve => { gates.push(resolve); }) },
-        scripting: { executeScript } }
-    });
-    const first = restore(41), second = restore(41);
-    await vi.waitFor(() => expect(gates).toHaveLength(2));
-    for (const resolve of gates) resolve(tab);
-    await Promise.all([first, second]);
-    expect(executeScript.mock.calls.filter(([request]) => request.args.at(-1) === true)).toHaveLength(1);
-  });
-
-  it.each(['idle', 'draft', 'attachment', 'generating', 'stop', 'hidden', 'disabled', 'missing-dom', 'navigation', 'healthy', 'expired'])
-    ('native recovery rechecks %s state in the exact document immediately before reload', scenario => {
-      const url = 'https://chatgpt.com/c/aaaaaaaa-bbbb-4ccc-8ddd-eeeeeeeeeeee';
-      const reload = vi.fn();
-      const box = { isConnected: true, textContent: '', disabled: false, getAttribute: () => null };
-      const native: any = { composer: () => box, composerVisible: () => true, hasComposerAttachments: () => false,
-        generating: () => false, stopButton: () => null };
-      const page: any = { CLF_DOM: native, document: { readyState: 'complete' }, location: { href: url, reload }, Date };
-      const code = backgroundSource.slice(backgroundSource.indexOf('function idleRecorderDocument('),
-        backgroundSource.indexOf('\nasync function boundedRecoveryCall('));
-      const inspect = vm.runInNewContext(`${code}\nidleRecorderDocument`, page);
-      expect(inspect(url, 12, Date.now() + 3000, false)).toEqual({ idle: true, url });
-      expect(reload).not.toHaveBeenCalled();
-      if (scenario === 'draft') box.textContent = 'new user draft';
-      if (scenario === 'attachment') native.hasComposerAttachments = () => true;
-      if (scenario === 'generating') native.generating = () => true;
-      if (scenario === 'stop') native.stopButton = () => ({});
-      if (scenario === 'hidden') native.composerVisible = () => false;
-      if (scenario === 'disabled') box.disabled = true;
-      if (scenario === 'missing-dom') delete page.CLF_DOM;
-      if (scenario === 'navigation') page.location.href = 'https://chatgpt.com/';
-      if (scenario === 'healthy') page.__CLF_CONTENT_RECORDER__ = { version: 14, healthy: () => true };
-      inspect(url, 12, Date.now() + (scenario === 'expired' ? -1 : 3000), true);
-      expect(reload).toHaveBeenCalledTimes(scenario === 'idle' ? 1 : 0);
-    });
-
-  it.each(['url', 'pending', 'document'])('rejects a recovery proof if the tab %s changed before document-scoped reload', async change => {
-    const url = 'https://chatgpt.com/c/aaaaaaaa-bbbb-4ccc-8ddd-eeeeeeeeeeee';
-    let current = { id: 41, url, status: 'complete', pendingUrl: '' };
-    const worker = loadWorker({ local: new FakeStorageArea(paired), session: new FakeStorageArea(), tabsGet: async () => current });
-    await worker.registerTab(41, 'old-document');
-    worker.tabsQuery.mockResolvedValueOnce([current]);
-    worker.scriptingExecuteScript.mockImplementation(async () => {
-      if (change === 'url') current = { ...current, url: 'https://chatgpt.com/' };
-      if (change === 'pending') current = { ...current, pendingUrl: 'https://chatgpt.com/' };
-      if (change === 'document') await worker.registerTab(41, 'replacement');
-      return [{ frameId: 0, documentId: 'old-document', result: { idle: true, url } }];
-    });
-    await worker.installed('update');
-    expect(worker.scriptingExecuteScript).toHaveBeenCalledTimes(1);
-    expect(worker.tabsCreate).not.toHaveBeenCalled();
-    expect(worker.tabsReload).not.toHaveBeenCalled();
-  });
-
-  it('ignores a late idle recovery proof and never turns a timed-out probe into reload', async () => {
-    vi.useFakeTimers();
-    let resolveProof: ((value: any) => void) | undefined;
-    try {
-      const url = 'https://chatgpt.com/c/aaaaaaaa-bbbb-4ccc-8ddd-eeeeeeeeeeee';
-      const worker = loadWorker({ local: new FakeStorageArea(paired), session: new FakeStorageArea(),
-        tabsGet: async () => ({ id: 41, url, status: 'complete' }) });
-      worker.tabsQuery.mockResolvedValueOnce([{ id: 41, url, status: 'complete' }]);
-      worker.scriptingExecuteScript.mockImplementation(() => new Promise(resolve => { resolveProof = resolve; }));
-      const installed = worker.installed('update');
-      await vi.advanceTimersByTimeAsync(3000);
-      await installed;
-      expect(worker.scriptingExecuteScript).toHaveBeenCalledTimes(1);
-      resolveProof?.([{ frameId: 0, documentId: 'old-document', result: { idle: true, url } }]);
-      await vi.advanceTimersByTimeAsync(0);
-      expect(worker.scriptingExecuteScript).toHaveBeenCalledTimes(1);
-      expect(worker.tabsCreate).not.toHaveBeenCalled();
-      expect(worker.tabsReload).not.toHaveBeenCalled();
-    } finally { resolveProof?.([]); await vi.runOnlyPendingTimersAsync(); vi.useRealTimers(); }
   });
 
   it('repairs a missing MAIN-world Fiber helper on demand for the sending tab only', async () => {
@@ -1855,7 +1928,7 @@ describe('extension revival delivery', () => {
 
   const liveRecorder = async (_tabId: number, message: Record<string, unknown>) =>
     message.type === 'clf-recorder-ping'
-      ? { ok: true, recorderVersion: 14 }
+      ? { ok: true, recorderVersion: 13 }
       : { ok: true, claimed: true };
 
   it('scans before opening and routes to the oldest exact worker tab', async () => {
@@ -2077,6 +2150,136 @@ describe('extension revival delivery', () => {
 });
 
 describe('extension observation journal', () => {
+  it('delivers another chat and its Goal while a slow chat holds one slot, without overlapping same-chat batches', async () => {
+    const a = '11111111-2222-3333-4444-555555555555';
+    const b = 'aaaaaaaa-bbbb-cccc-dddd-eeeeeeeeeeee';
+    const local = new FakeStorageArea({ port: 8765, token: 'paired-token' });
+    const session = new FakeStorageArea();
+    let releaseA!: () => void;
+    let releaseB!: () => void;
+    const gateA = new Promise<void>(resolve => { releaseA = resolve; });
+    const gateB = new Promise<void>(resolve => { releaseB = resolve; });
+    const posted: Array<{ conversationId: string; events: Array<{ text: string }> }> = [];
+    const active = new Set<string>();
+    let maximum = 0;
+    let overlaps = 0;
+    let drafts = 0;
+    const worker = loadWorker({ local, session, fetch: async (input, init = {}) => {
+      const url = new URL(input);
+      if (url.pathname === '/hello') return response(200, { app: 'chat-on-steroids', paired: true });
+      if (url.pathname === '/events') {
+        const batch = JSON.parse(String(init.body));
+        posted.push(batch);
+        if (active.has(batch.conversationId)) overlaps++;
+        active.add(batch.conversationId);
+        maximum = Math.max(maximum, active.size);
+        if (batch.conversationId === a) await gateA;
+        if (batch.conversationId === b && batch.events[0].text === 'B1') await gateB;
+        active.delete(batch.conversationId);
+        return response(200, { stored: batch.events.length });
+      }
+      if (url.pathname === '/goal/draft') { drafts++; return response(200, { goal: { stage: 'drafting' } }); }
+      return response(404, {});
+    } });
+    const event = (conversationId: string, text: string) => ({
+      type: 'events', conversationId,
+      entries: [{ conversationId, event: { kind: 'progress', time: Date.now(), text } }]
+    });
+    let aFinished = false;
+    const pendingA = worker.send(event(a, 'A1'), 61).then(result => { aFinished = true; return result; });
+    try {
+      await vi.waitFor(() => expect(active.has(a)).toBe(true));
+      await worker.send(event(b, 'B1'), 62);
+      await vi.waitFor(() => expect(active.has(b)).toBe(true));
+      await worker.send(event(b, 'B2'), 62);
+      expect(posted.filter(batch => batch.conversationId === b)).toHaveLength(1);
+      const goal = worker.send({ type: 'goal_draft', conversationId: b, turnId: 'B-final' }, 62);
+      releaseB();
+      await expect(goal).resolves.toMatchObject({ ok: true });
+      expect(aFinished).toBe(false);
+      expect(drafts).toBe(1);
+      expect(posted.filter(batch => batch.conversationId === b).flatMap(batch => batch.events.map(row => row.text))).toEqual(['B1', 'B2']);
+      expect(maximum).toBe(2);
+      expect(overlaps).toBe(0);
+      expect(journalOf(session).map(entry => entry.conversationId)).toEqual([a]);
+    } finally { releaseA(); releaseB(); }
+    await pendingA;
+    expect(journalOf(session)).toEqual([]);
+  });
+
+  it('keeps command-receipt custody and failed batches isolated while another transport slot is busy', async () => {
+    const a = '11111111-2222-3333-4444-555555555555';
+    const b = 'aaaaaaaa-bbbb-cccc-dddd-eeeeeeeeeeee';
+    const c = '33333333-4444-5555-6666-777777777777';
+    const d = '44444444-5555-6666-7777-888888888888';
+    const local = new FakeStorageArea({ port: 8765, token: 'paired-token' });
+    const session = new FakeStorageArea();
+    let release!: () => void;
+    const gate = new Promise<void>(resolve => { release = resolve; });
+    let healthy = false;
+    const posted: string[] = [];
+    const worker = loadWorker({ local, session, fetch: async (input, init = {}) => {
+      const url = new URL(input);
+      if (url.pathname === '/hello') return response(200, { app: 'chat-on-steroids', paired: true });
+      if (url.pathname === '/commands/ack') return healthy ? response(200, { ok: true }) : response(503, {});
+      if (url.pathname === '/events') {
+        const id = JSON.parse(String(init.body)).conversationId;
+        posted.push(id);
+        if (id === a) await gate;
+        if (id === c && !healthy) return response(503, {});
+        return response(200, { stored: 1 });
+      }
+      return response(404, {});
+    } });
+    await worker.send({ type: 'ack', id: 'blocked-command', status: 'sent', conversationId: b }, 62);
+    const row = (conversationId: string) => ({ conversationId, event: { kind: 'progress', time: Date.now(), text: conversationId } });
+    const pending = worker.send({ type: 'events', entries: [a, b, c, d].map(row) }, 61);
+    try {
+      await vi.waitFor(() => expect(posted).toContain(d));
+      expect(posted).not.toContain(b);
+      expect(posted.filter(id => id === c)).toHaveLength(1);
+      await expect(worker.send({ type: 'goal_draft', conversationId: b, turnId: 'blocked' }, 62))
+        .resolves.toMatchObject({ ok: false, error: 'transcript_not_delivered' });
+      expect(journalOf(session).map(entry => entry.conversationId)).toEqual([a, b, c]);
+    } finally { release(); }
+    await pending;
+    healthy = true;
+    await worker.send({ type: 'status' }, 62);
+    await vi.waitFor(() => expect(journalOf(session)).toEqual([]));
+    expect(posted).toContain(b);
+    expect(posted.filter(id => id === c)).toHaveLength(2);
+  });
+
+  it('yields a hot conversation to an unserved conversation between batches', async () => {
+    const a = '11111111-2222-3333-4444-555555555555';
+    const b = 'aaaaaaaa-bbbb-cccc-dddd-eeeeeeeeeeee';
+    const c = '33333333-4444-5555-6666-777777777777';
+    const local = new FakeStorageArea({ port: 8765, token: 'paired-token' });
+    const session = new FakeStorageArea();
+    let release!: () => void;
+    const gate = new Promise<void>(resolve => { release = resolve; });
+    const posted: string[] = [];
+    const worker = loadWorker({ local, session, fetch: async (input, init = {}) => {
+      const url = new URL(input);
+      if (url.pathname === '/hello') return response(200, { app: 'chat-on-steroids', paired: true });
+      if (url.pathname === '/events') {
+        const id = JSON.parse(String(init.body)).conversationId;
+        posted.push(id);
+        if (id === a) await gate;
+        return response(200, { stored: 1 });
+      }
+      return response(404, {});
+    } });
+    const row = (conversationId: string, index: number) => ({ conversationId, event: { kind: 'progress', time: index, text: String(index) } });
+    const pending = worker.send({ type: 'events', entries: [row(a, 0), ...Array.from({ length: 101 }, (_, i) => row(b, i)), row(c, 0)] });
+    try {
+      await vi.waitFor(() => expect(posted).toHaveLength(4));
+      expect(posted).toEqual([a, b, c, b]);
+    } finally { release(); }
+    await pending;
+    expect(journalOf(session)).toEqual([]);
+  });
+
   it('does not permanently settle a worker command merely because its bootstrap message was sent', async () => {
     const local = new FakeStorageArea({ port: 8765, token: 'paired-token' });
     const session = new FakeStorageArea();
@@ -2643,6 +2846,159 @@ describe('extension observation journal', () => {
     expect(closed).toEqual([conversationId]);
   });
 
+  it('relays one exact recorded-call disclosure only while its document and route stay current', async () => {
+    const conversationId = '11111111-2222-3333-4444-555555555555';
+    const other = 'aaaaaaaa-bbbb-cccc-dddd-eeeeeeeeeeee';
+    let tabUrl = `https://chatgpt.com/c/${conversationId}`;
+    let tabStatus = 'complete';
+    let pendingUrl: string | undefined;
+    const detailBodies: unknown[] = [];
+    const fetch = vi.fn(async (input: string, init: Record<string, unknown> = {}) => {
+      const path = new URL(input).pathname;
+      if (path === '/hello') return response(200, { app: 'chat-on-steroids', paired: true });
+      if (path === '/activity/detail') {
+        detailBodies.push(JSON.parse(String(init.body)));
+        return response(200, { ok: true, conversationId, callId: 'call-1', detailRevision: 17 });
+      }
+      return response(200, {});
+    });
+    const worker = loadWorker({
+      local: new FakeStorageArea({ port: 8765, token: 'paired-token' }),
+      session: new FakeStorageArea(),
+      fetch,
+      tabsGet: async (id) => ({ id, url: tabUrl, status: tabStatus, ...(pendingUrl ? { pendingUrl } : {}) })
+    });
+
+    await worker.send({ type: 'bind', conversationId }, 63);
+    await expect(worker.send({ type: 'activity_detail', conversationId, callId: 'call-1', detailRevision: 17 }, 63))
+      .resolves.toMatchObject({ ok: true, data: { callId: 'call-1', detailRevision: 17 } });
+    expect(detailBodies).toEqual([{ conversationId, callId: 'call-1', detailRevision: 17 }]);
+
+    await expect(worker.send({ type: 'activity_detail', conversationId, callId: ['call-1'], detailRevision: 17 }, 63))
+      .resolves.toMatchObject({ ok: false, status: 400, error: 'bad_activity_detail' });
+    await expect(worker.send({ type: 'activity_detail', conversationId, callId: 'call-1', detailRevision: 0 }, 63))
+      .resolves.toMatchObject({ ok: false, status: 400, error: 'bad_activity_detail' });
+    await expect(worker.send({ type: 'activity_detail', conversationId: other, callId: 'call-1', detailRevision: 17 }, 63))
+      .resolves.toMatchObject({ ok: false, error: 'stale_document' });
+    tabStatus = 'loading';
+    await expect(worker.send({ type: 'activity_detail', conversationId, callId: 'call-1', detailRevision: 17 }, 63))
+      .resolves.toMatchObject({ ok: false, error: 'stale_document' });
+    tabStatus = 'complete'; pendingUrl = tabUrl;
+    await expect(worker.send({ type: 'activity_detail', conversationId, callId: 'call-1', detailRevision: 17 }, 63))
+      .resolves.toMatchObject({ ok: false, error: 'stale_document' });
+    pendingUrl = undefined;
+    tabUrl = `https://chatgpt.com/c/${other}`;
+    await expect(worker.send({ type: 'activity_detail', conversationId, callId: 'call-1', detailRevision: 17 }, 63))
+      .resolves.toMatchObject({ ok: false, error: 'stale_document' });
+    expect(detailBodies).toHaveLength(1);
+  });
+
+  it('discards a recorded-call detail response if the browser route changes during the read', async () => {
+    const conversationId = '11111111-2222-3333-4444-555555555555';
+    const other = 'aaaaaaaa-bbbb-cccc-dddd-eeeeeeeeeeee';
+    let tabUrl = `https://chatgpt.com/c/${conversationId}`;
+    const fetch = vi.fn(async (input: string) => {
+      const path = new URL(input).pathname;
+      if (path === '/hello') return response(200, { app: 'chat-on-steroids', paired: true });
+      if (path === '/activity/detail') {
+        tabUrl = `https://chatgpt.com/c/${other}`;
+        return response(200, { ok: true, conversationId, callId: 'call-1', detailRevision: 17 });
+      }
+      return response(200, {});
+    });
+    const worker = loadWorker({
+      local: new FakeStorageArea({ port: 8765, token: 'paired-token' }),
+      session: new FakeStorageArea(), fetch,
+      tabsGet: async (id) => ({ id, url: tabUrl, status: 'complete' })
+    });
+
+    await worker.send({ type: 'bind', conversationId }, 64);
+    await expect(worker.send({ type: 'activity_detail', conversationId, callId: 'call-1', detailRevision: 17 }, 64))
+      .resolves.toMatchObject({ ok: false, error: 'stale_document' });
+    expect(fetch.mock.calls.filter(([input]) => new URL(String(input)).pathname === '/activity/detail')).toHaveLength(1);
+  });
+
+  it.each(['absent', 'present', 'query-failed', 'same-chat', 'pending-chat', 'still-loading'])(
+    'only closes a URL-redacted completed departure with positive absence: %s', async (mode) => {
+      const conversationId = '11111111-2222-3333-4444-555555555555';
+      const session = new FakeStorageArea();
+      const closed: string[] = [];
+      let completed = false;
+      const worker = loadWorker({
+        local: new FakeStorageArea({ port: 8765, token: 'paired-token' }), session,
+        tabsGet: async () => ({ id: 12, status: completed && mode !== 'still-loading' ? 'complete' : 'loading',
+          ...(mode === 'same-chat' ? { url: `https://chatgpt.com/c/${conversationId}` } : {}),
+          ...(mode === 'pending-chat' ? { pendingUrl: `https://chatgpt.com/c/${conversationId}` } : {}) }),
+        tabsQuery: async () => {
+          if (mode === 'query-failed') throw new Error('query unavailable');
+          return mode === 'present' ? [{ id: 12 }] : [];
+        },
+        fetch: async (input, init = {}) => {
+          const path = new URL(input).pathname;
+          if (path === '/hello') return response(200, { app: 'chat-on-steroids', paired: true });
+          if (path === '/closed') closed.push(JSON.parse(String(init.body)).conversationId);
+          return response(200, {});
+        }
+      });
+      await worker.send({ type: 'bind', conversationId }, 12);
+      await worker.startTabNavigation(12);
+      expect(closed).toEqual([]);
+      completed = true;
+      await worker.completeTabNavigation(12);
+      await worker.completeTabNavigation(12);
+      expect(closed).toEqual(mode === 'absent' ? [conversationId] : []);
+      expect(session.data.tabConversations).toEqual(mode === 'absent' ? {} : { '12': conversationId });
+    }
+  );
+
+  it('does not let delayed departure absence release a newly registered document', async () => {
+    const conversationId = '11111111-2222-3333-4444-555555555555';
+    const session = new FakeStorageArea();
+    const closed: string[] = [];
+    let finishQuery!: (tabs: []) => void;
+    const worker = loadWorker({
+      local: new FakeStorageArea({ port: 8765, token: 'paired-token' }), session,
+      tabsGet: async () => ({ id: 12, status: 'complete' }),
+      tabsQuery: () => new Promise((resolve) => { finishQuery = resolve; }),
+      fetch: async (input, init = {}) => {
+        const path = new URL(input).pathname;
+        if (path === '/hello') return response(200, { app: 'chat-on-steroids', paired: true });
+        if (path === '/closed') closed.push(JSON.parse(String(init.body)).conversationId);
+        return response(200, {});
+      }
+    });
+    await worker.send({ type: 'bind', conversationId }, 12);
+    await worker.startTabNavigation(12);
+    await worker.completeTabNavigation(12);
+    await worker.registerTab(12, 'replacement-document');
+    finishQuery([]);
+    await new Promise((resolve) => setTimeout(resolve, 0));
+    expect(closed).toEqual([]);
+    expect(session.data.tabConversations).toEqual({ '12': conversationId });
+    expect(session.data.tabDocuments).toMatchObject({ '12': 'replacement-document' });
+  });
+
+  it('uses the pending destination before an old committed ChatGPT URL', async () => {
+    const conversationId = '11111111-2222-3333-4444-555555555555';
+    const session = new FakeStorageArea();
+    const closed: string[] = [];
+    const worker = loadWorker({
+      local: new FakeStorageArea({ port: 8765, token: 'paired-token' }), session,
+      tabsGet: async () => ({ id: 12, status: 'loading',
+        url: `https://chatgpt.com/c/${conversationId}`, pendingUrl: 'https://example.com/away' }),
+      fetch: async (input, init = {}) => {
+        const path = new URL(input).pathname;
+        if (path === '/hello') return response(200, { app: 'chat-on-steroids', paired: true });
+        if (path === '/closed') closed.push(JSON.parse(String(init.body)).conversationId);
+        return response(200, {});
+      }
+    });
+    await worker.send({ type: 'bind', conversationId }, 12);
+    await worker.startTabNavigation(12);
+    expect(closed).toEqual([conversationId]);
+    expect(session.data.tabConversations).toEqual({});
+  });
+
   it('closes a conversation when its tab survives but navigates away from ChatGPT', async () => {
     const local = new FakeStorageArea({ port: 8765, token: 'paired-token' });
     const session = new FakeStorageArea();
@@ -3135,7 +3491,7 @@ describe('extension connection', () => {
    */
   it('forwards an exact live request ownership handshake and returns the app read-back', async () => {
     const conversationId = 'abababab-cdcd-efef-1212-343434343434';
-    const requestId = '77186fb4-bdda-4849-8cd7-879bb08a1617';
+    const requestId = 'f0f00009-1111-4111-8111-111111111111';
     let body: any = null;
     const fetch = vi.fn(async (input: string, init: Record<string, unknown> = {}) => {
       const url = new URL(input);
@@ -3156,7 +3512,8 @@ describe('extension connection', () => {
     const worker = loadWorker({
       local: new FakeStorageArea({ port: 8765, token: 'paired-token' }),
       session: new FakeStorageArea(),
-      fetch
+      fetch,
+      tabsGet: async (id) => ({ id, url: `https://chatgpt.com/c/${conversationId}` })
     });
 
     const reply = await worker.send({
@@ -3174,6 +3531,33 @@ describe('extension connection', () => {
       status: 200,
       data: { conversationId, confirmed: [requestId], complete: true }
     });
+  });
+
+  it('does not publish request ownership from a document on another conversation route', async () => {
+    const conversationId = 'abababab-cdcd-efef-1212-343434343434';
+    const otherConversationId = '11111111-2222-3333-4444-555555555555';
+    const requested: string[] = [];
+    const fetch = vi.fn(async (input: string) => {
+      const pathname = new URL(input).pathname;
+      requested.push(pathname);
+      return pathname === '/hello'
+        ? response(200, { app: 'chat-on-steroids', paired: true })
+        : response(200, { ok: true });
+    });
+    const worker = loadWorker({
+      local: new FakeStorageArea({ port: 8765, token: 'paired-token' }),
+      session: new FakeStorageArea(),
+      fetch,
+      tabsGet: async (id) => ({ id, url: `https://chatgpt.com/c/${otherConversationId}` })
+    });
+
+    await expect(worker.send({
+      type: 'correlate',
+      conversationId,
+      calls: [{ messageId: 'request-message', tool: 'exec_command', order: 0, answered: false,
+        requestId: 'f0f00009-1111-4111-8111-111111111111' }]
+    })).resolves.toMatchObject({ ok: false, error: 'stale_document' });
+    expect(requested).not.toContain('/correlations');
   });
 
   it('does not re-ask where the app is before every single request', async () => {
@@ -3380,6 +3764,14 @@ describe('the overlay stylesheet', () => {
     expect(used.size, 'the stylesheet animates nothing — has the namespace changed?').toBeGreaterThan(0);
     expect([...used].filter((name) => !defined.has(name))).toEqual([]);
   });
+
+  it('wraps long recorded call lines inside their disclosure panel', async () => {
+    const css = await fs.readFile(path.join(process.cwd(), 'extension', 'overlay.css'), 'utf8');
+    const rule = /\.clf-stream-recorded-detail\s+pre\s*\{([^}]+)\}/.exec(css)?.[1] ?? '';
+    expect(rule).toMatch(/white-space:\s*pre-wrap/);
+    expect(rule).toMatch(/overflow-wrap:\s*anywhere/);
+    expect(rule).toMatch(/overflow:\s*auto/);
+  });
 });
 
 /**
@@ -3457,23 +3849,95 @@ describe('the goal opening, which waits on a model', () => {
 });
 
 
-it.each(['matching', 'wrong-document', 'unsafe-draft', 'newer-navigation'])('retires a cancelled helper only under its exact safe claim: %s', async scenario => {
+it.each(['matching', 'wrong-document', 'unsafe-draft', 'newer-navigation', 'pinned', 'pinned-before-proof', 'pinned-during-proof'])('retires a cancelled helper only under its exact safe claim: %s', async scenario => {
   const conversationId = 'aaaaaaaa-bbbb-cccc-dddd-eeeeeeeeeeee';
-  const tab = { id: 71, url: `https://chatgpt.com/c/${conversationId}`, active: false };
+  const tab = { id: 71, url: `https://chatgpt.com/c/${conversationId}`, active: false, pinned: scenario === 'pinned' };
   const claims = [{ id: 'old-input', owner: '71:doc:0', conversationId }, { id: 'new-input', owner: '71:doc:0', conversationId }];
   const tabsRemove = vi.fn();
-  const sendMessage = vi.fn(async (..._args: unknown[]) => ({ safe: scenario !== 'unsafe-draft', conversationId, navigationEpoch: 0 }));
+  const sendMessage = vi.fn(async (..._args: unknown[]) => {
+    if (scenario === 'pinned-during-proof') tab.pinned = true;
+    return { safe: scenario !== 'unsafe-draft', conversationId, navigationEpoch: 0 };
+  });
   const code = backgroundSource.slice(backgroundSource.indexOf('async function pruneManagedTabs('), backgroundSource.indexOf('\nfunction maintain(', backgroundSource.indexOf('async function pruneManagedTabs(')));
-  const bounded = backgroundSource.slice(backgroundSource.indexOf('async function boundedDocumentMessage('), backgroundSource.indexOf('\nconst desktopInputOffers', backgroundSource.indexOf('async function boundedDocumentMessage(')));
-  const prune = vm.runInNewContext(`${bounded}\n${code}\npruneManagedTabs`, {
-    setTimeout, clearTimeout,
+  const prune = vm.runInNewContext(`${code}\npruneManagedTabs`, {
     cleanConversationId: (id: string) => id, conversationForTab: () => conversationId,
     conversationFromUrl: (url: string) => url.split('/c/')[1], tabDocuments: { '71': scenario === 'wrong-document' ? 'replacement' : 'doc' },
     tabEpochs: { '71': 0 }, ownsDocument: () => true, journalCountForConversation: () => 0,
-    chrome: { tabs: { get: async () => ({ ...tab, ...(scenario === 'newer-navigation' ? { pendingUrl: 'https://chatgpt.com/' } : {}) }),
+    tabReply: (...args: unknown[]) => sendMessage(...args),
+    chrome: { tabs: { get: async () => ({ ...tab, pinned: tab.pinned || scenario === 'pinned-before-proof', ...(scenario === 'newer-navigation' ? { pendingUrl: 'https://chatgpt.com/' } : {}) }),
       sendMessage, remove: tabsRemove } }
   });
   await prune([tab], { managedConversations: [conversationId], retiredConversations: [conversationId], cancelledDecisionClaims: claims }, new Set(), new Set());
   expect(tabsRemove).toHaveBeenCalledTimes(scenario === 'matching' ? 1 : 0);
   if (scenario === 'matching') expect(sendMessage.mock.calls[0]?.[1]).toMatchObject({ cancelledDecisions: claims });
+});
+
+it.each(['idle', 'selected', 'selected-before-proof', 'selected-during-proof', 'draft', 'pinned', 'navigation', 'journal'])('releases an idle page only while its document remains unused: %s', async scenario => {
+  const conversationId = 'aaaaaaaa-bbbb-cccc-dddd-eeeeeeeeeeee';
+  const tab = { id: 71, url: `https://chatgpt.com/c/${conversationId}`, active: scenario === 'selected', pinned: scenario === 'pinned' };
+  const remove = vi.fn();
+  const code = backgroundSource.slice(backgroundSource.indexOf('async function pruneManagedTabs('), backgroundSource.indexOf('\nfunction maintain(', backgroundSource.indexOf('async function pruneManagedTabs(')));
+  let probed = false;
+  const prune = vm.runInNewContext(`${code}\npruneManagedTabs`, {
+    cleanConversationId: (id: string) => id, conversationForTab: () => conversationId,
+    conversationFromUrl: (url: string) => url.split('/c/')[1], tabDocuments: { '71': 'doc' },
+    tabEpochs: { '71': 0 }, ownsDocument: () => true,
+    journalCountForConversation: () => scenario === 'journal' && probed ? 1 : 0,
+    tabReply: async () => {
+      probed = true;
+      if (scenario === 'selected-during-proof') tab.active = true;
+      return { safe: scenario !== 'draft', conversationId, navigationEpoch: 0 };
+    },
+    chrome: { tabs: { get: async () => ({ ...tab, active: tab.active || scenario === 'selected-before-proof',
+      ...(scenario === 'navigation' && probed ? { pendingUrl: 'https://chatgpt.com/' } : {}) }), remove } }
+  });
+  await prune([tab], { managedConversations: [conversationId] }, new Set(), new Set([conversationId]));
+  expect(remove).toHaveBeenCalledTimes(scenario === 'idle' ? 1 : 0);
+});
+
+it.each([
+  { name: 'just read then switched away', age: 0, close: false },
+  { name: 'one millisecond before grace expires', age: 299_999, close: false },
+  { name: 'exact grace boundary', age: 300_000, close: true },
+  { name: 'old access', age: 600_000, close: true },
+  { name: 'absent timestamp', timestamp: undefined, close: true },
+  { name: 'invalid timestamp', timestamp: NaN, close: true },
+  { name: 'infinite timestamp', timestamp: Infinity, close: true },
+  { name: 'zero timestamp', timestamp: 0, close: true },
+  { name: 'negative timestamp', timestamp: -1, close: true },
+  { name: 'future timestamp', age: -1, close: true },
+  { name: 'read and left before proof', age: 600_000, freshAt: 1, close: false },
+  { name: 'read and left during proof', age: 600_000, freshAt: 2, close: false },
+  { name: 'explicit retired cleanup', age: 0, retired: true, close: true },
+  { name: 'surplus copy cleanup', age: 10, duplicate: true, close: true }
+])('honors tab-local reading intent without changing separate retirement authority: $name', async scenario => {
+  const conversationId = 'aaaaaaaa-bbbb-cccc-dddd-eeeeeeeeeeee';
+  const now = 1_800_000_000_000;
+  const tab = { id: 71, url: `https://chatgpt.com/c/${conversationId}`, active: false, pinned: false,
+    lastAccessed: 'age' in scenario ? now - scenario.age! : scenario.timestamp };
+  const remove = vi.fn();
+  const proof = vi.fn(async () => ({ safe: true, conversationId, navigationEpoch: 0 }));
+  let snapshots = 0;
+  const get = vi.fn(async () => ({ ...tab,
+    lastAccessed: ++snapshots === scenario.freshAt ? now : tab.lastAccessed }));
+  const code = backgroundSource.slice(backgroundSource.indexOf('async function pruneManagedTabs('),
+    backgroundSource.indexOf('\nfunction maintain(', backgroundSource.indexOf('async function pruneManagedTabs(')));
+  const prune = vm.runInNewContext(`${code}\npruneManagedTabs`, {
+    Date: { now: () => now },
+    cleanConversationId: (id: string) => id, conversationForTab: () => conversationId,
+    conversationFromUrl: (url: string) => url.split('/c/')[1], tabDocuments: { '71': 'doc' },
+    tabEpochs: { '71': 0 }, ownsDocument: (source: { tab: number }) => source.tab === 71,
+    journalCountForConversation: () => 0, tabReply: proof, chrome: { tabs: { get, remove } }
+  });
+  const policy = { managedConversations: [conversationId], idleCloseAfterMs: 300_000,
+    retiredConversations: scenario.retired ? [conversationId] : [],
+    conversationActivityAt: { [conversationId]: now - 3_600_000 } };
+  const tabs = scenario.duplicate ? [tab, { ...tab, id: 72, lastAccessed: now }] : [tab];
+  const remaining = await prune(tabs, policy, new Set(), new Set([conversationId]));
+  expect(remove.mock.calls).toEqual(scenario.close ? [[71]] : []);
+  expect(remaining.map((held: { id: number }) => held.id)).toEqual(
+    scenario.close ? tabs.filter(held => held.id !== 71).map(held => held.id) : tabs.map(held => held.id));
+  if (scenario.freshAt === 1) expect(proof).not.toHaveBeenCalled();
+  if (scenario.freshAt === 2) expect(proof).toHaveBeenCalledOnce();
+  expect(policy.conversationActivityAt[conversationId]).toBe(now - 3_600_000);
 });

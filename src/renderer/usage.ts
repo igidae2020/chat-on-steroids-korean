@@ -1,3 +1,4 @@
+import { ui, t } from './i18n.js';
 import { $, el, run } from './dom.js';
 import { DEFAULT_USAGE_FORMULA, usageEstimate, usageModelGroups, usageRate, type UsageFormula, type UsageOverview } from '../shared/usage.js';
 let snapshot: UsageOverview | null = null;
@@ -10,9 +11,9 @@ function saveFormula(): void {
 
 const count = new Intl.NumberFormat(undefined, { notation: 'compact', maximumFractionDigits: 1 });
 const money = new Intl.NumberFormat(undefined, { style: 'currency', currency: 'USD', maximumFractionDigits: 2 });
-const featureLabels: Record<string, string> = { deep_research: '심층 리서치', file_upload: '파일 업로드', paste_text_to_file: '붙여넣은 텍스트 파일', image_gen: '이미지 생성' };
-function usageHint(node: HTMLElement, text: string): void {
-  node.dataset.usageHint = text;
+const featureLabels: Record<string, string> = { deep_research: "Deep research", file_upload: "File uploads", paste_text_to_file: "Pasted text files", image_gen: "Image generation" };
+function usageHint(node: HTMLElement, text: string | (() => string)): void {
+  ui(node, 'data-usage-hint', typeof text === 'function' ? text : () => text);
   node.setAttribute('tabindex', '0');
   const hide = () => document.getElementById('usageTooltip')?.remove();
   const show = () => {
@@ -33,41 +34,44 @@ export async function refreshUsage(): Promise<void> {
   const generation = ++loadGeneration;
   $('refreshUsage').setAttribute('disabled', '');
   const status = $('usageStatus');
-  status.textContent = snapshot ? '갱신 중…' : '기록된 도구 사용량 계산 중…';
+  ui(status, 'textContent', () => t("Updating usage in the background. After an update, this can take a few minutes. You can keep using the app."));
   status.setAttribute('role', 'status');
   try {
     const [value, catalog] = await Promise.all([run(window.api.getUsage()), run(window.api.getChatModels())]);
     if (generation !== loadGeneration) return;
-    if (!value) { status.textContent = '사용량을 불러오지 못했습니다. 새로고침하세요.'; return; }
+    if (!value) { ui(status, 'textContent', () => t("Usage could not be loaded. Try Refresh.")); return; }
     snapshot = value;
     const summary = $('usageSummary'); summary.replaceChildren();
-    for (const [label, number] of [['처리 토큰 · 추정', value.tokens], ['일일 최대 토큰', Math.max(0, ...value.days.map((day) => day.tokens))], ['대화 수', value.sessions], ['활동 일수', value.days.filter((day) => day.tokens > 0).length]] as const) {
-      const item = el('div'); item.dataset.usageMetric = label; usageHint(item, `${Math.round(number).toLocaleString()} ${label.toLowerCase()}`); item.append(el('strong', '', count.format(number)), el('span', '', label)); summary.append(item);
+    for (const [label, number] of [['Processed tokens · est.', value.tokens], ['Peak daily tokens', Math.max(0, ...value.days.map((day) => day.tokens))], ['Conversations', value.sessions], ['Active days', value.days.filter((day) => day.tokens > 0).length]] as const) {
+      const item = el('div'); item.dataset.usageMetric = label; usageHint(item, () => `${Math.round(number).toLocaleString()} ${t(label).toLowerCase()}`); item.append(el('strong', '', count.format(number)), el('span', '', () => t(label))); summary.append(item);
     }
     const limits = $('modelUsage'); limits.replaceChildren();
     const modelRows = value.limits.filter((row) => row.scope === 'model');
     const knownModels = catalog?.models ?? [];
     for (const model of knownModels.filter((item) => !modelRows.some((row) => row.model === item.id))) {
-      const row = el('div', 'usage-limit'); row.append(el('strong', '', model.label), el('span', 'muted', 'ChatGPT에서 보고되지 않음')); limits.append(row);
+      const row = el('div', 'usage-limit'); row.append(el('strong', '', model.label), el('span', 'muted', () => t("Not reported by ChatGPT"))); limits.append(row);
     }
     for (const entry of [...modelRows, ...value.limits.filter((row) => row.scope !== 'model')]) {
       const stale = Date.now() - entry.observedAt > 10 * 60000 || (entry.resetAt !== null && entry.resetAt <= Date.now());
       const row = el('div', 'usage-limit');
-      const displayName = entry.scope === 'feature' ? featureLabels[entry.model] ?? entry.model : entry.model;
+      const featureLabel = featureLabels[entry.model];
+      const displayName = () => entry.scope === 'feature' && featureLabel ? t(featureLabel) : entry.model;
       const name = el('div'); name.append(el('strong', '', displayName));
-      if (entry.scope !== 'model') name.append(el('small', 'muted', entry.scope === 'shared' ? '공유 사용량 한도' : '기능별 한도'));
+      if (entry.scope !== 'model') name.append(el('small', 'muted', () => entry.scope === 'shared' ? t("Shared usage pool") : t("Feature quota")));
       const detail = el('div');
-      detail.append(el('b', '', stale ? '새로고침 필요' : entry.remaining !== null ? `${entry.remaining.toLocaleString()} 남음` : entry.remainingPercent !== null ? `${Math.round(entry.remainingPercent)}% 남음` : '보고되지 않음'));
-      const window = entry.windowSeconds === 604800 ? '주간 · ' : entry.windowSeconds ? `${Math.round(entry.windowSeconds / 3600)}시간 구간 · ` : '';
-      detail.append(el('small', 'muted', window + (entry.resetAt ? `초기화 ${new Date(entry.resetAt).toLocaleString()}` : '초기화 시각 미보고')));
-      if (entry.remainingPercent !== null && !stale) { const progress = document.createElement('progress'); progress.max = 100; progress.value = entry.remainingPercent; progress.setAttribute('aria-label', `${displayName}: ${entry.remainingPercent}% 남음`); detail.append(progress); }
+      detail.append(el('b', '', () => stale ? t("Refresh needed") : entry.remaining !== null ? t("{0} remaining", [entry.remaining.toLocaleString()]) : entry.remainingPercent !== null ? t("{0}% remaining", [Math.round(entry.remainingPercent)]) : t("Not reported")));
+      const window = () => entry.windowSeconds === 604800 ? t("Weekly · ") : entry.windowSeconds ? t("{0}h window · ", [Math.round(entry.windowSeconds / 3600)]) : '';
+      detail.append(el('small', 'muted', () => window() + (entry.resetAt ? t("Resets {0}", [new Date(entry.resetAt).toLocaleString()]) : t("Reset not reported"))));
+      if (entry.remainingPercent !== null && !stale) { const progress = document.createElement('progress'); progress.max = 100; progress.value = entry.remainingPercent; ui(progress, 'aria-label', () => t("{0}: {1}% remaining", [displayName(), entry.remainingPercent])); detail.append(progress); }
       row.append(name, detail); limits.append(row);
     }
-    if (!modelRows.length) limits.append(el('p', 'muted', 'ChatGPT에서 모델별 남은 메시지 수를 보고하지 않았습니다. 공유 사용량·기능별 한도를 모델별 잔량으로 해석할 수 없습니다.'));
-    const totalCost = el('div'); totalCost.append(el('strong', '', '—'), el('span', '', '환산 비용 추정 · USD')); totalCost.id = 'usageTotalCost'; usageHint(totalCost, ''); summary.prepend(totalCost);
+    if (!modelRows.length) limits.append(el('p', 'muted', () => t("ChatGPT has not reported per-model message balances. Shared usage and feature quotas do not establish a model-specific balance.")));
+    const totalCost = el('div'); totalCost.append(el('strong', '', '—'), el('span', '', () => t("Estimated equivalent · USD"))); totalCost.id = 'usageTotalCost'; usageHint(totalCost, ''); summary.prepend(totalCost);
     paintRates();
     paintCost();
-    status.textContent = '기록된 모델 정보를 사용하며 누락된 기록은 GPT-5.6 High로 가정합니다. 바뀌지 않은 기록은 저장된 합계를 재사용합니다.';
+    ui(status, 'textContent', () => t("Recorded model attribution; missing history assumes GPT-5.6 High. Unchanged recordings reuse saved totals."));
+  } catch {
+    if (generation === loadGeneration) ui(status, 'textContent', () => t("Usage could not be loaded. Try Refresh."));
   } finally { if (generation === loadGeneration) $('refreshUsage').removeAttribute('disabled'); }
 }
 function paintRates(): void {
@@ -75,9 +79,9 @@ function paintRates(): void {
   const host = $('usageRates'); host.replaceChildren();
   for (const model of [...new Set(snapshot.models.map(row => row.model))].sort()) {
     const label = el('label', 'setting'); const text = el('span', 'setting-text');
-    text.append(el('b', '', model), el('em', '', usageRate(model, DEFAULT_USAGE_FORMULA) !== undefined ? '캐시 입력 100만 토큰당 USD · 편집 가능한 공식 기준 단가(2026-09-07 확인)' : '캐시 입력 100만 토큰당 USD · 확인한 비교 단가를 입력하세요'));
-    const input = document.createElement('input'); input.type = 'number'; input.min = '0'; input.step = '0.01'; input.placeholder = '단가 미확인'; input.value = usageRate(model, formula)?.toString() ?? '';
-    input.setAttribute('aria-label', `${model} 캐시 입력 100만 토큰당 USD`);
+    text.append(el('b', '', model), el('em', '', () => usageRate(model, DEFAULT_USAGE_FORMULA) !== undefined ? t("USD / 1M cached input · editable official baseline, checked 7 September 2026") : t("USD / 1M cached input · enter a verified comparison rate")));
+    const input = document.createElement('input'); input.type = 'number'; input.min = '0'; input.step = '0.01'; ui(input, 'placeholder', () => t("Unknown rate")); input.value = usageRate(model, formula)?.toString() ?? '';
+    ui(input, 'aria-label', () => t("{0} cached-input USD per million tokens", [model]));
     input.addEventListener('input', () => {
       if (input.value === '') formula.rates[model] = null;
       else if (input.validity.valid && Number.isFinite(input.valueAsNumber)) formula.rates[model] = input.valueAsNumber;
@@ -90,38 +94,38 @@ function paintRates(): void {
 function paintCost(): void {
   if (!snapshot) return;
   const total = usageEstimate(snapshot.models, formula);
-  const costText = (estimate: ReturnType<typeof usageEstimate>) => estimate.unpricedTokens > 0 ? `${money.format(estimate.cost)} + 미산정` : money.format(estimate.cost);
+  const costText = (estimate: ReturnType<typeof usageEstimate>) => estimate.unpricedTokens > 0 ? t("{0} + unpriced", [money.format(estimate.cost)]) : money.format(estimate.cost);
   const costSummary = document.getElementById('usageTotalCost');
   if (costSummary) {
-    costSummary.querySelector('strong')!.textContent = costText(total);
-    costSummary.dataset.usageHint = `추정 토큰 ${Math.round(total.tokens).toLocaleString()}개 중 ${Math.round(total.unpricedTokens).toLocaleString()}개는 비교 단가가 없습니다. 캐시 입력 환산치이며 청구액이 아닙니다.`;
+    ui(costSummary.querySelector('strong')!, 'textContent', () => costText(total));
+    ui(costSummary, 'data-usage-hint', () => t('{0} estimated tokens; {1} have no comparison rate. Cached-input equivalent, not a bill.', [Math.round(total.tokens).toLocaleString(), Math.round(total.unpricedTokens).toLocaleString()]));
   }
   const daily = snapshot.days.map(day => ({ ...day, ...usageEstimate(day.models, formula) }));
-  for (const [label, number] of [['처리 토큰 · 추정', total.tokens], ['일일 최대 토큰', Math.max(0, ...daily.map(day => day.tokens))]] as const) {
+  for (const [label, number] of [['Processed tokens · est.', total.tokens], ['Peak daily tokens', Math.max(0, ...daily.map(day => day.tokens))]] as const) {
     const item = [...$('usageSummary').children].find(node => (node as HTMLElement).dataset.usageMetric === label) as HTMLElement | undefined;
-    if (item) { item.querySelector('strong')!.textContent = count.format(number); item.dataset.usageHint = `${Math.round(number).toLocaleString()} ${label.toLowerCase()}`; }
+    if (item) { item.querySelector('strong')!.textContent = count.format(number); ui(item, 'data-usage-hint', () => `${Math.round(number).toLocaleString()} ${t(label).toLowerCase()}`); }
   }
   const heat = $('usageHeatmap'); heat.replaceChildren();
   const byDay = new Map(daily.map(day => [day.date, day.tokens])); const peak = Math.max(1, ...daily.map(day => day.tokens));
   for (let ago = 363; ago >= 0; ago--) {
     const date = new Date(); date.setDate(date.getDate() - ago); const key = dateKey(date), tokens = byDay.get(key) ?? 0;
-    const cell = el('span', 'heat-cell'); cell.dataset.level = String(tokens ? Math.max(1, Math.ceil(tokens / peak * 4)) : 0); const hint = `${key}: 추정 토큰 ${Math.round(tokens).toLocaleString()}개`; usageHint(cell, hint); cell.setAttribute('aria-label', hint); heat.append(cell);
+    const cell = el('span', 'heat-cell'); cell.dataset.level = String(tokens ? Math.max(1, Math.ceil(tokens / peak * 4)) : 0); const hint = () => t("{0}: {1} estimated tokens", [key, Math.round(tokens).toLocaleString()]); usageHint(cell, hint); ui(cell, 'aria-label', hint); heat.append(cell);
   }
-  $('usageFormula').textContent = `최종 대화 맥락 × 고유 도구 호출 수 ÷ ${formula.divisor} × 모델별 캐시 입력 단가 ÷ 100만 × ${formula.multiplier}.`;
-  $('usageCost').textContent = `${costText(total)} 환산 비용 추정. ${total.unpricedTokens ? `${Math.round(total.unpricedTokens).toLocaleString()}토큰은 단가가 없습니다. ` : ''}비교용 추정치이며 청구액이 아닙니다.`;
+  ui($('usageFormula'), 'textContent', () => t("Final frontend context (capped at {2} tokens for this estimate) × unique tool calls ÷ {0} × each model’s cached-input rate ÷ 1M × {1}.", [formula.divisor, formula.multiplier, snapshot!.contextTokenCap.toLocaleString()]));
+  ui($('usageCost'), 'textContent', () => t("{0} estimated equivalent. {1}This is a comparison, not a bill.", [costText(total), total.unpricedTokens ? t("{0} tokens have no rate. ", [Math.round(total.unpricedTokens).toLocaleString()]) : '']));
   const modelTable = el('table', 'usage-table'); const modelHead = el('tr');
-  for (const title of ['기록된 모델·추론 강도', '추정 토큰', '환산 비용 추정']) modelHead.append(el('th', '', title));
+  for (const title of ['Recorded model / effort', 'Estimated tokens', 'Estimated equivalent']) modelHead.append(el('th', '', () => t(title)));
   modelTable.append(modelHead);
   for (const entry of usageModelGroups(snapshot.models)) {
     const estimate = usageEstimate(entry.sources, formula); const row = el('tr');
-    const name = el('td', '', `${entry.model} · ${entry.reasoningEffort ?? '추론 강도 미확인'}${entry.assumed ? ' (가정)' : ''}`);
-    usageHint(name, `기록된 ID: ${[...new Set(entry.sources.map(source => source.model))].join(', ')}`);
-    row.append(name, el('td', '', Math.round(estimate.tokens).toLocaleString()), el('td', '', estimate.unpricedTokens > 0 && estimate.unpricedTokens === estimate.tokens ? '단가 미확인' : costText(estimate))); modelTable.append(row);
+    const name = el('td', '', () => `${entry.model} · ${entry.reasoningEffort ?? t("effort unknown")}${entry.assumed ? t(" (assumed)") : ''}`);
+    usageHint(name, () => t("Recorded IDs: {0}", [[...new Set(entry.sources.map(source => source.model))].join(', ')]));
+    row.append(name, el('td', '', Math.round(estimate.tokens).toLocaleString()), el('td', '', () => estimate.unpricedTokens > 0 && estimate.unpricedTokens === estimate.tokens ? t("Rate unknown") : costText(estimate))); modelTable.append(row);
   }
   const table = el('table', 'usage-table'); const head = el('tr');
-  head.append(el('th', '', '날짜'), el('th', '', '추정 토큰'), el('th', '', `캐시 입력 × ${formula.multiplier}`)); table.append(head);
+  head.append(el('th', '', () => t("Day")), el('th', '', () => t("Estimated tokens")), el('th', '', () => t("Cached × {0}", [formula.multiplier]))); table.append(head);
   for (const day of [...daily].reverse()) { const row = el('tr'); row.append(el('td', '', day.date), el('td', '', Math.round(day.tokens).toLocaleString()), el('td', '', costText(day))); table.append(row); }
-  if (!snapshot.days.length) { const row = el('tr'); const cell = el('td', 'muted', '기록된 도구 호출이 없습니다.'); cell.setAttribute('colspan', '3'); row.append(cell); table.append(row); }
+  if (!snapshot.days.length) { const row = el('tr'); const cell = el('td', 'muted', () => t("No recorded tool calls yet.")); cell.setAttribute('colspan', '3'); row.append(cell); table.append(row); }
   $('usageDays').replaceChildren(modelTable, table);
 }
 export function initUsage(): void {

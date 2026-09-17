@@ -3,6 +3,7 @@ import path from 'node:path';
 import { JSDOM } from 'jsdom';
 import { afterEach, expect, it, vi } from 'vitest';
 import { DEFAULT_GOAL_MODEL, DEFAULT_GOAL_SYSTEM_PROMPT } from '../src/shared/goal.js';
+import { BROWSER_READ_TOOLS, BROWSER_WRITE_TOOLS } from '../src/shared/browser-control.js';
 
 let dom: JSDOM | null = null;
 afterEach(() => {
@@ -139,7 +140,7 @@ it('does not overwrite a focused dirty settings field on an unsolicited state pu
     }
   ];
   stateListener(withTools);
-  expect(w.document.getElementById('facts')!.textContent).toContain('Core + Desktop 도구도구 총 3개');
+  expect(w.document.getElementById('facts')!.textContent).toContain('Tools across Core + Desktop3 total');
   expect(w.document.getElementById('facts')!.textContent).not.toContain('of 9');
 
   const withMissingMacAccess = structuredClone(withTools) as any;
@@ -156,8 +157,8 @@ it('does not overwrite a focused dirty settings field on an unsolicited state pu
   stateListener(withMissingMacAccess);
   const accessWarning = w.document.getElementById('desktopAccess')!;
   expect(accessWarning.hidden).toBe(false);
-  expect(accessWarning.textContent).toContain('손쉬운 사용: missing');
-  expect(accessWarning.textContent).toContain('네이티브 기능에서 확인한 현재 권한 상태');
+  expect(accessWarning.textContent).toContain('Accessibility: missing');
+  expect(accessWarning.textContent).toContain('live verdicts from the native backend');
   expect((w.document.getElementById('openDesktopScreen') as HTMLButtonElement).hidden).toBe(true);
   expect((w.document.getElementById('openDesktopAccessibility') as HTMLButtonElement).hidden).toBe(false);
 
@@ -422,10 +423,133 @@ async function mountChat(
 
 const settle = () => new Promise((resolve) => setTimeout(resolve, 0));
 
+const projectSidebarFixture = () => {
+  const project = { id: 'aaaaaaaa-bbbb-4ccc-8ddd-eeeeeeeeeeee', name: 'Collapsed project', path: 'C:\\repo', createdAt: 1 };
+  const session = { id: 'project-session', title: 'Project task', conversationId: 'chat-project', chatIds: ['chat-project'],
+    startedAt: 1, updatedAt: 2, endedAt: null, events: 0, userMessages: 0, toolCalls: 0,
+    lastToolCallAt: null, processExitNonzero: 0, toolRejected: 0, toolInternalErrors: 0, errors: 0,
+    estimatedTokens: 0, contextTokens: 0, lastHandoffId: null, lastHandoffAt: null,
+    lastTurnOutcome: null, activeTurnId: null, agents: [], origin: null, projectId: project.id };
+  return { project, session };
+};
+
+it('starts project groups collapsed and deliberately expands the project selected for a new chat', async () => {
+  const { project, session } = projectSidebarFixture();
+  const mounted = await mountChat({}, [], {
+    listProjects: async () => ({ ok: true, data: [project] }),
+    listSessions: async () => ({ ok: true, data: { sessions: [session], activeId: null, pressure: [], blocked: [] } })
+  });
+  const group = () => mounted.window.document.querySelector<HTMLDetailsElement>(`[data-project-id="${project.id}"]`)!;
+  await vi.waitFor(() => expect(group()).not.toBeNull());
+  expect(group().open).toBe(false);
+  (group().querySelector('.project-new') as HTMLButtonElement).click();
+  expect(group().open).toBe(true);
+});
+
+it('commits a project summary click before an immediate state repaint replaces its details node', async () => {
+  const { project, session } = projectSidebarFixture();
+  const mounted = await mountChat({}, [], {
+    listProjects: async () => ({ ok: true, data: [project] }),
+    listSessions: async () => ({ ok: true, data: { sessions: [session], activeId: null, pressure: [], blocked: [] } })
+  });
+  const group = () => mounted.window.document.querySelector<HTMLDetailsElement>(`[data-project-id="${project.id}"]`)!;
+  await vi.waitFor(() => expect(group()).not.toBeNull());
+  (group().querySelector(`[data-id="${session.id}"]`) as HTMLButtonElement).click();
+  expect(group().open).toBe(true);
+  const clicked = group();
+  clicked.querySelector('summary')!.click();
+  expect(clicked.open).toBe(false);
+  mounted.push(structuredClone(mounted.state));
+  expect(group()).not.toBe(clicked);
+  expect(group().open).toBe(false);
+  await settle();
+  expect(group().open).toBe(false);
+
+  // Native keyboard activation dispatches the same cancelable click with detail 0.
+  group().querySelector('summary')!.dispatchEvent(new mounted.window.MouseEvent('click', {
+    bubbles: true, cancelable: true, detail: 0
+  }));
+  expect(group().open).toBe(true);
+  mounted.push(structuredClone(mounted.state));
+  expect(group().open).toBe(true);
+});
+
+it('keeps project keyboard focus across activity repaint without taking composer focus or reloading on disclosure', async () => {
+  const { project, session } = projectSidebarFixture();
+  const listSessions = vi.fn(async () => ({ ok: true, data: { sessions: [session], activeId: null, pressure: [], blocked: [] } }));
+  const mounted = await mountChat({}, [], {
+    listProjects: async () => ({ ok: true, data: [project] }), listSessions
+  });
+  const doc = mounted.window.document;
+  const heading = () => doc.querySelector<HTMLElement>(`[data-project-id="${project.id}"] > summary`)!;
+  await vi.waitFor(() => expect(heading()).not.toBeNull());
+  await settle();
+  const reads = listSessions.mock.calls.length;
+  heading().focus(); heading().click();
+  await settle();
+  expect(listSessions).toHaveBeenCalledTimes(reads);
+  expect(doc.activeElement).toBe(heading());
+  mounted.push(structuredClone(mounted.state));
+  expect(doc.activeElement).toBe(heading());
+  const input = doc.getElementById('chatInput') as HTMLTextAreaElement;
+  input.focus(); input.value = 'Keep typing here';
+  mounted.push(structuredClone(mounted.state));
+  expect(doc.activeElement).toBe(input);
+  expect(input.value).toBe('Keep typing here');
+  const { chatVisible } = await import('../src/renderer/chat.js');
+  chatVisible(false); chatVisible(true);
+  await settle();
+  expect(listSessions).toHaveBeenCalledTimes(reads + 1);
+});
+
+it('always offers setup collapse and preserves the choice across incomplete status updates', async () => {
+  const mounted = await mountChat();
+  const doc = mounted.window.document;
+  const button = doc.getElementById('wizExpand') as HTMLButtonElement;
+  expect(button.hidden).toBe(false);
+  button.click();
+  expect(doc.getElementById('wizard')!.classList.contains('is-tidy')).toBe(true);
+  expect(button.getAttribute('aria-expanded')).toBe('false');
+  mounted.push({ ...mounted.state, hasApiKey: true });
+  expect(doc.getElementById('wizard')!.classList.contains('is-tidy')).toBe(true);
+  button.click();
+  expect(doc.getElementById('wizard')!.classList.contains('is-tidy')).toBe(false);
+});
+
+it('adds and selects setup profiles and rejects an older profile status response', async () => {
+  const add = vi.fn(); const select = vi.fn();
+  const mounted = await mountChat({}, [], { addSetupProfile: add, selectSetupProfile: select });
+  const doc = mounted.window.document;
+  // jsdom does not implement native dialogs/popovers; Chromium acceptance covers their UI.
+  const dialog = doc.getElementById('setupProfileDialog') as HTMLDialogElement;
+  dialog.showModal = vi.fn(); dialog.close = vi.fn();
+  doc.getElementById('setupProfileMenu')!.hidePopover = vi.fn();
+  const initial = structuredClone(mounted.state);
+  const next = { ...initial, config: { ...initial.config, tunnel: { ...initial.config.tunnel,
+    profileId: 'second', profileName: 'Work', profileEpoch: 1, tunnelId: '' },
+    setupProfiles: [{ id: 'default', name: 'Default', tunnelId: initial.config.tunnel.tunnelId, desktopTunnelId: '', pluginsTunnelId: '' }] } };
+  add.mockResolvedValue({ ok: true, data: next });
+  (doc.getElementById('setupProfileAdd') as HTMLButtonElement).click();
+  expect(dialog.showModal).toHaveBeenCalled();
+  (doc.getElementById('setupProfileName') as HTMLInputElement).value = 'Work';
+  doc.getElementById('setupProfileForm')!.dispatchEvent(new mounted.window.Event('submit', { cancelable: true }));
+  await vi.waitFor(() => expect(doc.getElementById('setupProfileCurrent')!.textContent).toBe('Work'));
+  expect(add).toHaveBeenCalledWith('Work');
+  expect((doc.getElementById('tunnelId') as HTMLInputElement).value).toBe('');
+  mounted.push(initial);
+  expect(doc.querySelector('[data-profile-id="second"]')!.getAttribute('aria-pressed')).toBe('true');
+  select.mockResolvedValue({ ok: true, data: { ...initial, config: { ...initial.config, tunnel: {
+    ...initial.config.tunnel, profileId: 'default', profileEpoch: 2 }, setupProfiles: [] } } });
+  (doc.querySelector('[data-profile-id="default"]') as HTMLButtonElement).click();
+  await vi.waitFor(() => expect(select).toHaveBeenCalledWith('default'));
+  await vi.waitFor(() => expect((doc.getElementById('tunnelId') as HTMLInputElement).value).toBe(initial.config.tunnel.tunnelId));
+});
+
 it('attaches pasted screenshot files with previews while preserving ordinary text paste', async () => {
   const dropFiles = vi.fn(async () => ({ ok: true, data: [{ id: 'aaaaaaaa-bbbb-4ccc-8ddd-eeeeeeeeeeee', name: 'screenshot.png', size: 4, mimeType: 'image/png', preview: 'data:image/webp;base64,AAAA' }] }));
   const mounted = await mountChat({}, [], { dropFiles });
-  const w = mounted.window, input = w.document.getElementById('chatInput')!;
+  const w = mounted.window, input = w.document.getElementById('settingsSearch') as HTMLInputElement;
+  input.focus();
   const file = new w.File(['image'], 'screenshot.png', { type: 'image/png' });
   const paste = new w.Event('paste', { bubbles: true, cancelable: true });
   Object.defineProperty(paste, 'clipboardData', { value: { files: [file] } });
@@ -437,6 +561,7 @@ it('attaches pasted screenshot files with previews while preserving ordinary tex
   Object.defineProperty(text, 'clipboardData', { value: { files: [] } });
   input.dispatchEvent(text);
   expect(text.defaultPrevented).toBe(false);
+  expect(w.document.activeElement).toBe(input);
   const overflow = new w.Event('paste', { bubbles: true, cancelable: true });
   Object.defineProperty(overflow, 'clipboardData', { value: { files: Array(20).fill(file) } });
   input.dispatchEvent(overflow);
@@ -470,26 +595,30 @@ it('uses the OpenRouter default when opened directly on an unrelated custom depl
   expect(mounted.calls[0].goal).toMatchObject({ provider: { kind: 'openrouter' }, model: DEFAULT_GOAL_MODEL });
 });
 
-it('selects OpenCodex as the official custom endpoint preset without changing credentials or backends', async () => {
-  const mounted = await mountChat({ hasGoalKey: true, hasCustomProviderKey: false }, [], {}, { backend: 'api', loopBackend: 'chatgpt' });
-  const provider = mounted.window.document.getElementById('goalProvider') as HTMLSelectElement;
-  provider.value = 'opencodex'; provider.dispatchEvent(new mounted.window.Event('change'));
+it('applies OpenCodex only when selected and preserves saved endpoint models on repaint', async () => {
+  const mounted = await mountChat();
+  const w = mounted.window;
+  const provider = w.document.getElementById('goalProvider') as HTMLSelectElement;
+  provider.value = 'opencodex';
+  provider.dispatchEvent(new w.Event('change', { bubbles: true }));
   await vi.waitFor(() => expect(mounted.calls).toHaveLength(1));
-  expect(mounted.calls[0].goal).toMatchObject({ provider: { kind: 'custom', baseUrl: 'http://127.0.0.1:10100/v1' }, model: 'gpt-6-astra', reasoning: 'high', backend: 'api', loopBackend: 'chatgpt' });
-  expect(mounted.keys).toEqual([]);
-  expect(mounted.window.document.getElementById('goalKeyField')!.hidden).toBe(true);
-  expect(mounted.window.document.getElementById('goalCustomPanel')!.hidden).toBe(false);
-});
-
-it('restores the OpenCodex preset with an edited model and keeps model selection editable', async () => {
-  const mounted = await mountChat({}, [], {}, { model: 'my-chosen-model', reasoning: 'medium', provider: { kind: 'custom', baseUrl: 'http://127.0.0.1:10100/v1' } });
-  const doc = mounted.window.document;
-  expect((doc.getElementById('goalProvider') as HTMLSelectElement).value).toBe('opencodex');
-  const model = doc.getElementById('goalCustomModel') as HTMLInputElement;
-  expect(model.value).toBe('my-chosen-model');
-  model.value = 'another-model'; model.dispatchEvent(new mounted.window.Event('change'));
-  await vi.waitFor(() => expect(mounted.calls).toHaveLength(1));
-  expect(mounted.calls[0].goal).toMatchObject({ provider: { kind: 'custom', baseUrl: 'http://127.0.0.1:10100/v1' }, model: 'another-model', reasoning: 'medium' });
+  expect(mounted.calls[0].goal).toMatchObject({
+    provider: { kind: 'custom', baseUrl: 'http://127.0.0.1:10100/v1' },
+    model: 'gpt-6-astra', reasoning: 'high'
+  });
+  const model = w.document.getElementById('goalCustomModel') as HTMLInputElement;
+  model.value = 'google-vertex/gemini-3.8-flash';
+  model.dispatchEvent(new w.Event('change', { bubbles: true }));
+  await vi.waitFor(() => expect(mounted.calls).toHaveLength(2));
+  mounted.push({ ...mounted.state, hasCustomProviderKey: true });
+  expect(provider.value).toBe('opencodex');
+  expect(model.value).toBe('google-vertex/gemini-3.8-flash');
+  expect(w.document.getElementById('goalCustomPanel')?.hidden).toBe(false);
+  provider.value = 'openrouter';
+  provider.dispatchEvent(new w.Event('change', { bubbles: true }));
+  await vi.waitFor(() => expect(mounted.calls).toHaveLength(3));
+  expect(mounted.calls[2].goal.provider.kind).toBe('openrouter');
+  expect(mounted.calls[2].goal.model).not.toBe('google-vertex/gemini-3.8-flash');
 });
 
 it('saves a custom deployment id and returns to the known OpenRouter model', async () => {
@@ -526,6 +655,25 @@ it('saves the ChatGPT browser choice from its settings control and restores it o
   expect(browser.value).toBe('chrome');
 });
 
+it('shows the current host Desktop tools without rebuilding permission controls on state pushes', async () => {
+  const mounted = await mountChat({
+    platform: { family: 'windows', name: 'Windows', desktopAutomation: true }
+  });
+  const doc = mounted.window.document;
+  const names = () => Array.from(doc.querySelectorAll('[data-group="desktop"] .tool-names code'), node => node.textContent);
+  const control = doc.querySelector<HTMLInputElement>('[data-cap="control"]')!;
+  const windowsNames = [...BROWSER_READ_TOOLS, 'list_windows', 'get_window', 'list_apps', 'get_window_state', ...BROWSER_WRITE_TOOLS,
+    'launch_app', 'click', 'press_key', 'type_text', 'scroll', 'set_value', 'drag',
+    'perform_secondary_action', 'activate_window', 'read_clipboard', 'write_clipboard', 'exec'];
+  expect(names()).toEqual(windowsNames);
+  mounted.push({ ...mounted.state, platform: { family: 'macos', name: 'macOS', desktopAutomation: true } });
+  expect(names()).toEqual([...BROWSER_READ_TOOLS, 'observe', ...BROWSER_WRITE_TOOLS, 'computer', 'exec']);
+  expect(doc.querySelector('[data-cap="control"]')).toBe(control);
+  mounted.push(mounted.state);
+  expect(names()).toEqual(windowsNames);
+  expect(mounted.calls).toHaveLength(0);
+});
+
 it('preserves native Desktop permissions when saving unrelated settings on Linux', async () => {
   const mounted = await mountChat({
     platform: { family: 'linux', name: 'Linux', desktopAutomation: false }
@@ -533,7 +681,9 @@ it('preserves native Desktop permissions when saving unrelated settings on Linux
   const w = mounted.window;
 
   const desktopGroup = w.document.querySelector<HTMLElement>('[data-group="desktop"]')!;
-  expect(desktopGroup.hidden).toBe(true);
+  expect(desktopGroup.hidden).toBe(false);
+  expect(w.document.querySelector<HTMLInputElement>('[data-cap="control"]')!.disabled).toBe(false);
+  expect(w.document.querySelector<HTMLInputElement>('[data-cap="clipboardWrite"]')!.disabled).toBe(true);
 
   const autoConnect = w.document.getElementById('autoConnect') as HTMLInputElement;
   autoConnect.checked = true;
@@ -556,9 +706,9 @@ it('uses native menu-bar/Dock wording on macOS instead of Windows tray copy', as
   });
   const doc = mounted.window.document;
 
-  expect(doc.getElementById('backgroundRunningCopy')!.textContent).toContain('메뉴 막대와 Dock');
+  expect(doc.getElementById('backgroundRunningCopy')!.textContent).toContain('menu bar and Dock');
   expect(doc.getElementById('backgroundRunningCopy')!.textContent).not.toContain('tray');
-  expect(doc.getElementById('minimizeToTrayCopy')!.textContent).toBe('창을 닫으면 메뉴 막대로 숨기기');
+  expect(doc.getElementById('minimizeToTrayCopy')!.textContent).toBe('Hide the window to the menu bar when closed');
 });
 
 it('surfaces the existing root rename API in the folder row', async () => {
@@ -570,7 +720,7 @@ it('surfaces the existing root rename API in the folder row', async () => {
     }
   });
   const doc = mounted.window.document;
-  const button = doc.querySelector<HTMLButtonElement>('.root button[title="/repo 이름 변경"]');
+  const button = doc.querySelector<HTMLButtonElement>('.root button[title="Rename /repo"]');
   expect(button).not.toBeNull();
 
   button!.click();
@@ -591,7 +741,7 @@ it('preserves an in-progress root rename across unrelated state pushes and cance
     }
   });
   const doc = mounted.window.document;
-  doc.querySelector<HTMLButtonElement>('.root button[title="/repo 이름 변경"]')!.click();
+  doc.querySelector<HTMLButtonElement>('.root button[title="Rename /repo"]')!.click();
 
   const original = doc.querySelector<HTMLInputElement>('.root .root-rename')!;
   original.value = 'new-name';
@@ -621,7 +771,7 @@ it('preserves an in-progress root rename across unrelated state pushes and cance
   escape.dispatchEvent(new mounted.window.KeyboardEvent('keydown', { key: 'Escape', bubbles: true }));
   expect(doc.querySelector('.root-rename')).toBeNull();
 
-  doc.querySelector<HTMLButtonElement>('.root button[title="/repo 이름 변경"]')!.click();
+  doc.querySelector<HTMLButtonElement>('.root button[title="Rename /repo"]')!.click();
   expect(doc.querySelector('.root-rename')).not.toBeNull();
 
   const removed = structuredClone(unrelated) as any;
@@ -665,7 +815,7 @@ it('guides rootless setup from the capabilities that actually need a filesystem 
   mounted.push(mixed);
   const connect = mounted.window.document.getElementById('connectBtn') as HTMLButtonElement;
   expect(connect.disabled).toBe(true);
-  expect(connect.title).toContain('공유 폴더를 선택');
+  expect(connect.title).toContain('Choose a folder');
   expect(mounted.window.document.querySelector('[data-step="folder"]')?.classList.contains('is-current')).toBe(true);
 
   const commandAndDesktop = structuredClone(mixed) as any;
@@ -673,7 +823,7 @@ it('guides rootless setup from the capabilities that actually need a filesystem 
   commandAndDesktop.config.capabilities.command = true;
   mounted.push(commandAndDesktop);
   expect(connect.disabled).toBe(true);
-  expect(connect.title).toContain('공유 폴더를 선택');
+  expect(connect.title).toContain('Choose a folder');
 
   const desktopOnly = structuredClone(mixed) as any;
   desktopOnly.config.capabilities.browse = false;
@@ -687,6 +837,74 @@ it('guides rootless setup from the capabilities that actually need a filesystem 
   clipboardOnly.status.surfaces[1].tools = ['computer'];
   mounted.push(clipboardOnly);
   expect(connect.disabled).toBe(false);
+});
+
+it('preserves optional Desktop disclosures and inline screenshots across status pushes', async () => {
+  const mounted = await mountChat();
+  const state = structuredClone(mounted.state) as any;
+  state.status.surfaces = [{
+    id: 'desktop', connectorName: 'Desktop', description: 'Desktop control', cardSummary: '', optional: true,
+    available: true, localUrl: null, publicUrl: null, tools: ['observe'], state: 'off', detail: '',
+    lastRequestAt: null, lastToolCallAt: null
+  }];
+  mounted.push(state);
+  const doc = mounted.window.document;
+  const field = doc.getElementById('desktopTunnelField') as HTMLDetailsElement;
+  const card = () => doc.querySelector<HTMLDetailsElement>('#connectorCards details')!;
+  expect(field.hidden).toBe(false);
+  expect(field.open).toBe(false);
+  expect(card().open).toBe(false);
+  field.querySelector('summary')!.click(); card().querySelector('summary')!.click();
+  const guide = doc.querySelector('[data-setup-guide="tunnel"]')!;
+  expect(guide.querySelectorAll('img')).toHaveLength(1);
+  expect(doc.querySelectorAll('[data-setup-guide="developer"] img')).toHaveLength(1);
+  expect(doc.querySelectorAll('[data-setup-guide="plugin"] img')).toHaveLength(2);
+  const image = guide.querySelector('img')!;
+  mounted.push(structuredClone(state));
+  expect(field.open).toBe(true);
+  expect(card().open).toBe(true);
+  expect(guide.querySelector('img')).toBe(image);
+  expect(image.src).toContain('workspace.png');
+  expect(mounted.calls).toEqual([]);
+  card().querySelector('summary')!.click();
+  mounted.push(structuredClone(state));
+  expect(card().open).toBe(false);
+  expect(field.open).toBe(true);
+});
+
+it('highlights missing required setup fields while respecting drafts and a stored API key', async () => {
+  const mounted = await mountChat();
+  const doc = mounted.window.document;
+  const tunnel = doc.getElementById('tunnelId') as HTMLInputElement;
+  const key = doc.getElementById('apiKey') as HTMLInputElement;
+  expect(tunnel.classList.contains('is-empty')).toBe(false);
+  expect(key.classList.contains('is-empty')).toBe(true);
+  expect(doc.getElementById('desktopTunnelId')!.classList.contains('setup-required')).toBe(false);
+
+  tunnel.focus();
+  tunnel.value = '  ';
+  tunnel.dispatchEvent(new mounted.window.Event('input'));
+  expect(tunnel.classList.contains('is-empty')).toBe(true);
+  mounted.push(structuredClone(mounted.state));
+  expect(tunnel.value).toBe('  ');
+  expect(tunnel.classList.contains('is-empty')).toBe(true);
+  tunnel.value = 'tunnel_draft';
+  tunnel.dispatchEvent(new mounted.window.Event('input'));
+  expect(tunnel.classList.contains('is-empty')).toBe(false);
+
+  key.value = 'example-draft';
+  key.dispatchEvent(new mounted.window.Event('input'));
+  expect(key.classList.contains('is-empty')).toBe(false);
+  key.value = '';
+  key.dispatchEvent(new mounted.window.Event('input'));
+  expect(key.classList.contains('is-empty')).toBe(true);
+  mounted.push({ ...structuredClone(mounted.state), hasApiKey: true });
+  expect(key.classList.contains('is-empty')).toBe(false);
+  expect(key.getAttribute('aria-required')).toBe('false');
+  mounted.push({ ...structuredClone(mounted.state), hasApiKey: false });
+  expect(key.classList.contains('is-empty')).toBe(true);
+  expect(mounted.keys).toEqual([]);
+  expect(mounted.calls).toEqual([]);
 });
 
 it('keeps folder access discoverable after setup and navigates without granting access', async () => {
@@ -716,12 +934,12 @@ it('keeps folder access discoverable after setup and navigates without granting 
   expect(mounted.calls).toEqual([]);
 });
 
-it('requires a live browser only when a browser-backed feature is actually enabled', async () => {
+it('always requires the live browser because recording is an invariant', async () => {
   const mounted = await mountChat({
     hasApiKey: true,
     status: {
       state: 'connected',
-      detail: '연결됨 ·',
+      detail: 'Connected.',
       publicUrl: null,
       localUrl: 'http://127.0.0.1:1234',
       handshakeAt: Date.now(),
@@ -731,7 +949,7 @@ it('requires a live browser only when a browser-backed feature is actually enabl
       surfaces: [
         {
           id: 'core', connectorName: 'Core', description: '', cardSummary: '', optional: false,
-          available: true, localUrl: 'http://127.0.0.1:1234', publicUrl: null, tools: ['read', 'session'],
+          available: true, localUrl: 'http://127.0.0.1:1234', publicUrl: null, tools: ['read', 'update_plan'],
           state: 'live', detail: '', lastRequestAt: Date.now(), lastToolCallAt: Date.now()
         }
       ]
@@ -747,8 +965,8 @@ it('requires a live browser only when a browser-backed feature is actually enabl
   expect(browserStep.classList.contains('is-done')).toBe(false);
   expect(browserStep.classList.contains('is-current')).toBe(true);
   expect(doc.getElementById('wizard')!.classList.contains('is-tidy')).toBe(false);
-  expect(doc.getElementById('bridgeState')!.textContent).toContain('승인됨');
-  expect(doc.getElementById('bridgeState')!.textContent).not.toContain('연결됨 ·');
+  expect(doc.getElementById('bridgeState')!.textContent).toContain('Authorized');
+  expect(doc.getElementById('bridgeState')!.textContent).not.toContain('Connected.');
 
   const live = structuredClone(mounted.state) as any;
   live.hasApiKey = true;
@@ -756,22 +974,24 @@ it('requires a live browser only when a browser-backed feature is actually enabl
   live.bridge = { running: true, port: 8765, paired: true, present: true, lastSeenAt: Date.now() };
   mounted.push(live);
   expect(browserStep.classList.contains('is-done')).toBe(true);
-  expect(doc.getElementById('bridgeState')!.textContent).toContain('연결됨 ·');
+  expect(doc.getElementById('bridgeState')!.textContent).toContain('Connected.');
 
-  // Recording and multi-agent are the two independently viable bridge features. Goal is
-  // browser-driven too, but it requires a recorded session and cannot run by itself when
-  // recording is off, so goal.enabled alone must not keep setup blocked on an inert bridge.
+  // Even a legacy/hand-built renderer snapshot cannot turn recording off. Main normalizes this
+  // shape before publication; the renderer's setup predicate still fails closed if it sees one.
   const browserFree = structuredClone(live) as any;
   browserFree.config.sessions.record = false;
   browserFree.config.multiAgent.enabled = false;
+  browserFree.config.capabilities.screen = false;
+  browserFree.config.capabilities.control = false;
   browserFree.config.goal.enabled = true;
   browserFree.bridge = { running: false, port: null, paired: true, present: false, lastSeenAt: Date.now() };
   mounted.push(browserFree);
-  expect(browserStep.hidden).toBe(true);
-  expect(doc.getElementById('wizard')!.classList.contains('is-tidy')).toBe(true);
-  expect(doc.getElementById('bridgeState')!.textContent).toContain('확장이 필요하지 않습니다');
-  expect((doc.getElementById('chatAutomation') as HTMLSelectElement).disabled).toBe(true);
-  expect(doc.getElementById('chatAutomation')!.title).toMatch(/기록/);
+  expect(browserStep.hidden).toBe(false);
+  expect(browserStep.classList.contains('is-current')).toBe(true);
+  expect(doc.getElementById('wizard')!.classList.contains('is-tidy')).toBe(false);
+  expect(doc.getElementById('bridgeState')!.textContent).not.toContain('not needed');
+  expect((doc.getElementById('chatAutomation') as HTMLSelectElement).disabled).toBe(false);
+  expect(doc.getElementById('chatAutomation')!.title).toContain('Continue');
 });
 
 /**
@@ -797,7 +1017,7 @@ it('says nothing about being current until the check has actually answered', asy
   // Green, both versions, and the same sentence as the one notification this window shows.
   expect(line.hidden).toBe(false);
   expect(line.className).toBe('upline is-ok');
-  expect(line.textContent).toBe('한국어 · OpenCodex · 최신 버전입니다! Chat On Steroids 2.0.2 · 확장 2.0.2');
+  expect(line.textContent).toBe('Up to date! Chat On Steroids 2.0.2 · extension 2.0.2');
   expect(doc.querySelector('.toast')!.textContent).toBe(line.textContent);
   // Nothing to act on, so the header bar stays out of the way.
   expect(doc.getElementById('updateNotice')!.hidden).toBe(true);
@@ -806,7 +1026,7 @@ it('says nothing about being current until the check has actually answered', asy
   doc.querySelector('.toast')!.remove();
   mounted.push(structuredClone(checked) as any);
   expect(doc.querySelector('.toast')).toBeNull();
-  expect(line.textContent).toBe('한국어 · OpenCodex · 최신 버전입니다! Chat On Steroids 2.0.2 · 확장 2.0.2');
+  expect(line.textContent).toBe('Up to date! Chat On Steroids 2.0.2 · extension 2.0.2');
 });
 
 /**
@@ -821,7 +1041,7 @@ it('reports a staged update in the Activity line and the header bar', async () =
   const doc = mounted.window.document;
   const line = doc.getElementById('updateLine')!;
   expect(line.className).toBe('upline');
-  expect(line.textContent).toContain('2.0.3 다운로드 완료');
+  expect(line.textContent).toContain('2.0.3 is downloaded and ready');
   expect(doc.getElementById('updateNotice')!.hidden).toBe(false);
   // There is nothing to fetch by hand once it is on disk.
   expect((doc.getElementById('updateGet') as HTMLButtonElement).hidden).toBe(true);
@@ -833,7 +1053,7 @@ it('reports a staged update in the Activity line and the header bar', async () =
   const checking = structuredClone(staged) as any;
   checking.update.stage = 'checking';
   mounted.push(checking);
-  expect(line.textContent).toContain('최신 업데이트 확인 중');
+  expect(line.textContent).toContain('Checking for the latest update');
   expect(line.textContent).not.toContain('by hand');
   expect((doc.getElementById('updateGet') as HTMLButtonElement).hidden).toBe(true);
   expect((doc.getElementById('updateInstall') as HTMLButtonElement).hidden).toBe(true);
@@ -893,7 +1113,7 @@ it('shows a missing-extension reminder while connected and clears it after the c
   connected.status.state = 'connected'; connected.bridge.running = true; connected.bridge.present = false;
   mounted.push(connected);
   const doc = mounted.window.document;
-  expect(doc.getElementById('updateText')!.textContent).toContain('브라우저 확장이 연결되지 않았습니다');
+  expect(doc.getElementById('updateText')!.textContent).toContain('Browser extension not connected');
   expect(doc.getElementById('updateExtension')!.hidden).toBe(false);
   connected.bridge.present = true; connected.bridge.extensionVersion = connected.update.current;
   mounted.push(connected);
@@ -909,7 +1129,7 @@ it('keeps plugin connection controls out of general Setup and preserves its tunn
   input.value = 'tunnel_aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa';
   input.dispatchEvent(new mounted.window.Event('change')); await settle();
   expect(mounted.calls.at(-1).tunnel.pluginsTunnelId).toBe(next.config.tunnel.pluginsTunnelId);
-  expect(doc.querySelector('[data-panel="setup"] [data-link="https://chatgpt.com/#settings/Plugins"]')).not.toBeNull();
+  expect(doc.querySelector('[data-panel="setup"] [data-link="https://chatgpt.com/plugins"]')).not.toBeNull();
 });
 
 /**
@@ -923,7 +1143,7 @@ it('reports stored API credentials without exposing app-wide Goal switches', asy
 
   mounted.push({ ...mounted.state, hasGoalKey: true });
   await settle();
-  expect(mounted.window.document.getElementById('goalKeyState')!.textContent).toContain('키가 저장되어 있습니다');
+  expect(mounted.window.document.getElementById('goalKeyState')!.textContent).toContain('A key is stored');
   expect((mounted.window.document.getElementById('goalKeyRemove') as HTMLButtonElement).disabled).toBe(false);
 });
 
@@ -1048,7 +1268,7 @@ it('loads the model catalogue only when the picker is opened, twenty at a time',
 });
 
 /**
- * "20개 더 보기" is the deliberate way to ask for the next page. Scrolling to the bottom of
+ * "Load 20 more" is the deliberate way to ask for the next page. Scrolling to the bottom of
  * the list is the way people actually ask, and it did nothing at all: the list simply ended
  * at twenty with four hundred still to come and no sign that there was a button below it.
  *
@@ -1138,6 +1358,45 @@ it('saves the chosen model id', async () => {
   expect(mounted.calls.at(-1)?.goal).toMatchObject({ model: 'vendor1/model-1' });
 });
 
+it('saves GLM High and Max from catalogue-specific options and drops unsupported levels on model selection', async () => {
+  const glm = { id: 'z-ai/glm-5.3', name: 'GLM 5.3', created: 100, contextLength: 200000,
+    reasoning: { supportedEfforts: ['max', 'high', 'low'], defaultEffort: 'max', mandatory: true } };
+  const plain = { id: 'plain/model', name: 'Plain', created: 1, contextLength: 1000 };
+  const mounted = await mountChat({ hasGoalKey: true }, [glm, plain]);
+  const doc = mounted.window.document;
+  (doc.getElementById('goalPick') as HTMLButtonElement).click();
+  await settle();
+  (doc.querySelector('[data-model="z-ai/glm-5.3"]') as HTMLButtonElement).click();
+  await settle();
+  const select = doc.getElementById('goalReasoning') as HTMLSelectElement;
+  expect([...select.options].filter(option => !option.disabled).map(option => option.value)).toEqual(['default', 'max', 'high', 'low']);
+  for (const reasoning of ['high', 'max']) {
+    select.value = reasoning;
+    select.dispatchEvent(new mounted.window.Event('change', { bubbles: true }));
+    await settle();
+    expect(mounted.calls.at(-1)?.goal).toMatchObject({ model: glm.id, reasoning });
+  }
+  (doc.querySelector('[data-model="plain/model"]') as HTMLButtonElement).click();
+  await settle();
+  expect([...select.options].map(option => option.value)).toEqual(['default']);
+  expect(mounted.calls.at(-1)?.goal).toMatchObject({ model: plain.id, reasoning: 'default' });
+});
+
+it('loads supported levels for the saved model without paging to its catalogue row', async () => {
+  const selectedModel = { id: 'saved/model', name: 'Saved', created: 1, contextLength: 200000,
+    reasoning: { supportedEfforts: ['max', 'high', 'low'], defaultEffort: 'max', mandatory: true } };
+  const mounted = await mountChat({}, [], {
+    listGoalModels: async () => ({ ok: true, data: { models: [], total: 500, selectedModel } })
+  }, { model: selectedModel.id, reasoning: 'high' });
+  const select = mounted.window.document.getElementById('goalReasoning') as HTMLSelectElement;
+  select.focus();
+  await settle();
+  expect(select.value).toBe('high');
+  expect(select.selectedOptions[0]?.disabled).toBe(false);
+  expect([...select.options].map(option => option.value)).toEqual(['default', 'max', 'high', 'low']);
+  expect(mounted.calls).toHaveLength(0);
+});
+
 /** A provider that cannot be reached says so and changes nothing about what is in use. */
 it('keeps the model in use when OpenRouter cannot be reached', async () => {
   const mounted = await mountChat({ hasGoalKey: true }, catalogue(2));
@@ -1146,11 +1405,11 @@ it('keeps the model in use when OpenRouter cannot be reached', async () => {
 
   (doc.getElementById('goalPick') as HTMLButtonElement).click();
   await settle();
-  expect(doc.getElementById('goalModelsState')!.textContent).toContain('기존 모델 선택은 유지');
+  expect(doc.getElementById('goalModelsState')!.textContent).toContain('unchanged');
   expect(doc.getElementById('goalModelName')!.textContent).toBe('deepseek/deepseek-v4-flash');
 });
 
-it('edits a fresh Goal before first send and clears it on an independent New Chat', async () => {
+it('retains a fresh Goal and first message when rejected sends return to New Chat', async () => {
   const sendInput = vi.fn(async () => ({ ok: false, error: 'test delivery stopped' }));
   const mounted = await mountChat({}, [], { sendInput,
     getChatModels: async () => ({ ok: true, data: { state: 'ready', requestedAt: 1, observedAt: Date.now(), models: [{ id: 'gpt-5.6-sol', label: 'GPT-5.6 Sol', efforts: ['none', 'high'] }] } }),
@@ -1174,5 +1433,74 @@ it('edits a fresh Goal before first send and clears it on an independent New Cha
   expect(sendInput).toHaveBeenCalledWith(expect.objectContaining({ sessionId: null, automation: 'goal', objective: 'Build and verify the requested feature' }));
   (doc.getElementById('newChat') as HTMLButtonElement).click();
   await settle();
-  expect(objective.value).toBe('');
+  expect(objective.value).toBe('Build and verify the requested feature');
+  expect(input.value).toBe('Start with the existing code');
+  expect((doc.getElementById('chatAutomation') as HTMLSelectElement).value).toBe('goal');
+});
+
+
+it('gives twenty rapid New Chat sends independent visible local chats before any provider receipt', async () => {
+  const rows: any[] = [], summaries: any[] = [];
+  const ok = (data: any) => ({ ok: true, data });
+  const sendInput = vi.fn(async (request: any) => {
+    const row = { ...request, sessionId: request.id, opening: true, state: 'queued', owner: null, createdAt: Date.now(), conversationId: null };
+    rows.push(row);
+    summaries.push({ id: row.sessionId, title: row.text, conversationId: null, origin: { kind: 'desktop' }, createdAt: row.createdAt, updatedAt: row.createdAt, eventCount: 0, projectId: null, selectedModel: null, usage: {} });
+    return ok(row);
+  });
+  const setInputAutomation = vi.fn(async (id: string, automation: string, loopAfterTurn?: boolean) => {
+    const row = rows.find(row => row.id === id); row.automation = automation; if (loopAfterTurn !== undefined) row.loopAfterTurn = loopAfterTurn; return ok(true);
+  });
+  const setSessionAutomation = vi.fn();
+  const mounted = await mountChat({}, [], { sendInput, setInputAutomation, setSessionAutomation,
+    getChatModels: async () => ok({ state: 'ready', requestedAt: 1, observedAt: Date.now(), models: [{ id: 'gpt-5.6-sol', label: 'GPT-5.6 Sol', efforts: ['high'] }] }),
+    listInputs: async () => ok([...rows]), listPausedHelpers: async () => ok([]),
+    listSessions: async () => ok({ sessions: [...summaries], activeId: null, pressure: [] }),
+    getSession: async (id: string) => ok({ summary: summaries.find(row => row.id === id), events: [], nextCursor: null })
+  });
+  const w = mounted.window, doc = w.document, field = doc.getElementById('chatInput') as HTMLTextAreaElement;
+  for (let index = 0; index < 20; index++) {
+    (doc.getElementById('newChat') as HTMLButtonElement).click(); await settle();
+    field.value = `Independent opening ${index}`;
+    doc.getElementById('composer')!.dispatchEvent(new w.Event('submit', { bubbles: true, cancelable: true }));
+    await vi.waitFor(() => expect(sendInput).toHaveBeenCalledTimes(index + 1));
+    await vi.waitFor(() => expect(doc.querySelector(`.sess.is-sel[data-id="${rows[index]!.sessionId}"]`)).not.toBeNull());
+    expect(doc.querySelector(`[data-input-id="${rows[index]!.id}"]`)?.textContent).toContain(rows[index]!.text);
+    expect((doc.getElementById('composerModel') as HTMLSelectElement).value).toBe('gpt-5.6-sol');
+  }
+  (doc.querySelector('[data-mode=loop]') as HTMLButtonElement).click(); await settle();
+  const loop = doc.getElementById('loopDelivery') as HTMLSelectElement; loop.value = 'after-turn'; loop.dispatchEvent(new w.Event('change')); await settle();
+  expect(setInputAutomation).toHaveBeenLastCalledWith(rows[19]!.id, 'loop', true);
+  expect(setSessionAutomation).not.toHaveBeenCalled();
+  expect(rows[19]).toMatchObject({ automation: 'loop', loopAfterTurn: true });
+  expect(rows.slice(0, 19).every(row => row.automation !== 'loop')).toBe(true);
+  expect(new Set(rows.map(row => row.sessionId)).size).toBe(20);
+  expect(rows.every(row => row.state === 'queued' && row.deliveredAt === undefined)).toBe(true);
+  expect(sendInput.mock.calls.every(([request]) => request.sessionId === null)).toBe(true);
+});
+
+it('does not steal a newer New Chat draft when an older admission response arrives', async () => {
+  let release!: (value: any) => void;
+  const rows: any[] = [], summaries: any[] = [];
+  const ok = (data: any) => ({ ok: true, data });
+  const sendInput = vi.fn((request: any) => new Promise(resolve => { release = () => {
+    const row = { ...request, sessionId: request.id, opening: true, state: 'queued', owner: null, createdAt: Date.now(), conversationId: null };
+    rows.push(row); summaries.push({ id: row.sessionId, title: row.text, conversationId: null, origin: { kind: 'desktop' }, createdAt: row.createdAt, updatedAt: row.createdAt, eventCount: 0, projectId: null, usage: {} });
+    resolve(ok(row));
+  }; }));
+  const mounted = await mountChat({}, [], { sendInput,
+    getChatModels: async () => ok({ state: 'ready', requestedAt: 1, observedAt: Date.now(), models: [{ id: 'gpt-5.6-sol', label: 'GPT-5.6 Sol', efforts: ['high'] }] }),
+    listInputs: async () => ok([...rows]), listPausedHelpers: async () => ok([]),
+    listSessions: async () => ok({ sessions: [...summaries], activeId: null, pressure: [] }),
+    getSession: async (id: string) => ok({ summary: summaries.find(row => row.id === id), events: [], nextCursor: null })
+  });
+  const w = mounted.window, doc = w.document, field = doc.getElementById('chatInput') as HTMLTextAreaElement;
+  (doc.getElementById('newChat') as HTMLButtonElement).click(); await settle();
+  field.value = 'Old admission'; doc.getElementById('composer')!.dispatchEvent(new w.Event('submit', { bubbles: true, cancelable: true }));
+  await vi.waitFor(() => expect(sendInput).toHaveBeenCalledTimes(1));
+  (doc.getElementById('newChat') as HTMLButtonElement).click(); field.value = 'Keep this newer draft';
+  field.dispatchEvent(new w.Event('input', { bubbles: true })); release(undefined); await settle(); await settle();
+  expect(field.value).toBe('Keep this newer draft');
+  expect(doc.querySelector('.sess.is-sel')).toBeNull();
+  expect(doc.getElementById('chatTitle')!.textContent).toBe('New chat');
 });

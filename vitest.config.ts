@@ -4,11 +4,6 @@ export default defineConfig({
   test: {
     include: ['test/**/*.test.ts'],
     environment: 'node',
-    // These suites share real disk and desktop resources even with isolated modules.
-    // Windows helpers and catalog scans contend even with two workers on hosted runners.
-    // Serialize Windows files; other platforms retain their bounded parallelism.
-    // Keep all assertions/deadlines; concurrency races are exercised inside their tests.
-    maxWorkers: process.platform === 'win32' ? 1 : 2,
     // Real filesystem, real child processes and a real HTTP server, so the
     // defaults are too tight.
     testTimeout: 30_000,

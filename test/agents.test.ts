@@ -11,6 +11,7 @@ import http from 'node:http';
 import { promises as fs } from 'node:fs';
 import { afterAll, afterEach, beforeAll, beforeEach, describe, expect, it, vi } from 'vitest';
 import type { Caller } from '../src/main/agents.js';
+import * as chatModels from '../src/main/chat-models.js';
 
 vi.mock('electron', () => ({
   safeStorage: {
@@ -136,6 +137,18 @@ beforeEach(() => {
 
 const PRIME_CHAT = 'c-prime';
 const prime: Caller = { conversationId: PRIME_CHAT };
+
+it('returns an empty exact-caller status without creating a family or exposing another prime', () => {
+  const empty = { self: null, runId: null, state: { running: false, retainedHistory: false, agents: [] } };
+  expect(statusForCaller(prime)).toMatchObject(empty);
+  expect(swarmRunning()).toBe(false);
+  startSwarm(1);
+  const unrelated = { conversationId: 'c-unrelated-status' };
+  expect(statusForCaller(unrelated)).toMatchObject(empty);
+  expect(swarmStateForCaller(unrelated).agents).toEqual([]);
+  expect(swarmStateForCaller(prime).agents).toHaveLength(2);
+  expect(() => statusForCaller({ conversationId: null })).toThrow(/identity|conversation/i);
+});
 
 /**
  * A read of `/anything` that actually reached the sandbox and was refused on roots.
@@ -311,6 +324,75 @@ describe('spawning a run', () => {
     expect(staged.waking).toEqual(['worker-1']);
     staged.commit();
     expect(pendingWorkerRevivals()[0]).toMatchObject({ id: 'worker-1', conversationId: 'c-worker-1' });
+  });
+});
+
+describe('account-observed worker admission', () => {
+  const choices = [{ id: '5.6', label: 'GPT-5.6 Sol', efforts: ['high', 'pro'] as const, aliases: ['gpt-5-6-thinking', 'gpt-5-6-pro'] }];
+  let catalog: ReturnType<typeof vi.spyOn>;
+  beforeEach(() => {
+    catalog = vi.spyOn(chatModels, 'getChatModels').mockReturnValue({
+      state: 'ready', requestedAt: null, observedAt: 1,
+      models: choices.map(choice => ({ ...choice, efforts: [...choice.efforts] }))
+    });
+  });
+  afterEach(() => catalog.mockRestore());
+
+  it('rejects the whole batch before topology or browser work for a guessed alias', () => {
+    const opened = vi.fn();
+    onSpawnRequest(opened);
+    expect(() => spawn({ caller: prime, workers: [
+      { task: 'valid first', model: '5.6', reasoning_effort: 'high' },
+      { task: 'invalid second', model: 'gpt-5.6', reasoning_effort: 'high' }
+    ] })).toThrow(/not observed.*5\.6 \(high, pro\)/);
+    expect(swarmState().agents).toEqual([]);
+    expect(currentRunId()).toBeNull();
+    expect(pendingWorkerSpawns()).toEqual([]);
+    expect(opened).not.toHaveBeenCalled();
+  });
+
+  it('accepts observed ids and preserves an explicit provider lane alias', () => {
+    const result = spawn({ caller: prime, workers: [
+      { task: 'canonical', model: ' 5.6 ', reasoning_effort: 'high' },
+      { task: 'specific lane', model: 'gpt-5-6-pro', reasoning_effort: null }
+    ] });
+    expect(result.created.map(worker => [worker.model, worker.reasoningEffort])).toEqual([
+      ['5.6', 'high'], ['gpt-5-6-pro', null]
+    ]);
+  });
+
+  it('rejects unsupported effort for the observed family', () => {
+    expect(() => spawn({ caller: prime, workers: [{ task: 'wrong pair', model: '5.6', reasoning_effort: 'ultra' }] }))
+      .toThrow(/reasoning_effort "ultra" is not observed for model "5.6"/);
+    expect(swarmRunning()).toBe(false);
+  });
+
+  it('validates effective app defaults before reservation', async () => {
+    const base = defaultConfig();
+    await saveConfig({ ...base, multiAgent: { ...base.multiAgent, enabled: true, defaultModel: '5.6', defaultReasoning: 'ultra' } });
+    try {
+      expect(() => spawn({ caller: prime, workers: [{ task: 'defaults' }] })).toThrow(/reasoning_effort "ultra"/);
+      expect(swarmRunning()).toBe(false);
+    } finally { await setEnabled(true); }
+  });
+
+  it('rejects ambiguous aliases even when one matching family supports the effort', () => {
+    vi.mocked(chatModels.getChatModels).mockReturnValue({ state: 'ready', requestedAt: null, observedAt: 1, models: [
+      { id: 'a', label: 'A', efforts: ['high'], aliases: ['shared'] },
+      { id: 'b', label: 'B', efforts: ['pro'], aliases: ['shared'] }
+    ] });
+    expect(() => spawn({ caller: prime, workers: [{ task: 'ambiguous', model: 'shared', reasoning_effort: 'high' }] }))
+      .toThrow(/ambiguous/);
+    expect(swarmRunning()).toBe(false);
+  });
+
+  it('uses retained observations during refresh but preserves exact settings when no catalog exists', () => {
+    vi.mocked(chatModels.getChatModels).mockReturnValue({ state: 'pending', requestedAt: 2, observedAt: 1,
+      models: choices.map(choice => ({ ...choice, efforts: [...choice.efforts] })) });
+    expect(() => spawn({ caller: prime, workers: [{ task: 'unknown', model: 'gpt-5.6' }] })).toThrow(/not observed/);
+    vi.mocked(chatModels.getChatModels).mockReturnValue({ state: 'unavailable', requestedAt: null, observedAt: null, models: [] });
+    const result = spawn({ caller: prime, workers: [{ task: 'native confirmation', model: 'future-model', reasoning_effort: 'high' }] });
+    expect(result.created[0]).toMatchObject({ model: 'future-model', reasoningEffort: 'high' });
   });
 });
 
@@ -691,7 +773,9 @@ describe('an agent that has ended', () => {
 describe('a worker whose chat never opened', () => {
   it('ends as failed, frees its slot, and reports to the prime', () => {
     startSwarm(1);
-    expect(failAgent('worker-1', 'no ChatGPT tab could be opened')?.report?.to).toBe(PRIME_ID);
+    const report = failAgent('worker-1', 'no ChatGPT tab could be opened')?.report;
+    expect(report?.to).toBe(PRIME_ID);
+    expect(report?.text).toContain('Resolve the reported startup problem before spawning a replacement');
     const info = swarmState().agents.find((agent) => agent.id === 'worker-1');
     expect(info?.state).toBe('failed');
     expect(info?.result).toContain('no ChatGPT tab');
@@ -881,6 +965,73 @@ describe('clearing one agent from the app', () => {
  * and about the worker slot, which is the only genuinely scarce thing in the run.
  */
 describe('a worker that is sleeping', () => {
+  it.each(['browser', 'call'] as const)('replaces old assignment metadata before %s revival and retains the old report', (delivery) => {
+    startSwarm(1);
+    const worker = startWorker('worker-1');
+    finishAgent(worker.caller, 'task A completed');
+    const staged = stageMessages(prime, [{ to: 'worker-1', text: 'inspect task B' }]);
+    staged.commit();
+    const current = () => statusForCaller(prime).state.agents.find((agent) => agent.id === 'worker-1');
+    expect(current()).toMatchObject({ state: 'waking', label: 'worker-1', task: 'inspect task B', result: null });
+    expect(offerMessages(PRIME_ID).some((message) => message.text.includes('task A completed'))).toBe(true);
+    const saved = snapshotSwarm();
+    resetAgentsForTests();
+    restoreSwarm(saved);
+    expect(current()).toMatchObject({ state: 'waking', label: 'worker-1', task: 'inspect task B', result: null });
+    if (delivery === 'browser') {
+      const revival = pendingWorkerRevivals()[0]!;
+      expect(noteWorkerRevived('worker-1', 'c-worker-1', revival.messageIds)).toBe(true);
+    }
+    expect(noteAgentAlive('c-worker-1', 'call')?.revived).toBe(true);
+    expect(current()).toMatchObject({ state: 'active', label: 'worker-1', task: 'inspect task B', result: null });
+    finishAgent(worker.caller, 'task B completed');
+    expect(current()).toMatchObject({ state: 'sleeping', result: 'task B completed' });
+  });
+
+  it('restores prior assignment metadata when a new assignment is rejected before acceptance', () => {
+    startSwarm(1);
+    const worker = startWorker('worker-1');
+    finishAgent(worker.caller, 'task A completed');
+    const staged = stageMessages(prime, [{ to: 'worker-1', text: 'inspect task B' }]);
+    staged.rollback();
+    expect(statusForCaller(prime).state.agents.find((agent) => agent.id === 'worker-1')).toMatchObject({
+      state: 'sleeping', label: 'Worker 1', task: 'task 1', result: 'task A completed', pending: 0
+    });
+  });
+
+  it('clears a completion result when the same assignment proves it is still running', () => {
+    startSwarm(1);
+    const worker = startWorker('worker-1');
+    finishAgent(worker.caller, 'premature report');
+    expect(noteAgentAlive('c-worker-1', 'page')?.revived).toBe(false);
+    expect(statusForCaller(prime).state.agents.find((agent) => agent.id === 'worker-1')?.result).toBe('premature report');
+    expect(noteAgentAlive('c-worker-1', 'call')?.revived).toBe(true);
+    expect(statusForCaller(prime).state.agents.find((agent) => agent.id === 'worker-1')).toMatchObject({
+      state: 'active', label: 'Worker 1', task: 'task 1', result: null
+    });
+  });
+
+  it('refreshes queued-work assignment metadata and restores it if reservation rolls back', () => {
+    startSwarm(1);
+    const worker = startWorker('worker-1');
+    sendMessage(prime, 'worker-1', 'queued task B');
+    finishAgent(worker.caller, 'task A completed');
+    const staged = stageQueuedWorkerRevivals(['worker-1']);
+    expect(staged.waking).toEqual(['worker-1']);
+    expect(statusForCaller(prime).state.agents.find((agent) => agent.id === 'worker-1')).toMatchObject({
+      state: 'waking', label: 'worker-1', task: 'queued task B', result: null
+    });
+    staged.rollback();
+    expect(statusForCaller(prime).state.agents.find((agent) => agent.id === 'worker-1')).toMatchObject({
+      state: 'sleeping', label: 'Worker 1', task: 'task 1', result: 'task A completed', pending: 1
+    });
+    stageQueuedWorkerRevivals(['worker-1']).commit();
+    failWorkerRevival('worker-1', 'fixture pre-send failure');
+    expect(statusForCaller(prime).state.agents.find((agent) => agent.id === 'worker-1')).toMatchObject({
+      state: 'sleeping', label: 'worker-1', task: 'queued task B', result: null, pending: 1
+    });
+  });
+
   it('lets a proven call from a parked sleeping worker take the slot back, as inside a live run', () => {
     startSwarm(1);
     const worker = startWorker('worker-1');
@@ -1295,7 +1446,7 @@ describe('a worker that is sleeping', () => {
     resetSwarm();
 
     expect(swarmState()).toMatchObject({ running: false, retainedHistory: false, agents: [] });
-    expect(() => swarmStateForCaller(prime)).toThrow(/No sub-agent history/i);
+    expect(swarmStateForCaller(prime)).toMatchObject({ running: false, retainedHistory: false, agents: [] });
     expect(retiredWorkerForConversation('c-worker-clear-dormant')).toMatchObject({
       id: 'worker-1',
       conversationId: 'c-worker-clear-dormant'
@@ -2369,10 +2520,12 @@ describe('through the MCP endpoint', () => {
     expect(JSON.stringify(agentsSchema)).not.toMatch(/join/i);
   });
 
-  it('tells an unrelated chat AGENTS_BUSY and nothing whatsoever about the run', async () => {
+  it('returns empty status to an unrelated chat without exposing the other run', async () => {
     startSwarm(1);
     const text = await asChat('c-stranger', 'status');
-    expect(text).toContain('AGENTS_BUSY');
+    expect(text).toContain('No workers or retained worker history');
+    const status = await structuredAsChat('c-stranger', 'status');
+    expect(status).toMatchObject({ self: null, run_id: null, agents: [] });
     expect(text).not.toContain('worker-1');
     expect(text).not.toContain('task 1');
     expect(text).not.toContain(PRIME_CHAT);
@@ -2818,9 +2971,9 @@ describe('through the MCP endpoint', () => {
     );
     // worker-2 is still live against a limit of 3, so two slots are free — not three.
     expect(report?.text).toContain('2 of 3 worker slots are free');
-    expect(report?.text).toContain('is sleeping, not gone');
-    expect(report?.text).toContain('reuse it first with agents action=message');
-    expect(report?.text).toContain('action=spawn only when no sleeping worker is suitable');
+    expect(report?.text).toContain('worker-1 sleeping');
+    expect(report?.text).toContain('Reuse first: agents action=message to="worker-1"');
+    expect(report?.text).toContain('Spawn only when no sleeping worker is suitable');
     expect(report?.text).not.toContain('cannot be reused');
 
     const status = await asChat(PRIME_CHAT, 'status');

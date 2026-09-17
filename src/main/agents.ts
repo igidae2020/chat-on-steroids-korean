@@ -17,6 +17,8 @@ import { randomUUID } from 'node:crypto';
 import type { AgentInfo, AgentMessage, AgentState, ReasoningEffort, SwarmState } from '../shared/session.js';
 import { REASONING_EFFORTS, isReasoningEffort } from '../shared/session.js';
 import { getConfig } from './config.js';
+import { getChatModels } from './chat-models.js';
+import type { ChatModelOption } from '../shared/chat-models.js';
 import { logInfo, logWarn } from './logger.js';
 import { inheritWorkspace, releasePrimeWorkspace, bindAgentWorkspace } from './workspace.js';
 
@@ -125,12 +127,12 @@ export class AgentsBusyError extends AgentError {
  * may append the current recovery status; the refusal itself only describes this operation.
  */
 export class IdentityLostError extends AgentError {
-  constructor() {
+  constructor(message?: string) {
     super(
-      'WORKER_IDENTITY_LOST: Chat On Steroids could not tell which conversation this call came from, so it cannot ' +
+      message ?? ('WORKER_IDENTITY_LOST: Chat On Steroids could not tell which conversation this call came from, so it cannot ' +
         'act on the run from here. No agent operation was performed. Wait briefly and retry this operation once. ' +
         'If it is still refused, preserve your result in the chat and report that delivery is unconfirmed; ' +
-        'do not claim the message or finish report reached its recipient.'
+        'do not claim the message or finish report reached its recipient.')
     );
   }
 }
@@ -685,14 +687,11 @@ export function swarmStateForCaller(caller: Caller): SwarmState {
   const dormant = dormantRunForPrime(caller.conversationId);
   if (dormant) return stateForAgents(dormant.agents, false);
 
-  if (runs.size > 0) throw new AgentsBusyError();
-  throw new AgentError(
-    'No sub-agent history belongs to this conversation. Call agents action=spawn to start one.'
-  );
+  return stateForAgents(new Map(), false, false);
 }
 
 export interface CallerSwarmStatus {
-  self: AgentInfo;
+  self: AgentInfo | null;
   state: SwarmState;
   /** Null while this owner's history is parked. */
   runId: string | null;
@@ -726,10 +725,8 @@ export function statusForCaller(caller: Caller): CallerSwarmStatus {
       freeWorkerSlots: getConfig().multiAgent.maxWorkers
     };
   }
-  if (runs.size > 0) throw new AgentsBusyError();
-  throw new AgentError(
-    'No sub-agent run or worker history belongs to this conversation. Call agents action=spawn to start one.'
-  );
+  return { self: null, state: stateForAgents(new Map(), false, false), runId: null,
+    freeWorkerSlots: getConfig().multiAgent.maxWorkers };
 }
 
 /**
@@ -1127,8 +1124,8 @@ function settleSpawnStage(stage: SpawnStageState, accepted: boolean): void {
  *
  * Malformed input fails the whole spawn rather than opening a worker under a model nobody
  * asked for: like every other spawn validation, this runs before the first mutation, so a
- * rejection leaves zero workers behind. A well-formed slug ChatGPT does not recognise is
- * not ours to refuse — the fresh chat simply opens with the default.
+ * rejection leaves zero workers behind. Account membership is checked separately once
+ * both requested settings have been resolved.
  */
 function normalizeModel(index: number, value: string | null | undefined): string | null {
   if (value === undefined || value === null) return null;
@@ -1144,9 +1141,8 @@ function normalizeModel(index: number, value: string | null | undefined): string
 
 /**
  * Whether a string is shaped like a ChatGPT model slug. The single vocabulary check for
- * worker models, shared by the broker and the bridge's durable restore: slugs are OpenAI's
- * vocabulary, so anything shaped like one passes through and an unknown one simply opens
- * with the account default.
+ * worker models, shared by the broker and the bridge's durable restore. Syntax does not
+ * prove availability; admission checks observed choices and the browser confirms at Send.
  */
 export function isModelSlug(value: unknown): value is string {
   return typeof value === 'string' && MODEL_SLUG_RE.test(value);
@@ -1172,6 +1168,23 @@ function normalizeReasoningEffort(index: number, value: string | null | undefine
     );
   }
   return effort;
+}
+
+/** Reject known-invalid choices before reserving any workers or opening browser documents. */
+function validateWorkerModel(index: number, model: string | null, effort: ReasoningEffort | null, models: ChatModelOption[]): void {
+  // No observation is not an empty entitlement list. Preserve the requested settings for
+  // native confirmation; never guess an account default or manufacture a model alias.
+  if (!models.length) return;
+  const choices = model ? models.filter(choice => choice.id === model || choice.aliases?.includes(model)) : models;
+  const available = models.map(choice => `${choice.id} (${choice.efforts.join(', ')})`).join('; ');
+  if (model && choices.length !== 1) {
+    throw new AgentError(`Worker ${index + 1}'s model "${model}" is ${choices.length ? 'ambiguous' : 'not observed'} in the ChatGPT account. Observed model ids and reasoning: ${available}`);
+  }
+  if (effort && !choices.some(choice => choice.efforts.includes(effort))) {
+    throw new AgentError(`Worker ${index + 1}'s reasoning_effort "${effort}" is not observed${model ? ` for model "${model}"` : ' in the ChatGPT account'}. Observed model ids and reasoning: ${available}`);
+  }
+  // Keep provider aliases exact: reducing a lane-specific slug to its family without an
+  // explicit effort can change the requested lane. The native picker still proves the pair.
 }
 
 /**
@@ -1250,6 +1263,7 @@ export function spawn(input: SpawnInput, options: SpawnOptions = {}): SpawnResul
     throw new AgentError(`The shared context is too long (limit ${MAX_CONTEXT_CHARS} characters)`);
   }
 
+  const observedModels = getChatModels().models;
   const planned = input.workers.map((worker, index) => {
     const task = worker.task.trim();
     if (!task) throw new AgentError(`Worker ${index + 1} has no task. Every worker needs one.`);
@@ -1260,6 +1274,7 @@ export function spawn(input: SpawnInput, options: SpawnOptions = {}): SpawnResul
     }
     const model = normalizeModel(index, worker.model === undefined ? getConfig().multiAgent.defaultModel : worker.model);
     const reasoningEffort = normalizeReasoningEffort(index, worker.reasoning_effort === undefined ? getConfig().multiAgent.defaultReasoning : worker.reasoning_effort);
+    validateWorkerModel(index, model, reasoningEffort, observedModels);
     // Composed once, here, and stored as *the* task. Everything downstream — the bootstrap
     // the browser types, the repeated-spawn match, the status table, the snapshot — then
     // sees the same single string a worker actually receives, with no second field to keep
@@ -1269,7 +1284,7 @@ export function spawn(input: SpawnInput, options: SpawnOptions = {}): SpawnResul
 
   const conversationId = input.caller.conversationId ?? null;
   if (!conversationId) {
-    throw new AgentError(
+    throw new IdentityLostError(
       'UNIDENTIFIED_CALLER: this app could not prove which ChatGPT conversation this call came from, so it will not ' +
         'make this chat the prime agent of a run. No workers were created. The paired browser extension has to be ' +
         'connected and this conversation has to be showing its connector activity; wait a moment and call ' +
@@ -1682,7 +1697,7 @@ function stageMessagesActive(
   }
   // Reservation is part of the same all-or-nothing plan as the queue entries: every check
   // above has passed by now, so no recipient can still turn out to be unreachable.
-  for (const agent of reserved) beginRevival(agent);
+  const previousAssignments = new Map([...reserved].map((agent) => [agent, beginRevival(agent)]));
   changed();
   const messages = planned.map(({ message }) => ({ ...message }));
   let settled = false;
@@ -1713,6 +1728,7 @@ function stageMessagesActive(
       // leave a worker `waking` with nothing on its way to wake it.
       for (const agent of reserved) {
         if (agent.info.state !== 'waking') continue;
+        Object.assign(agent.info, previousAssignments.get(agent));
         returnWakingWorkerToStopped(
           agent,
           Date.now(),
@@ -2022,9 +2038,8 @@ function planFinish(agent: Agent, result: string): { info: AgentInfo; report: Ag
 (${agent.info.id} is finished for good: its own chat has reached the context limit, so it cannot be woken again. ` +
       `${slots}Spawn a new worker for any remaining work.)`
     : `
-(${agent.info.id} is sleeping, not gone. ${slots}It keeps this chat and everything it has already worked out. For ` +
-      `related follow-up work, reuse it first with agents action=message to="${agent.info.id}" — that wakes it up where ` +
-      'it left off. Use action=spawn only when no sleeping worker is suitable or true parallel capacity is needed.)';
+(${agent.info.id} sleeping; ${slots}Reuse first: agents action=message to="${agent.info.id}". ` +
+      'Spawn only when no sleeping worker is suitable or more parallel capacity is needed.)';
   const report = newMessage(
     agent.info.id,
     PRIME_ID,
@@ -2265,8 +2280,8 @@ export function failAgent(
     id,
     PRIME_ID,
     note ??
-      `[${id} failed] Its ChatGPT tab never came up: ${agent.info.result}. It will not report. Do that part of the ` +
-        'work yourself or spawn a replacement worker.'
+      `[${id} failed] The worker did not start: ${agent.info.result}. It will not report. Continue that part of the ` +
+        'work yourself. Resolve the reported startup problem before spawning a replacement; repeating the same failed startup opens more tabs without starting the work.'
   );
   const prime = primeAgent(run);
   prime.queue.push(report);
@@ -2513,6 +2528,8 @@ function planRevivalText(agent: Agent): { text: string; messageIds: string[] } {
   return { text, messageIds: waiting.map((message) => message.id) };
 }
 
+type WorkerAssignment = Pick<AgentInfo, 'label' | 'task' | 'result'>;
+
 /**
  * Reserves a slot for a sleeping worker and asks the browser to wake it, or refuses.
  *
@@ -2521,7 +2538,16 @@ function planRevivalText(agent: Agent): { text: string; messageIds: string[] } {
  * slot, so the transition into `waking` — which {@link occupiesSlot} counts — happens here,
  * synchronously, before anything touches the browser.
  */
-function beginRevival(agent: Agent): void {
+function beginRevival(agent: Agent): WorkerAssignment {
+  const previous = { label: agent.info.label, task: agent.info.task, result: agent.info.result };
+  // The accepted inbox owns this assignment. A spawn label is not a label for later work,
+  // and an old report must not masquerade as the result of the waking assignment. Keep that
+  // report in the prime's existing inbox/history; status carries only a bounded task preview.
+  agent.info.label = agent.info.id;
+  agent.info.task = agent.queue
+    .filter((message) => message.ackedAt === null && !message.offeredViaRevival)
+    .map((message) => message.text).join('\n\n').slice(0, MAX_TASK_CHARS);
+  agent.info.result = null;
   agent.info.state = 'waking';
   // `sleptAt` stays: the worker is still stopped while waking, and that timestamp is what tells
   // a turn the page reports *now* apart from the page replaying the turn that ended before the
@@ -2533,6 +2559,7 @@ function beginRevival(agent: Agent): void {
   agent.info.revivable = true;
   agent.info.lastRevivalCommandId = null;
   logInfo(`multi-agent: ${agent.info.id} is being woken in conversation ${agent.info.conversationId}`);
+  return previous;
 }
 
 /**
@@ -2555,7 +2582,7 @@ export function stageQueuedWorkerRevivals(ids: readonly string[], runId?: string
   const run = scopedRun(runId);
   if (!run || ids.length === 0) return { waking: [], commit: () => undefined, rollback: () => undefined };
   const wanted = new Set(ids);
-  const reserved: Array<{ agent: Agent; sleptAt: number | null }> = [];
+  const reserved: Array<{ agent: Agent; sleptAt: number | null; assignment: WorkerAssignment }> = [];
   for (const agent of run.agents.values()) {
     if (
       agent.info.role !== 'worker' ||
@@ -2575,8 +2602,8 @@ export function stageQueuedWorkerRevivals(ids: readonly string[], runId?: string
     );
     if (!hasUnseen || freeWorkerSlots(run.runId) <= 0) continue;
     const sleptAt = agent.info.sleptAt;
-    beginRevival(agent);
-    reserved.push({ agent, sleptAt });
+    const assignment = beginRevival(agent);
+    reserved.push({ agent, sleptAt, assignment });
   }
   if (reserved.length === 0) return { waking: [], commit: () => undefined, rollback: () => undefined };
   changed();
@@ -2591,8 +2618,9 @@ export function stageQueuedWorkerRevivals(ids: readonly string[], runId?: string
     rollback: () => {
       if (settled) return;
       settled = true;
-      for (const { agent, sleptAt } of reserved) {
+      for (const { agent, sleptAt, assignment } of reserved) {
         if (agent.info.state !== 'waking') continue;
+        Object.assign(agent.info, assignment);
         returnWakingWorkerToStopped(
           agent,
           sleptAt ?? Date.now(),
@@ -3069,7 +3097,7 @@ export function noteAgentAlive(
   agent.info.sleptAt = null;
   agent.info.revivable = false;
   agent.info.lastSeenAt = now;
-  if (was === 'failed') agent.info.result = null;
+  agent.info.result = null;
   if (!agent.info.activatedAt) agent.info.activatedAt = now;
   // Two revivals need saying, and both for the same reason: the prime was told something
   // about this worker that has just stopped being true, and left standing it is how the same

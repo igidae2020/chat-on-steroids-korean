@@ -18,6 +18,8 @@ import path from 'node:path';
 import { JSDOM } from 'jsdom';
 import { beforeAll, describe, expect, it } from 'vitest';
 import { filterSettingsSections } from '../src/renderer/dom.js';
+import { sessionWorkingAt } from '../src/shared/session-activity.js';
+import { CHAT_ACTIVE_MS, type SessionSummary } from '../src/shared/session.js';
 
 let document: Document;
 let css = '';
@@ -42,9 +44,9 @@ it('searches whole settings sections without empty headings, orphaned controls o
   const conditional = document.getElementById('goalModels')!;
   expect(conditional.hidden).toBe(true);
   filterSettingsSections(view, '  SESSION FINISH  ');
-  expect(sections.filter(section => !section.hidden).map(section => section.textContent)).toEqual(['턴 유지']);
+  expect(sections.filter(section => !section.hidden).map(section => section.textContent)).toEqual(['Keep the turn open']);
   for (const section of sections) expect((section.nextElementSibling as HTMLElement).hidden).toBe(section.hidden);
-  expect(document.getElementById('finishAction')!.closest('.pane')!.hasAttribute('hidden')).toBe(false);
+  expect(document.getElementById('finishTool')!.closest('.pane')!.hasAttribute('hidden')).toBe(false);
   expect(document.getElementById('goalKey')!.closest('.pane')!.hasAttribute('hidden')).toBe(true);
   filterSettingsSections(view, 'no-such-setting-123');
   expect(sections.every(section => section.hidden)).toBe(true);
@@ -55,11 +57,12 @@ it('searches whole settings sections without empty headings, orphaned controls o
   expect(document.getElementById('settingsSearchEmpty')!.hidden).toBe(true);
 });
 
-it('exposes Goal tool context as an opt-in setting wired into the existing form', () => {
+it('limits the existing tool-detail preference to handoff briefs', () => {
   const toggle = document.getElementById('goalIncludeToolCalls') as HTMLInputElement;
   expect(toggle.type).toBe('checkbox');
   expect(toggle.checked).toBe(false);
-  expect(toggle.closest('label')?.textContent).toContain('기록된 도구 인수·결과');
+  expect(toggle.closest('label')?.textContent).toContain('Include tool details in handoffs');
+  expect(toggle.closest('label')?.textContent).toContain('Goal and Loop use user messages and assistant updates and answers');
   expect(chatSource).toContain("includeToolCalls: $<HTMLInputElement>('goalIncludeToolCalls').checked");
   expect(chatSource).toContain("applyChatChecked($<HTMLInputElement>('goalIncludeToolCalls')");
 });
@@ -85,7 +88,7 @@ function rule(selector: string): string {
 
 describe('the session card header', () => {
   it('indents rendered project tasks once and gives worker children their additional depth', () => {
-    expect(rule('.project-group > .sess, .project-group > .worker-group, .project-show-more')).toContain('margin-left: 20px');
+    expect(rule('.project-group > .sess, .project-group > .worker-group')).toContain('margin-inline-start: 24px');
     expect(rule('.worker-group')).toContain('padding-left: 16px');
     expect(css).not.toContain('.project-group .session-row');
   });
@@ -168,8 +171,11 @@ describe('a session row', () => {
   it('does not call an idle prime active merely because it still owns the run', () => {
     expect(chatSource).toMatch(/else if \(agent && agent\.role !== 'prime'\)/);
     // Idle means idle: generic recording traffic cannot renew the exact tool clock.
-    expect(chatSource).toMatch(/Math\.max\(summary\.lastAssistantFinalAt \?\? 0, summary\.lastTurnEndAt \?\? 0\)/);
-    expect(chatSource).toMatch(/lastActivityAt > finishedAt/);
+    const summary = { startedAt: 100, lastToolCallAt: 200, lastAssistantFinalAt: 300,
+      lastTurnEndAt: 300, updatedAt: 400, activeTurnId: 'old-open-turn', agents: ['prime'],
+      endedAt: null, origin: null } as SessionSummary;
+    expect(sessionWorkingAt(summary, 400)).toBe(false);
+    expect(sessionWorkingAt({ ...summary, lastToolCallAt: 350 }, 400)).toBe(true);
   });
 
   /**
@@ -178,8 +184,12 @@ describe('a session row', () => {
    * one a user most wants to see is still going - as idle.
    */
   it('uses session start and exact calls rather than reload-generated turn boundaries for visible activity', () => {
-    expect(chatSource).toMatch(/Math\.max\(summary\.startedAt, summary\.lastToolCallAt \?\? 0\)/);
-    expect(chatSource).toMatch(/return summary\.endedAt === null && !workerReportedFinish\(summary\) && recentChatActivity\(summary\)/);
+    const summary = { startedAt: 100, lastToolCallAt: null, endedAt: null, origin: null,
+      activeTurnId: 'reload-turn', updatedAt: 100 + CHAT_ACTIVE_MS } as SessionSummary;
+    expect(sessionWorkingAt(summary, 101)).toBe(true);
+    expect(sessionWorkingAt(summary, 101 + CHAT_ACTIVE_MS)).toBe(false);
+    expect(sessionWorkingAt({ ...summary, activityExpiresAt: 100 + 10 * 60_000 }, 101 + CHAT_ACTIVE_MS)).toBe(true);
+    expect(sessionWorkingAt({ ...summary, activityExpiresAt: null }, 101)).toBe(false);
     expect(chatSource).toMatch(/else if \(!agent && workerReportedFinish\(summary\)\) badges\.push\(AGENT_BADGE\.sleeping\)/);
     expect(chatSource).toMatch(/if \(sessionWorking\(summary\)\) badges\.push\(AGENT_BADGE\.active\)/);
     expect(chatSource).toMatch(/scheduleToolActivityExpiry/);
@@ -194,7 +204,7 @@ describe('a session row', () => {
 describe('the session-row chat actions', () => {
   it('keeps current-chat pressure in the conversation detail', () => {
     expect(chatSource).toContain('compactNumber(summary.contextTokens)');
-    expect(chatSource).toContain('현재 대화 맥락 약');
+    expect(chatSource).toContain('rough current-chat context tokens');
   });
 
   it('reserves all three top-right hit targets instead of laying the timestamp underneath them', () => {
@@ -211,7 +221,7 @@ describe('the session-row chat actions', () => {
 
   it('keeps a block visible without hovering, because it is state and not just an action', () => {
     expect(rule('.session-status.is-failed')).toContain('background: var(--red)');
-    expect(chatSource).toContain("indicator.setAttribute('aria-label', status.text)");
+    expect(chatSource).toContain("ui(indicator, 'aria-label', () => t(status.text))");
   });
 
   /**
@@ -229,7 +239,7 @@ describe('the session-row chat actions', () => {
     );
     expect(chatSource).toMatch(/unattributedBlocked\(\)[\s\S]{0,200}allowUnattributedCalls === false/);
     // Same word and same tone as a blocked chat: one state, read the same way down the list.
-    expect(chatSource).toMatch(/unattributedBlocked\(\)[\s\S]{0,120}text: '차단됨', tone: 'is-failed'/);
+    expect(chatSource).toMatch(/unattributedBlocked\(\)[\s\S]{0,120}text: 'blocked', tone: 'is-failed'/);
     // And the row says what it is, on its own line, because no other row needs explaining.
     expect(rule('.session-diagnostics > summary')).toContain('cursor: pointer');
   });
@@ -271,9 +281,10 @@ describe('the chat panel cards', () => {
 
   it('gives the session card one row per child, including its navigation row', () => {
     const card = document.getElementById('chatBody')!.closest('.card')!;
-    // Subhead, scrolling conversation, finish-task cards, composer and footer.
+    // Subhead, scrolling conversation, shared plan/queue dock, composer and footer.
     const layoutChildren = [...card.children].filter(child => child.id !== 'chatSettingsBtn');
     expect(layoutChildren.length).toBe(5);
+    expect(document.getElementById('composerDock')!.firstElementChild?.id).toBe('agentPlan');
     expect(document.getElementById('inputQueue')!.closest('#chatBody')).not.toBeNull();
     expect(card.classList.contains('is-session')).toBe(true);
     expect(tracks("[data-panel='chat'] .card.is-session")).toHaveLength(layoutChildren.length);
@@ -316,7 +327,7 @@ describe('an expanded tool call', () => {
 /**
  * Every recorded event kind has a row.
  *
- * `eventBody` ends in a `default` arm that renders the words "알 수 없는 이벤트", so a kind
+ * `eventBody` ends in a `default` arm that renders the words "Unknown event", so a kind
  * added to the recorder and not to the renderer does not fail a build or a type check —
  * it ships, and shows the user grey placeholder rows in their own timeline. That is how
  * `agent_message` came to be unrendered: it was added to the union, written by the
@@ -412,10 +423,12 @@ describe('the settings sheet', () => {
   it('asks for a single compaction threshold', () => {
     const pane = document.querySelector('.view[data-view="settings"]')!;
     const numbers = [...pane.querySelectorAll('input[type="number"]')].map((input) => input.id);
-    expect(numbers).toEqual(['sessRetain', 'autoCompactTokens', 'maWorkers']);
-    for (const id of ['sessAdvisory', 'sessLimit']) {
+    expect(numbers).toEqual(['maWorkers', 'autoCompactTokens']);
+    for (const id of ['sessRecord', 'sessRetain', 'sessAdvisory', 'sessLimit']) {
       expect(document.getElementById(id), `#${id} is back`).toBeNull();
     }
+    expect(document.querySelector('[data-group="recording"]')).toBeNull();
+    expect(pane.textContent).not.toContain('Keep recordings');
   });
 
   /**
@@ -445,6 +458,9 @@ describe('the settings sheet', () => {
     }
     // Selects and textareas save through the same change listener.
     for (const field of pane.querySelectorAll('select, textarea')) {
+      // Interface language persists in the renderer; the event/storage behavior is
+      // covered by renderer-i18n, independently of the app configuration channel.
+      if (field.id === 'uiLanguage') continue;
       expect(listened![1], `#${field.id} never saves`).toContain(`'${field.id}'`);
     }
   });

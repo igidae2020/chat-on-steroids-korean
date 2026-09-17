@@ -1,4 +1,6 @@
 import type { ReasoningEffort } from './session.js';
+import { WINDOWS_COMPUTER_READ_METHODS, WINDOWS_COMPUTER_INPUT_METHODS } from './windows-computer.js';
+import { BROWSER_READ_TOOLS, BROWSER_WRITE_TOOLS } from './browser-control.js';
 /** Types shared between the main process and the renderer. No runtime logic here. */
 
 /**
@@ -31,7 +33,6 @@ export const CAPABILITIES = [
   'move',
   'deleteFile',
   'command',
-  'saveArtifact',
   'screen',
   'control',
   'clipboardRead',
@@ -61,7 +62,6 @@ export const WRITE_CAPABILITIES: readonly Capability[] = [
   'move',
   'deleteFile',
   'command',
-  'saveArtifact',
   'control',
   'clipboardWrite'
 ];
@@ -96,6 +96,10 @@ export interface Root {
 export type TunnelKind = 'openai' | 'cloudflared' | 'manual';
 
 export interface TunnelSettings {
+  /** Active setup owns these tunnel IDs; inactive setups live in Config.setupProfiles. */
+  profileId?: string;
+  profileName?: string;
+  profileEpoch?: number;
   kind: TunnelKind;
   /**
    * OpenAI tunnel id for the Core connector, format tunnel_<32 hex>. Not a secret.
@@ -148,19 +152,13 @@ export interface UiPrefs {
 }
 
 /**
- * Session recording. On by default: unlike the diagnostics log this one writes what
- * happened to disk and keeps it, but the timeline, Compact & resume and the agent
- * features are all reads of that record, so an app with it off is an app with its
- * reason for existing switched off. It stays a switch, and an explicit `false` is
- * never overridden.
- *
- * The same switch starts the local bridge the Chrome extension talks to: recording
- * without the extension only sees our own tool calls, and the extension has nothing
- * to report to if nothing is recording.
+ * Session recording is a product invariant. Legacy/wire fields remain so old configs and
+ * clients parse, but the main config boundary always publishes `record: true` and
+ * `retainDays: 0` (no age expiry). Large image bytes retain their separate bounded quota.
  */
 export interface SessionSettings {
   record: boolean;
-  /** Days of history kept. 0 keeps everything. */
+  /** Compatibility projection. Canonical value is 0: recordings do not expire by age. */
   retainDays: number;
   /** Estimated tokens at which the app starts suggesting a compaction. */
   advisoryTokens: number;
@@ -190,11 +188,10 @@ export interface CompactionSettings {
 /**
  * The reasoning budget asked of the goal model, in OpenRouter's own vocabulary.
  *
- * `default` sends no `reasoning` block at all, which is what the provider's own default
- * means. Every other value is passed through as `reasoning: { effort }` — a model that has
- * no reasoning mode ignores it, so the setting is safe to leave alone.
+ * `default` omits effort selection; reasoning text is still excluded from driver output.
+ * OpenRouter's model catalogue determines which explicit efforts the UI offers.
  */
-export const GOAL_REASONING_LEVELS = ['default', 'minimal', 'low', 'medium', 'high'] as const;
+export const GOAL_REASONING_LEVELS = ['default', 'none', 'minimal', 'low', 'medium', 'high', 'xhigh', 'max'] as const;
 export type GoalReasoning = (typeof GOAL_REASONING_LEVELS)[number];
 
 /**
@@ -245,7 +242,7 @@ export interface GoalProviderSettings {
 export interface GoalSettings {
   /** Optional active-turn Goal impulses; zero disables them. */
   impulseMinutes?: number;
-  /** Include bounded recorded tool arguments/results in Goal decision context. */
+  /** Include tool details in handoff briefs only; Goal/Loop always use authored conversation text. */
   includeToolCalls?: boolean;
   helperModel?: string;
   helperReasoning?: ReasoningEffort;
@@ -310,13 +307,9 @@ export interface McpSettings {
   instructions: string;
 }
 
-export interface ArtifactSettings {
-  /** Per-file byte ceiling enforced before, during and after the download stream. */
-  maxFileBytes: number;
-}
-
 export interface Config {
-  artifacts: ArtifactSettings;
+  /** Inactive setups only. Keys remain in encrypted secret slots addressed by profile ID. */
+  setupProfiles?: Array<{ id: string; name: string; tunnelId: string; desktopTunnelId: string; pluginsTunnelId: string }>;
   roots: Root[];
   capabilities: Capabilities;
   readOnly: boolean;
@@ -509,7 +502,6 @@ export interface UpdateStatus {
 
 /** Where an installation that cannot update itself gets the new version by hand. */
 export const RELEASE_REPOSITORY = 'igidae2020/chat-on-steroids-korean';
-export const DISTRIBUTION_LABEL = '한국어 · OpenCodex';
 export const RELEASES_PAGE = `https://github.com/${RELEASE_REPOSITORY}/releases/latest`;
 
 /**
@@ -543,13 +535,12 @@ export interface MacOSDesktopAccessStatus {
 /**
  * Whether the enabled product surface currently needs the companion browser extension.
  *
- * Recording consumes browser observations, and multi-agent uses the browser to open/bind
- * worker chats. Goal and compaction also execute through that bridge, but both depend on a
- * recorded session, so they are not independently viable reasons to require a browser when
- * recording itself is off.
+ * Recording is always on and consumes browser observations, so the extension bridge is an
+ * unconditional product dependency. Keep the parameter for source compatibility with callers
+ * that already pass their config snapshot.
  */
-export function browserExtensionRequired(config: Pick<Config, 'sessions' | 'multiAgent'>): boolean {
-  return config.sessions.record || config.multiAgent.enabled;
+export function browserExtensionRequired(_config: Pick<Config, 'sessions' | 'multiAgent'> & Partial<Pick<Config, 'capabilities'>>): boolean {
+  return true;
 }
 
 export interface AppState {
@@ -585,7 +576,6 @@ export const DEFAULT_CAPABILITIES: Capabilities = {
   move: false,
   deleteFile: false,
   command: false,
-  saveArtifact: false,
   screen: false,
   control: false,
   clipboardRead: false,
@@ -593,45 +583,43 @@ export const DEFAULT_CAPABILITIES: Capabilities = {
 };
 
 export const CAPABILITY_LABELS: Record<Capability, string> = {
-  browse: '폴더 탐색',
-  search: '파일 검색',
-  read: '파일 읽기',
-  metadata: '파일 정보',
-  create: '파일 생성',
-  edit: '파일 편집',
-  move: '이동·이름 변경',
-  deleteFile: '파일 삭제',
-  command: '명령 실행',
-  saveArtifact: 'ChatGPT 파일 저장',
-  screen: '화면 확인',
-  control: '마우스·키보드 제어',
-  clipboardRead: '클립보드 읽기',
-  clipboardWrite: '클립보드 쓰기'
+  browse: 'Browse folders',
+  search: 'Search files',
+  read: 'Read files',
+  metadata: 'File metadata',
+  create: 'Create files',
+  edit: 'Edit files',
+  move: 'Move / rename',
+  deleteFile: 'Delete files',
+  command: 'Run commands',
+  screen: 'See the screen',
+  control: 'Control mouse and keyboard',
+  clipboardRead: 'Read clipboard',
+  clipboardWrite: 'Write clipboard'
 };
 
 /**
  * One short line per capability, shown under its checkbox when the group is expanded.
  *
  * A clause, not a paragraph. Which MCP tools a permission actually turns on is a separate
- * fact and is listed separately — see CAPABILITY_TOOLS — because that list is the part
+ * fact and is listed separately — see capabilityTools — because that list is the part
  * that goes stale when the tool surface is consolidated, and a sentence with the tool name
  * buried in it is a sentence nobody rewrites when the tool is renamed.
  */
 export const CAPABILITY_DETAILS: Record<Capability, string> = {
-  browse: '승인한 폴더의 내용을 나열합니다.',
-  search: '파일 이름·패턴과 파일 안의 텍스트를 검색합니다.',
-  read: '지정 범위의 텍스트를 읽고 로컬 이미지를 확인합니다.',
-  metadata: '내용을 읽지 않고 크기·날짜·줄 수를 확인합니다.',
-  create: '새 파일과 필요한 폴더를 만듭니다.',
-  edit: '정확한 수정 내용을 여러 파일에 원자적으로 적용합니다.',
-  move: '승인한 폴더 안에서 이동하거나 이름을 바꿉니다.',
-  deleteFile: '영구 삭제입니다. 휴지통으로 이동하지 않습니다.',
-  command: '현재 사용자 권한으로 실행합니다. 승인한 폴더로 제한되지 않습니다.',
-  saveArtifact: 'ChatGPT가 생성한 이미지와 파일을 승인한 폴더에 저장합니다.',
-  screen: '화면 캡처와 열린 창·UI 요소를 확인합니다.',
-  control: '현재 사용자로 포인터 이동·클릭·텍스트 입력·키 입력을 수행합니다.',
-  clipboardRead: '현재 클립보드 텍스트를 읽습니다.',
-  clipboardWrite: '창 포커스나 키 입력 없이 클립보드 내용을 바꿉니다.'
+  browse: 'List what is inside an approved folder.',
+  search: 'Find files by name or glob, and text inside them.',
+  read: 'Read text in ranges, and open local images into vision.',
+  metadata: 'Size, dates and line count, without the contents.',
+  create: 'Add new files, and the folders they need.',
+  edit: 'Exact edits, applied atomically across files.',
+  move: 'Move or rename, both ends inside approved folders.',
+  deleteFile: 'Permanent — there is no Recycle Bin.',
+  command: 'Run anything as you. NOT limited to approved folders.',
+  screen: 'Browser tabs, DOM, screenshots, console and network; native windows where supported.',
+  control: 'Browser navigation, input and page JavaScript; native mouse and keyboard where supported.',
+  clipboardRead: 'Read the current clipboard text.',
+  clipboardWrite: 'Replace the clipboard without focus or keystrokes.'
 };
 
 /**
@@ -642,7 +630,7 @@ export const CAPABILITY_DETAILS: Record<Capability, string> = {
  * `read`; `find` exists only where running commands is switched off, which is why it is
  * marked rather than listed flatly (see SurfaceRegistrar.findExposed).
  */
-export const CAPABILITY_TOOLS: Record<Capability, readonly string[]> = {
+const CAPABILITY_TOOLS: Record<Capability, readonly string[]> = {
   browse: ['read'],
   search: ['read', 'find'],
   read: ['read', 'view_image'],
@@ -652,9 +640,23 @@ export const CAPABILITY_TOOLS: Record<Capability, readonly string[]> = {
   move: ['apply_patch'],
   deleteFile: ['apply_patch'],
   command: ['exec_command', 'write_stdin'],
-  saveArtifact: ['download_artifact'],
   screen: ['observe'],
   control: ['computer'],
   clipboardRead: ['computer'],
   clipboardWrite: ['computer']
 };
+
+/** Settings use the same Windows method lists as registration, with explicit host identity. */
+export function capabilityTools(capability: Capability, platform?: PlatformFamily): readonly string[] {
+  const browser = capability === 'screen' ? BROWSER_READ_TOOLS : capability === 'control' ? BROWSER_WRITE_TOOLS : [];
+  if (!DESKTOP_CAPABILITIES.includes(capability)) return CAPABILITY_TOOLS[capability];
+  if (platform === 'macos') return [...browser, ...CAPABILITY_TOOLS[capability]];
+  if (platform !== 'windows') return browser;
+  switch (capability) {
+    case 'screen': return [...browser, ...WINDOWS_COMPUTER_READ_METHODS];
+    case 'control': return [...browser, ...WINDOWS_COMPUTER_INPUT_METHODS];
+    case 'clipboardRead': return ['read_clipboard'];
+    case 'clipboardWrite': return ['write_clipboard'];
+    default: return [];
+  }
+}

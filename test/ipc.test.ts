@@ -85,6 +85,100 @@ const removeRoot = (payload: unknown): Promise<any> => handlers.get('roots:remov
 const sessionEvents = (payload: unknown): Promise<any> => handlers.get('sessions:events')!(null, payload) as Promise<any>;
 const sessionList = (): Promise<any> => handlers.get('sessions:list')!(null, undefined) as Promise<any>;
 
+it('switches setup IDs and encrypted key ownership without changing shared settings', async () => {
+  const { getSecret } = await import('../src/main/secrets.js');
+  const original = getConfig();
+  const tunnelA = 'tunnel_aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa';
+  await saveConfig({ ...original, tunnel: { ...original.tunnel, tunnelId: tunnelA } });
+  const secret = (value: string, profileId?: string) => handlers.get('secret:set')!(null, { value, profileId }) as Promise<any>;
+  const profile = (payload: unknown) => handlers.get('setup:profile')!(null, payload) as Promise<any>;
+  expect(await secret('fixture-setup-a')).toMatchObject({ ok: true });
+  const added = await profile({ action: 'add', name: 'Second account' });
+  expect(added).toMatchObject({ ok: true, data: { hasApiKey: false } });
+  const second = getConfig().tunnel.profileId!;
+  expect(getConfig().tunnel.tunnelId).toBe('');
+  const shared = getConfig();
+  expect(shared.roots).toEqual(original.roots); expect(shared.multiAgent).toEqual(original.multiAgent);
+  expect(await secret('fixture-setup-b', second)).toMatchObject({ ok: true });
+  const baseB = getConfig();
+  expect(await save({ ...baseB, tunnel: { ...baseB.tunnel, tunnelId: 'tunnel_bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb' } })).toMatchObject({ ok: true });
+  expect(await profile({ action: 'select', id: 'default' })).toMatchObject({ ok: true, data: { hasApiKey: true } });
+  expect(getConfig().tunnel.tunnelId).toBe(tunnelA);
+  expect(await getSecret('openaiApiKey')).toBe('fixture-setup-a');
+  expect(await getSecret(`setup:${second}`)).toBe('fixture-setup-b');
+  // A late write still names B even when A is now selected.
+  await secret('fixture-setup-b-edited', second);
+  expect(await getSecret('openaiApiKey')).toBe('fixture-setup-a');
+  const stored = await fs.readFile(path.join(dir, 'config.json'), 'utf8');
+  expect(stored).not.toContain('fixture-setup-');
+  expect((await profile({ action: 'select', id: second })).data.hasApiKey).toBe(true);
+  expect(getConfig().tunnel.tunnelId).toBe('tunnel_bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb');
+  expect(getConfig().setupProfiles).toHaveLength(1);
+});
+
+it('removes active and inactive profiles with their exact keys, preserving the final profile', async () => {
+  const { getSecret } = await import('../src/main/secrets.js');
+  const profile = (payload: unknown) => handlers.get('setup:profile')!(null, payload) as Promise<any>;
+  const secret = (value: string, profileId?: string) => handlers.get('secret:set')!(null, { value, profileId }) as Promise<any>;
+  await secret('fixture-default-key');
+  await profile({ action: 'add', name: 'Second' });
+  const second = getConfig().tunnel.profileId!;
+  await secret('fixture-second-key', second);
+  await profile({ action: 'add', name: 'Third' });
+  const third = getConfig().tunnel.profileId!;
+  await secret('fixture-third-key', third);
+  expect(await profile({ action: 'remove', id: second })).toMatchObject({ ok: true });
+  expect(getConfig().tunnel.profileId).toBe(third);
+  expect(await getSecret(`setup:${second}`)).toBeNull();
+  expect(await getSecret(`setup:${third}`)).toBe('fixture-third-key');
+  expect(await profile({ action: 'remove', id: third })).toMatchObject({ ok: true, data: { hasApiKey: true } });
+  expect(getConfig().tunnel.profileId).toBe('default');
+  expect(await getSecret(`setup:${third}`)).toBeNull();
+  expect(await secret('late-key', third)).toMatchObject({ ok: false });
+  expect(await profile({ action: 'select', id: third })).toMatchObject({ ok: false });
+  expect(await profile({ action: 'remove', id: 'default' })).toMatchObject({ ok: false });
+  expect(await getSecret('openaiApiKey')).toBe('fixture-default-key');
+});
+
+it('rejects stale profile tunnel edits after A to B to A while accepting unrelated settings', async () => {
+  const base = getConfig();
+  await handlers.get('setup:profile')!(null, { action: 'add', name: 'Other' });
+  await handlers.get('setup:profile')!(null, { action: 'select', id: 'default' });
+  expect(await save({ ...base, tunnel: { ...base.tunnel, tunnelId: 'tunnel_cccccccccccccccccccccccccccccccc' } }, base)).toMatchObject({ ok: false });
+  expect(await save({ ...base, ui: { ...base.ui, theme: 'light' } }, base)).toMatchObject({ ok: true });
+  expect(getConfig().tunnel.profileEpoch).toBe(2);
+  expect(getConfig().setupProfiles).toHaveLength(1);
+});
+
+it.each([true, false])('forwards canonical input commitment even when a legacy writer proposes recording=%s', async recording => {
+  const input = await import('../src/main/session/input.js');
+  const store = await import('../src/main/session/store.js');
+  const previous = await readDurable('session-input');
+  const session = await createSession({ title: 'Input commitment fixture', conversationId: 'input-commitment-fixture' });
+  const id = '30000000-0000-4000-8000-000000000001';
+  try {
+    await saveConfig({ ...getConfig(), sessions: { ...getConfig().sessions, record: recording } });
+    await writeDurableNow('session-input', [{ id, sessionId: session.id, text: 'Delivered fixture', mode: 'auto', model: null,
+      reasoningEffort: null, dueAt: 100, createdAt: 100, state: 'sent', owner: null, conversationId: 'input-commitment-fixture',
+      messageId: `input:${id}`, offeredAt: 200, deliveredAt: 300, historyRecorded: false,
+      toolImages: [{ name: 'invalid.webp', dataUrl: 'data:image/webp;base64,YQ==' }] }]);
+    input.resetInputForTests();
+    const result = await handlers.get('sessions:outbox')!(null, undefined) as any;
+    expect(result.ok).toBe(true);
+    const row = result.data[0];
+    expect(getConfig().sessions).toMatchObject({ record: true, retainDays: 0 });
+    expect(row.historyAnchored).toBe(true);
+    expect(row.historyRecorded).not.toBe(true);
+    expect((await readDurable<any[]>('session-input'))![0].historyAnchored).toBe(true);
+    const canonical = (await store.readEvents(session.id)).filter(event => event.kind === 'user_message');
+    expect(canonical).toHaveLength(1);
+    expect(canonical[0]).toMatchObject({ inputId: id, time: 200 });
+  } finally {
+    await writeDurableNow('session-input', previous ?? []);
+    input.resetInputForTests();
+  }
+});
+
 it('validates dropped file count and stages arbitrary native file types', async () => {
   const drop = (payload: unknown) => handlers.get('sessions:dropFiles')!(null, payload) as Promise<any>;
   expect(await drop({ files: [] })).toMatchObject({ ok: false });
@@ -140,7 +234,7 @@ it('round-trips Goal controls and cannot revive old periodic input when Off canc
     const session = await createSession({ title: 'Periodic ownership', conversationId: 'periodic-settings-chat' });
     await appendEvent(session.id, { source: 'extension', kind: 'turn_start', turnId: 'periodic-turn', time: Date.now() });
     await store.observeSessionModel(session.id, 'periodic-settings-chat', 'gpt-6-astra', Date.now());
-    const row = await outbox.enqueueInput({ id: '949091a5-e895-4b57-b090-925ef3d14f7a', sessionId: session.id,
+    const row = await outbox.enqueueInput({ id: 'f0f00014-1111-4111-8111-111111111111', sessionId: session.id,
       text: 'Pending automatic instruction', mode: 'auto', dueAt: Date.now(), model: null, reasoningEffort: null },
       { turnId: 'periodic-turn', periodic: false, userRequested: true });
     // Seed an old-version row; current code deliberately refuses new periodic input.
@@ -156,7 +250,7 @@ it('round-trips Goal controls and cannot revive old periodic input when Off canc
     expect(await save(config(1))).toMatchObject({ ok: true });
     outbox.resetInputForTests();
     expect((await outbox.listInputs()).find(entry => entry.id === row.id)?.state).toBe('cancelled');
-    expect(await outbox.offerToolInput(session.id, 'periodic-settings-chat', 'later-request', Date.now())).toEqual([]);
+    expect(await outbox.offerToolInput(session.id, 'periodic-settings-chat', 'later-request', Date.now())).toEqual({ messages: [], reminder: '' });
   } finally {
     write?.mockRestore();
     await writeDurableNow('session-input', original); outbox.resetInputForTests();
@@ -215,6 +309,11 @@ it('adds picker-selected projects, reuses containing approval, and leaves cancel
   expect(getConfig().roots).toHaveLength(1);
   const listed = await handlers.get('projects:list')!(null, {}) as any;
   expect(listed.data).toHaveLength(2);
+  const removed = await handlers.get('projects:remove')!(null, { id: first.data.id }) as any;
+  expect(removed).toMatchObject({ ok: true, data: { id: first.data.id, ungrouped: true } });
+  expect(getConfig().roots).toHaveLength(1);
+  expect((await fs.stat(folder)).isDirectory()).toBe(true);
+  expect(await handlers.get('projects:remove')!(null, { id: folder })).toMatchObject({ ok: false });
 });
 
 /** The whole settings object the renderer sends, with the parts a test cares about set. */
@@ -283,7 +382,7 @@ beforeEach(async () => {
 });
 
 describe('explicit settings replace the published tool contract', () => {
-  it.each(['finish', 'command', 'session'] as const)('withdraws %s from real endpoint publication after its setting is disabled', async kind => {
+  it.each(['finish', 'command'] as const)('withdraws %s from real endpoint publication after its setting is disabled', async kind => {
     const { startMcpServer } = await import('../src/main/mcp/server.js');
     const { effectiveCapabilities } = await import('../src/main/config.js');
     const { publishPluginSurface, pluginRefreshPublications, resetPluginRefreshForTests } = await import('../src/main/plugin-refresh.js');
@@ -296,13 +395,17 @@ describe('explicit settings replace the published tool contract', () => {
     };
     try {
       const before = snapshot();
-      const tool = kind === 'finish' ? 'session_finish' : kind === 'command' ? 'exec_command' : kind;
+      const tool = kind === 'finish' ? 'session_finish' : 'exec_command';
       expect(before.tools.map(row => row.name)).toContain(tool);
+      expect(before.tools.map(row => row.name)).not.toContain('session');
       const current = getConfig();
-      const patch = { ...current, ...(kind === 'finish' ? { ui: { ...current.ui, finishTool: false } } : kind === 'command' ? { capabilities: { ...current.capabilities, command: false } } : { sessions: { ...current.sessions, record: false } }) };
+      const patch = { ...current, ...(kind === 'finish'
+        ? { ui: { ...current.ui, finishTool: false } }
+        : { capabilities: { ...current.capabilities, command: false } }) };
       expect((await save(patch)).ok).toBe(true);
       const after = snapshot();
       expect(after.tools.map(row => row.name)).not.toContain(tool);
+      expect(after.tools.map(row => row.name)).not.toContain('session');
       expect(after.schemaId).not.toBe(before.schemaId);
       const saved = getConfig();
       expect((await save({ ...saved, ui: { ...saved.ui, theme: 'dark' } })).ok).toBe(true);

@@ -1,14 +1,28 @@
+import { ui, t } from './i18n.js';
+import { initSkills } from './skills.js';
+import { imageStorageButton } from './image-storage.js';
 import { applyChatModels, applyComposerSessionModel, initChatModels, confirmedComposerModel, ensureComposerModel } from './chat-models.js';
 import { marked, Marked } from 'marked';
 import { safeExternalLink } from '../shared/external-link.js';
 import { createAgentPanel } from './agent-panel.js';
+import { renderAgentPlan } from './agent-plan.js';
+import { userPromptText } from '../shared/user-prompt.js';
+import { messageReaction, withoutMessageReaction } from '../shared/message-reaction.js';
+import { goalErrorMessage } from '../shared/goal-errors.js';
+import type { GoalModel } from '../shared/goal-reasoning.js';
+import { renderGoalReasoning } from './goal-reasoning.js';
 import { preserveTimelineViewport } from './timeline-scroll.js';
+import { createSidebarOrder } from './sidebar-order.js';
 import { toolResultText } from './tool-result.js';
+import { chatErrorPresentation, duplicateChatErrors } from './chat-error.js';
+import { renderRecoveryCountdowns } from './recovery.js';
+import type { RecoveryCountdown } from '../shared/recovery.js';
 import { communicationTitle, foldAgentCommunication } from './agent-communication.js';
 import { initContextMeter, paintContextMeter } from './context-meter.js';
-import { isAstraModel } from '../shared/chat-models.js';
+import { isAstraModel, isProModel } from '../shared/chat-models.js';
 import type { InputImage, InputAttachment, InputAutomation } from '../shared/input.js';
-import type { InputEntry } from '../main/session/input.js';
+import { injectableAttachments } from '../shared/input.js';
+import type { InputArgs, InputEntry } from '../main/session/input.js';
 import type { LocalProject } from '../shared/projects.js';
 import type { TaskProgress } from '../shared/task-progress.js';
 /**
@@ -33,9 +47,11 @@ import {
   CHAT_ACTIVE_MS,
   CONTINUATION_MARKER,
   TURN_OUTCOME_LABELS,
-  foldProgress
+  foldProgress,
+  toolCallSummary
 } from '../shared/session.js';
 import { chronological } from '../shared/chronology.js';
+import { recentChatActivity, sessionWorkingAt, workerReportedFinish } from '../shared/session-activity.js';
 import {
   DEFAULT_GOAL_MODEL,
   DEFAULT_GOAL_LOOP_SYSTEM_PROMPT,
@@ -72,8 +88,10 @@ const KIND_ICON: Record<ActivitySummary['kind'], string> = {
  * A little over one row, so the fetch starts while there is still something to read.
  */
 const GOAL_SCROLL_MARGIN = 72;
-/** Hard renderer budgets: durable history may be larger, but one paint may not be. */
+/** Page size and bounded staging capacity. A page is not a viewport: hundreds of
+ * collapsed tool records can occupy less space than one authored message. */
 const MAX_TIMELINE_ROWS = 160;
+const MAX_TIMELINE_RESIDENT_ROWS = MAX_TIMELINE_ROWS * 2;
 const MAX_TIMELINE_TEXT_CHARS = 2 * 1024 * 1024;
 const MAX_RENDERED_HTML_CHARS = 256 * 1024;
 const SESSION_PAGE_SIZE = 60;
@@ -113,15 +131,32 @@ let selectedId: string | null = null;
 let newChatSelected = true;
 let selectedProjectId: string | null = null;
 let projects: LocalProject[] = [];
-const collapsedProjects = new Set<string>();
+/** Window-local disclosure intent. Project groups start closed until the user or selection opens one. */
+const expandedProjects = new Set<string>();
 const projectVisibleCounts = new Map<string, number>();
+function projectGroup(id: string | null | undefined): string | null {
+  return id && !projects.find(project => project.id === id)?.ungrouped ? id : null;
+}
 const PROJECT_TASK_PAGE_SIZE = 5;
+const PROJECT_TASK_PAGE_INCREMENT = 8;
+let sidebarOrder: ReturnType<typeof createSidebarOrder> | undefined;
 function draftKey(): string { return selectedId ?? (selectedProjectId ? `project:${selectedProjectId}` : 'new'); }
 let selectionGeneration = 0;
+// Async file import belongs to one visible composer draft, not just to a session key.
+// Replacing that draft retires in-flight imports even when navigation returns to the
+// same key or a send failure later restores the submitted text.
+let composerDraftGeneration = 0;
+type ComposerDraftOwner = { key: string; generation: number };
+function composerDraftOwner(): ComposerDraftOwner { return { key: draftKey(), generation: composerDraftGeneration }; }
+function ownsComposerDraft(owner: ComposerDraftOwner): boolean {
+  return owner.key === draftKey() && owner.generation === composerDraftGeneration;
+}
+function replaceComposerDraft(): void { composerDraftGeneration++; skillPicker?.close(); }
 let pendingNewInput: { id: string; generation: number } | null = null;
 let agentPanel: ReturnType<typeof createAgentPanel> | null = null;
 const expandedWorkers = new Set<string>();
 const inputDrafts = new Map<string, string>();
+const newChatTasks = new Map<string, { objective: string; automation: string; loopDelivery: string }>();
 const imageDrafts = new Map<string, Array<InputImage | InputAttachment>>();
 const startingInputs = new Map<string, InputEntry>();
 const visibleInputIds = new Set<string>();
@@ -141,8 +176,27 @@ function dismissInputNotice(id: string): void {
   catch { /* A storage failure still allows dismissal for this window lifetime. */ }
   void refreshInputQueue();
 }
-function rememberDraft(): void { inputDrafts.set(draftKey(), $<HTMLTextAreaElement>('chatInput').value); }
-function restoreDraft(): void { cancelGoalRequest(); cancelTaskPlan(); $('taskPlanPreview').hidden = true; $('taskPlanPreview').replaceChildren(); $('activeGoalRow').hidden = true; $('recoveryStatus').hidden = true; $<HTMLTextAreaElement>('chatInput').value = inputDrafts.get(draftKey()) ?? ''; const automation = $<HTMLSelectElement>('chatAutomation'); automation.value = 'off'; delete automation.dataset.edited; $<HTMLTextAreaElement>('sessionObjective').value = ''; delete $('sessionObjective').dataset.edited; delete $('sessionObjective').dataset.sessionId; paintComposerImages(); }
+function rememberDraft(): void {
+  inputDrafts.set(draftKey(), $<HTMLTextAreaElement>('chatInput').value);
+  if (selectedId === null) newChatTasks.set(draftKey(), {
+    objective: $<HTMLTextAreaElement>('sessionObjective').value,
+    automation: $<HTMLSelectElement>('chatAutomation').value,
+    loopDelivery: $<HTMLSelectElement>('loopDelivery').value
+  });
+}
+let skillPicker: ReturnType<typeof initSkills> | undefined;
+function restoreDraft(): void {
+  skillPicker?.close();
+  cancelGoalRequest();
+  $('activeGoalRow').hidden = true; $('recoveryStatus').hidden = true;
+  $<HTMLTextAreaElement>('chatInput').value = inputDrafts.get(draftKey()) ?? '';
+  const task = selectedId === null ? newChatTasks.get(draftKey()) : undefined;
+  const automation = $<HTMLSelectElement>('chatAutomation'); automation.value = task?.automation ?? 'off'; delete automation.dataset.edited;
+  $<HTMLSelectElement>('loopDelivery').value = task?.loopDelivery ?? 'finish';
+  $<HTMLTextAreaElement>('sessionObjective').value = task?.objective ?? '';
+  delete $('sessionObjective').dataset.edited; delete $('sessionObjective').dataset.sessionId; delete $('sessionObjective').dataset.saved;
+  paintTaskPlan(); paintComposerImages();
+}
 function paintComposerImages(): void {
   const key = draftKey();
   const images = imageDrafts.get(key) ?? [];
@@ -150,7 +204,7 @@ function paintComposerImages(): void {
   images.forEach((image, index) => {
     const tile = 'dataUrl' in image ? el('div', 'composer-image') : attachmentCard(image, true);
     if ('dataUrl' in image) { const preview = document.createElement('img'); preview.src = image.dataUrl; preview.alt = image.name; tile.append(preview); }
-    const remove = el('button', 'image-remove', '×'); remove.setAttribute('type', 'button'); remove.setAttribute('aria-label', `${image.name} 제거`);
+    const remove = el('button', 'image-remove', '×'); remove.setAttribute('type', 'button'); ui(remove, 'aria-label', () => t("Remove {0}", [image.name]));
     remove.addEventListener('click', () => { imageDrafts.set(key, images.filter((_entry, at) => at !== index)); paintComposerImages(); });
     tile.append(remove); box.append(tile);
   });
@@ -172,7 +226,7 @@ function attachmentCard(file: InputAttachment, inComposer = false): HTMLElement 
   lines.setAttribute('fill', 'none'); lines.setAttribute('stroke', 'currentColor'); lines.setAttribute('stroke-width', '1.6'); lines.setAttribute('stroke-linecap', 'round');
   svg.append(lines); glyph.append(svg);
   const details = el('div', 'attachment-details');
-  details.append(el('div', 'attachment-name', file.name), el('div', 'attachment-kind', file.mimeType.startsWith('image/') ? '이미지' : '파일'));
+  details.append(el('div', 'attachment-name', file.name), el('div', 'attachment-kind', () => file.mimeType.startsWith('image/') ? t("Image") : t("File")));
   tile.append(glyph, details); return tile;
 }
 
@@ -221,18 +275,18 @@ interface Badge {
 
 /** Live word per worker state, in the user's vocabulary rather than the protocol's. */
 const AGENT_BADGE: Record<AgentState, Badge> = {
-  invited: { text: '열기 중', tone: 'is-active' },
-  active: { text: '작업 중', tone: 'is-active' },
+  invited: { text: 'opening', tone: 'is-active' },
+  active: { text: 'active', tone: 'is-active' },
   // Still working, as far as this app knows — only its browser tab is gone. Said as
   // "no tab" rather than "detached" because that is the part a user can act on.
-  detached: { text: '탭 없음', tone: 'is-active' },
+  detached: { text: 'no tab', tone: 'is-active' },
   // Between jobs, not over. Its chat is intact and the prime can put it back to work in it,
   // so the word has to read as a pause rather than as an ending — a user who reads "finished"
   // here closes the tab, which is the one thing that costs nothing and helps nothing.
-  sleeping: { text: '대기 중', tone: '' },
-  waking: { text: '재개 중', tone: 'is-active' },
-  finished: { text: '종료됨', tone: 'is-finished' },
-  failed: { text: '실패', tone: 'is-failed' }
+  sleeping: { text: 'sleeping', tone: '' },
+  waking: { text: 'waking', tone: 'is-active' },
+  finished: { text: 'finished', tone: 'is-finished' },
+  failed: { text: 'failed', tone: 'is-failed' }
 };
 
 /**
@@ -245,54 +299,9 @@ const AGENT_BADGE: Record<AgentState, Badge> = {
  * first badge is durable and comes from the session itself; the second is live and comes
  * from the swarm or the compaction currently reported by the app.
  */
-/**
- * How long after its session start or last exact attributed tool call a chat still reads as
- * working.
- *
- * Prime owns the run for its whole life, so its agent state alone would light this badge
- * permanently and say nothing. An open turn was the gate instead, which is exact but too
- * narrow: when a page loses its answer stream the recorder has no open turn, while the model
- * behind it goes on calling tools for minutes. That is a chat very much at work, shown as idle
- * — and the moment a user most wants to see that it is still going.
- *
- * The bridge's recovery window is deliberately the shorter of the two, and the authorities remain
- * separate: this derives display state from the durable session summary; the bridge derives a
- * browser action from exact observations and attributed calls. The label outliving the reload
- * window is the point — a chat being reloaded on the app's instruction is mid-repair, and the
- * badge going dark first is what made that reload look like it came out of nowhere.
- */
-/**
- * Pro uses the bridge's live ten-minute activity deadline.
- * Other sessions and exact calls stay active for three minutes unless a later turn end finished
- * them — the model's final answer, or the turn ending any other way, the user's stop included.
- * A refused call in a blocked chat still counts as the call it was: the badge is how the user
- * sees that something is still trying, and it goes dark the moment the turn is stopped.
- */
-function recentChatActivity(summary: SessionSummary, now = Date.now()): boolean {
-  if (summary.activityExpiresAt !== undefined) {
-    return summary.activityExpiresAt !== null && now < summary.activityExpiresAt;
-  }
-  const lastActivityAt = Math.max(summary.startedAt, summary.lastToolCallAt ?? 0);
-  const finishedAt = Math.max(summary.lastAssistantFinalAt ?? 0, summary.lastTurnEndAt ?? 0);
-  return lastActivityAt > finishedAt && now - lastActivityAt < CHAT_ACTIVE_MS;
-}
-
-/**
- * A worker whose newest call was its own finish report has stopped working, whatever the swarm
- * currently says or fails to say: the run parks the moment its last worker stops, and a parked
- * run has no agent view for the list to read.
- */
-function workerReportedFinish(summary: SessionSummary): boolean {
-  return (
-    summary.origin?.kind === 'worker' &&
-    typeof summary.lastFinishReportAt === 'number' &&
-    summary.lastFinishReportAt >= (summary.lastToolCallAt ?? 0)
-  );
-}
-
-/** Reload-generated turn boundaries are not activity authority; session start, calls and finals are. */
+/** Keep callback arguments separate from the shared predicate's explicit clock. */
 function sessionWorking(summary: SessionSummary): boolean {
-  return summary.endedAt === null && !workerReportedFinish(summary) && recentChatActivity(summary);
+  return sessionWorkingAt(summary, Date.now());
 }
 
 /**
@@ -314,15 +323,15 @@ function sessionBadges(summary: SessionSummary): Badge[] {
   // as a chat that mysteriously lost its name.
   if (summary.conversationId === null) {
     return unattributedBlocked()
-      ? [{ text: '차단됨', tone: 'is-failed' }, { text: '대화 아님', tone: '' }]
-      : [{ text: '대화 아님', tone: '' }];
+      ? [{ text: 'blocked', tone: 'is-failed' }, { text: 'not a chat', tone: '' }]
+      : [{ text: 'not a chat', tone: '' }];
   }
   // First, and in the failure tone: a blocked chat is the one state on this row that says the
   // app is actively refusing work, and the user came to the list to find it at a glance.
-  if (blockedChats.has(summary.conversationId)) badges.push({ text: '차단됨', tone: 'is-failed' });
+  if (blockedChats.has(summary.conversationId)) badges.push({ text: 'blocked', tone: 'is-failed' });
   if (origin?.kind === 'worker') badges.push({ text: origin.agentId ?? 'worker', tone: '' });
-  else if (origin?.kind === 'resume') badges.push({ text: '이어가기', tone: '' });
-  else if (summary.agents.includes('prime')) badges.push({ text: '주 에이전트', tone: '' });
+  else if (origin?.kind === 'resume') badges.push({ text: 'resumed', tone: '' });
+  else if (summary.agents.includes('prime')) badges.push({ text: 'prime', tone: '' });
 
   // Agent ids are reused across runs (`worker-1`, `worker-2`, ...). Matching only by that
   // short id made old worker sessions inherit the *current* run's live badge, so a worker
@@ -361,10 +370,10 @@ function sessionRow(summary: SessionSummary): HTMLElement {
   if (summary.id === activeId && summary.endedAt === null) row.classList.add('is-live');
 
   const top = el('div', 'sess-top');
-  const title = el('b', '', summary.title || '제목 없는 세션');
+  const title = el('b', '', () => summary.title || t("Untitled session")); title.dir = 'auto';
   top.append(title);
   const badges = sessionBadges(summary);
-  row.title = [summary.title || '제목 없는 세션', ...badges.map((badge) => badge.text), ago(summary.updatedAt)].join(' · ');
+  ui(row, 'title', () => [summary.title || t("Untitled session"), ...badges.map((badge) => t(badge.text)), ago(summary.updatedAt)].join(' · '));
   const showTip = () => {
     document.getElementById('sessionTooltip')?.remove();
     const tip = el('div', 'session-tooltip', row.title);
@@ -380,8 +389,8 @@ function sessionRow(summary: SessionSummary): HTMLElement {
   const status = badges.find((badge) => badge.tone);
   if (status) {
     const indicator = el('span', `session-status ${status.tone}`);
-    indicator.title = status.text;
-    indicator.setAttribute('aria-label', status.text);
+    ui(indicator, 'title', () => t(status.text));
+    ui(indicator, 'aria-label', () => t(status.text));
     top.append(indicator);
   }
   const actionBar = el('div', 'sess-actions');
@@ -389,7 +398,7 @@ function sessionRow(summary: SessionSummary): HTMLElement {
   const remove = document.createElement('button');
   remove.className = 'btn sess-action sess-del';
   remove.type = 'button';
-  remove.title = '이 세션 기록 삭제';
+  ui(remove, 'title', () => t("Delete this recorded session"));
   remove.append(icon('i-trash'));
   remove.addEventListener('click', (event) => {
     event.stopPropagation();
@@ -405,9 +414,9 @@ function sessionRow(summary: SessionSummary): HTMLElement {
     const block = document.createElement('button');
     block.className = `btn sess-action sess-block${blocked ? ' is-blocked' : ''}`;
     block.type = 'button';
-    block.title = blocked
-      ? '대화 미확인 호출 허용: 대화를 증명하지 못해도 독립적인 호출을 다시 허용합니다.'
-      : '대화 미확인 호출 차단: 대화를 확인하지 못한 호출을 거부하고 중단을 요청합니다.';
+    ui(block, 'title', () => blocked
+      ? t("Allow unattributed calls: self-contained calls run again even when the app cannot prove which chat sent them")
+      : t("Block unattributed calls: every call the app cannot attribute to a chat is refused and the chat is told to stop"));
     block.append(icon(blocked ? 'i-play' : 'i-ban'));
     block.addEventListener('click', (event) => {
       event.stopPropagation();
@@ -427,9 +436,9 @@ function sessionRow(summary: SessionSummary): HTMLElement {
     const block = document.createElement('button');
     block.className = `btn sess-action sess-block${blocked ? ' is-blocked' : ''}`;
     block.type = 'button';
-    block.title = blocked
-      ? '대화 차단 해제: 도구 호출을 다시 허용합니다.'
-      : '대화 차단: 모든 도구 호출을 거부하고 중단을 요청합니다.';
+    ui(block, 'title', () => blocked
+      ? t("Release this chat: its tool calls run again")
+      : t("Block this chat: every tool call it makes is refused and it is told to stop"));
     block.append(icon(blocked ? 'i-play' : 'i-ban'));
     block.addEventListener('click', (event) => {
       event.stopPropagation();
@@ -440,7 +449,7 @@ function sessionRow(summary: SessionSummary): HTMLElement {
     const open = document.createElement('button');
     open.className = 'btn sess-action sess-open';
     open.type = 'button';
-    open.title = 'Chrome에서 대화 열기';
+    ui(open, 'title', () => t("Open this chat in Chrome"));
     open.append(icon('i-out'));
     open.addEventListener('click', (event) => {
       event.stopPropagation();
@@ -491,7 +500,7 @@ async function deleteSession(id: string): Promise<void> {
     detailLoadGeneration++;
     handoffLoadGeneration++;
   }
-  toast('세션 기록을 삭제했습니다.');
+  toast(t("Session deleted"));
   await loadSessions();
 }
 
@@ -518,7 +527,15 @@ async function loadSessions(): Promise<void> {
   // Throwing the older rows away here would make scrolling history vanish every 400 ms while a
   // live chat is recording. Before pagination begins, replacing the first page is cheaper and
   // also removes a session that was deleted elsewhere.
-  if (loadedOlderSessions) mergeSessionRows(list.sessions);
+  if (loadedOlderSessions) {
+    // This page is authoritative for its covered range, including withdrawn openings.
+    // Keep older pages, but do not merge a deleted newest row back into the sidebar.
+    const oldest = list.sessions.at(-1);
+    const present = new Set(list.sessions.map(row => row.id));
+    sessions = sessions.filter(row => present.has(row.id) || (!!list.nextCursor && !!oldest &&
+      (row.updatedAt < oldest.updatedAt || (row.updatedAt === oldest.updatedAt && row.id < oldest.id))));
+    mergeSessionRows(list.sessions);
+  }
   else {
     sessions = list.sessions;
     sessionPageCursor = list.nextCursor ?? null;
@@ -574,8 +591,15 @@ function maybePageSessions(): void {
 let diagnosticsExpanded = false;
 
 function paintSessions(): void {
+  // Keep the pointer's elected rows alive while asynchronous activity snapshots arrive.
+  if (sidebarOrder?.interacting) return;
   document.getElementById('sessionTooltip')?.remove();
   const list = $('sessionList');
+  // Activity replaces sidebar nodes. Keep an actively focused project disclosure
+  // attached to its exact project, without moving focus from the composer or settings.
+  const focused = document.activeElement;
+  const focusedProject = focused instanceof HTMLElement && list.contains(focused) && focused.matches('.project-heading')
+    ? focused.closest<HTMLElement>('.project-group')?.dataset.projectId : undefined;
   const children = new Map<string, SessionSummary[]>();
   const ids = new Set(sessions.map((entry) => entry.id));
   for (const entry of sessions) {
@@ -591,58 +615,105 @@ function paintSessions(): void {
   const group = (key: string, workers: SessionSummary[], parentRow?: HTMLElement, target = rows): void => {
     const button = el('button', 'worker-toggle');
     button.append(icon('i-chev'));
-    button.title = `보조 에이전트 ${workers.length}개 · ${workers.filter(sessionWorking).length}개 실행 중`;
-    button.setAttribute('aria-label', `${expandedWorkers.has(key) ? 'Collapse' : 'Expand'} ${workers.length} sub-agents`);
+    ui(button, 'title', () => t("{0} sub-agents · {1} active", [workers.length, workers.filter(sessionWorking).length]));
+    ui(button, 'aria-label', () => t("{0} {1} sub-agents", [expandedWorkers.has(key) ? t("Collapse") : t("Expand"), workers.length]));
     button.setAttribute('type', 'button'); button.setAttribute('aria-expanded', String(expandedWorkers.has(key)));
     button.addEventListener('click', (event) => { event.stopPropagation(); expandedWorkers.has(key) ? expandedWorkers.delete(key) : expandedWorkers.add(key); paintSessions(); });
     if (parentRow) { parentRow.append(button); parentRow.title += ` · ${button.title}`; } else target.push(button);
     if (expandedWorkers.has(key)) { const box = el('div', 'worker-group'); box.append(...workers.map(sessionRow)); target.push(box); }
   };
-  for (const entry of sessions) {
+  const orderedSessions = sidebarOrder
+    ? [...new Set(sessions.map(entry => projectGroup(entry.projectId) ?? ''))].flatMap(scope =>
+      sidebarOrder!.ordered(scope, sessions.filter(entry => (projectGroup(entry.projectId) ?? '') === scope)))
+    : sessions;
+  for (const entry of orderedSessions) {
     if (entry.origin?.kind === 'worker') continue;
-    if (!entry.conversationId) { diagnostics.push(entry); continue; }
-    const target: HTMLElement[] = entry.projectId ? [] : rows;
+    if (!entry.conversationId && entry.origin?.kind !== 'desktop') { diagnostics.push(entry); continue; }
+    const projectId = projectGroup(entry.projectId);
+    const target: HTMLElement[] = projectId ? [] : rows;
     const row = sessionRow(entry); target.push(row);
+    row.dataset.sortScope = projectId ?? ''; row.tabIndex = 0;
     const workers = children.get(entry.id); if (workers) group(entry.id, workers, row, target);
-    if (entry.projectId) {
-      const tasks = projectRows.get(entry.projectId) ?? [];
+    if (projectId) {
+      const tasks = projectRows.get(projectId) ?? [];
       tasks.push({ rows: target, selected: entry.id === selectedId || workers?.some(worker => worker.id === selectedId) === true });
-      projectRows.set(entry.projectId, tasks);
+      projectRows.set(projectId, tasks);
     }
   }
   const otherWorkers = children.get('other-workers') ?? [];
   if (otherWorkers.length) {
     const history = document.createElement('details'); history.className = 'session-diagnostics';
     history.open = expandedWorkers.has('other-workers');
-    history.append(el('summary', '', `보조 에이전트 기록 · ${otherWorkers.length}개`));
+    history.append(el('summary', '', () => t("Sub-agent history · {0}", [otherWorkers.length])));
     history.append(...otherWorkers.map(sessionRow));
     history.addEventListener('toggle', () => { if (history.isConnected) history.open ? expandedWorkers.add('other-workers') : expandedWorkers.delete('other-workers'); });
     rows.push(history);
   }
-  const projectIds = [...new Set([...projects.map(project => project.id), ...projectRows.keys()])];
+  const projectIds = [...new Set([...projects.filter(project => !project.ungrouped).map(project => project.id), ...projectRows.keys()])];
   const projectSections: HTMLElement[] = [];
   for (const id of projectIds) {
     const project = projects.find(row => row.id === id);
     const section = document.createElement('details'); section.className = 'project-group'; section.dataset.projectId = id;
-    section.open = !collapsedProjects.has(id);
+    section.open = expandedProjects.has(id);
     const heading = el('summary', 'project-heading');
-    const label = el('span', 'project-name', project?.name ?? '사용할 수 없는 프로젝트');
-    heading.title = project?.path ?? '사용할 수 없는 프로젝트';
+    const label = el('span', 'project-name', () => project?.name ?? t("Unavailable project"));
+    ui(heading, 'title', () => project?.path ?? t("Unavailable project"));
     heading.append(icon('i-folder'), label); section.append(heading);
-    section.addEventListener('toggle', () => { if (section.isConnected) section.open ? collapsedProjects.delete(id) : collapsedProjects.add(id); });
+    // Native `toggle` is queued after activation. A concurrent activity repaint can replace
+    // this node first and lose the click. Commit the summary's pointer/keyboard click to the
+    // one disclosure owner synchronously, then project it onto this details element.
+    heading.addEventListener('click', event => {
+      event.preventDefault();
+      const open = !expandedProjects.has(id);
+      if (open) expandedProjects.add(id); else expandedProjects.delete(id);
+      section.open = open;
+    });
     if (project) {
-      const create = el('button', 'btn project-new'); create.append(icon('i-plus')); create.setAttribute('type', 'button'); create.dataset.newProject = id;
-      create.title = '이 프로젝트에서 새 대화'; create.setAttribute('aria-label', create.title);
+      const create = el('button', 'btn project-new'); create.append(icon('i-pencil')); create.setAttribute('type', 'button'); create.dataset.newProject = id;
+      ui(create, 'title', () => t("New chat in this project")); create.setAttribute('aria-label', create.title);
       create.addEventListener('click', event => { event.preventDefault(); event.stopPropagation(); selectNewChat(id); }); heading.append(create);
+      const remove = el('button', 'btn project-remove') as HTMLButtonElement;
+      remove.type = 'button'; remove.append(icon('i-trash'));
+      ui(remove, 'title', () => t("Remove project from sidebar; keep conversations and files"));
+      ui(remove, 'aria-label', () => t("Remove project {0}", [project.name]));
+      remove.addEventListener('click', async event => {
+        event.preventDefault(); event.stopPropagation();
+        if (remove.disabled) return;
+        remove.disabled = true;
+        try {
+          const removed = await run(api.removeProject(id));
+          if (!removed) return;
+          // Reject list snapshots captured before this newer catalog commit.
+          ++sessionsLoadGeneration;
+          projects = projects.map(row => row.id === id ? removed : row);
+          expandedProjects.delete(id); projectVisibleCounts.delete(id);
+          if (selectedProjectId === id) {
+            if (!selectedId) {
+              const oldKey = draftKey();
+              selectedProjectId = null; selectionGeneration++; replaceComposerDraft();
+              // Keep the visible draft and its attachments while moving to unfiled.
+              rememberDraft(); inputDrafts.delete(oldKey); newChatTasks.delete(oldKey);
+              const images = imageDrafts.get(oldKey);
+              if (images) imageDrafts.set(draftKey(), images);
+              else imageDrafts.delete(draftKey());
+              imageDrafts.delete(oldKey);
+              $<HTMLTextAreaElement>('chatInput').placeholder = 'Ask anything…';
+            } else selectedProjectId = null;
+          }
+          paintSessions(); void refreshInputQueue();
+          toast('Project removed; conversations kept');
+        } finally { remove.disabled = false; }
+      });
+      heading.append(remove);
     }
     const tasks = projectRows.get(id) ?? [];
     const count = projectVisibleCounts.get(id) ?? PROJECT_TASK_PAGE_SIZE;
     const shown = tasks.filter((task, index) => index < count || task.selected);
     section.append(...shown.flatMap(task => task.rows));
     if (shown.length < tasks.length) {
-      const more = el('button', 'btn project-show-more', '더 보기') as HTMLButtonElement;
-      more.type = 'button'; more.setAttribute('aria-label', `${project?.name ?? '이 프로젝트'}의 작업 더 보기`);
-      more.addEventListener('click', () => { projectVisibleCounts.set(id, count + PROJECT_TASK_PAGE_SIZE); paintSessions(); });
+      const more = el('button', 'btn project-show-more', () => t("Show more")) as HTMLButtonElement;
+      more.type = 'button'; ui(more, 'aria-label', () => t("Show more tasks in {0}", [project?.name ?? t("this project")]));
+      more.addEventListener('click', () => { projectVisibleCounts.set(id, count + PROJECT_TASK_PAGE_INCREMENT); paintSessions(); });
       section.append(more);
     }
     projectSections.push(section);
@@ -651,16 +722,18 @@ function paintSessions(): void {
     const disclosure = document.createElement('details');
     disclosure.className = 'session-diagnostics';
     disclosure.open = diagnosticsExpanded;
-    disclosure.append(el('summary', '', `대화 미확인 활동 · ${diagnostics.length}개`));
+    disclosure.append(el('summary', '', () => t("Unattributed activity · {0}", [diagnostics.length])));
     disclosure.append(...diagnostics.map(sessionRow));
     disclosure.addEventListener('toggle', () => { diagnosticsExpanded = disclosure.open; });
     rows.push(disclosure);
   }
   // Projects must remain discoverable without scrolling through the entire ungrouped history.
   list.replaceChildren(...projectSections, ...rows);
+  if (focusedProject) projectSections.find(section => section.dataset.projectId === focusedProject)
+    ?.querySelector<HTMLElement>('.project-heading')?.focus({ preventScroll: true });
   agentPanel?.update(selectedId, sessions.filter(entry => entry.origin?.kind === 'worker' && entry.origin.fromSessionId === selectedId && selectedId !== null));
   badgeKey = badgeSignature();
-  $('sessionsEmpty').hidden = sessions.length > 0 || projects.length > 0;
+  $('sessionsEmpty').hidden = sessions.length > 0 || projects.some(project => !project.ungrouped);
 
   scheduleToolActivityExpiry();
 }
@@ -684,6 +757,8 @@ function scheduleToolActivityExpiry(): void {
 }
 
 function canonicalMessageKey(event: SessionEvent): string | null {
+  if (event.kind === 'tool_call') return `tool_call\u0000${event.call.callId}`;
+  if (event.kind === 'native_image') return `native_image\u0000${event.messageId}\u0000${event.providerAssetId}`;
   if ((event.kind === 'user_message' || event.kind === 'assistant_message') && event.messageId) {
     return `${event.kind}\u0000${event.messageId}`;
   }
@@ -708,7 +783,7 @@ function mergeDetailDelta(delta: SessionEvent[]): void {
     }
   }
   const folded = chronological(foldProgress(merged));
-  events = folded.slice(Math.max(0, folded.length - MAX_TIMELINE_ROWS));
+  events = retainTimelinePage(folded, 'newer');
 }
 
 let controlsGeneration = 0;
@@ -719,6 +794,8 @@ let controlledStopPending = false;
 let controlledFinishWaiting = false;
 let controlledQueueAtFinish = false;
 let controlledCanInject = false;
+let controlledCanSendDirectly = false;
+let controlledRecovery: RecoveryCountdown[] = [];
 let pendingComposerInputs: InputEntry[] = [];
 let inputQueueGeneration = 0;
 let goalIntentGeneration = 0;
@@ -731,6 +808,7 @@ function cancelGoalRequest(): void {
 }
 type GoalDraftPresentation = { stage: string; model: string; text: string; error: string | null };
 let goalDraftView: GoalDraftPresentation | null = null;
+let goalWaitView: import('../shared/goal.js').GoalWait | null = null;
 let finishGoalDraftView: GoalDraftPresentation | null = null;
 function paintGoalProgress(): void {
   let row = document.getElementById('goalLifecycle');
@@ -739,33 +817,43 @@ function paintGoalProgress(): void {
   const entry = progress?.inputId ? pendingComposerInputs.find(item => item.id === progress.inputId) : undefined;
   const finishDraft = controlledSessionId === selectedId && controlledSelection === selectionGeneration ? finishGoalDraftView : null;
   const draft = finishDraft ?? (controlledSessionId === selectedId && controlledSelection === selectionGeneration ? goalDraftView : null);
+  const wait = controlledSessionId === selectedId && controlledSelection === selectionGeneration ? goalWaitView : null;
   const off = $<HTMLSelectElement>('chatAutomation').value === 'off';
   if (off && !finishDraft) { row.hidden = true; row.replaceChildren(); row.setAttribute('aria-busy', 'false'); return; }
   let phase = progress?.phase ?? '';
   let text = progress?.text ?? '', error = progress?.error;
   if (entry) { phase = entry.state; error = entry.error ?? undefined; }
   if (draft && (!off || finishDraft) && (finishDraft || !['saving', 'failed'].includes(phase))) { phase = draft.stage; text = draft.text; error = draft.error ?? undefined; }
-  const labels: Record<string, string> = { saving: '작업 저장 중…', saved: '작업 저장됨 · 다음 답변 완료 대기',
-    preparing: '첫 메시지 준비 중…', generating: '첫 메시지 생성 중…', ready: '메시지 준비됨 · ChatGPT 전달 대기',
-    sending: '후속 지시 준비 중…', answering: '후속 지시 생성 중…', queued: '첫 메시지 대기열에 추가됨',
-    browser: '첫 메시지를 ChatGPT에 전달 중…', sent: '첫 메시지 전송됨', tool: '첫 메시지를 현재 턴에 전달함',
-    failed: '작업을 계속하지 못했습니다', cancelled: '첫 메시지 취소됨', paused: '자동 진행 일시정지 · 작업 내용 유지', 'no-reply': '목표 달성' };
+  else if (wait && !['saving', 'failed'].includes(phase)) { phase = 'settling'; text = ''; error = undefined; }
+  const labels: Record<string, string> = { saving: t("Saving task…"), saved: t("Task saved · waiting for the next completed answer"),
+    preparing: t("Preparing the opening message…"), generating: t("Generating the opening message…"), ready: t("Message ready · awaiting ChatGPT delivery"),
+    sending: t("Preparing a continuation…"), answering: t("Generating a continuation…"), queued: t("Opening message queued"),
+    browser: t("Sending opening message to ChatGPT…"), sent: t("Opening message sent"), tool: 'Opening message delivered to the active turn',
+    failed: t("Task could not continue"), cancelled: t("Opening message cancelled"), paused: t("Automation paused · task text preserved"), 'no-reply': t("Goal reached") };
   if (phase === 'retrying') { text = ''; error = undefined; }
-  labels.retrying = `공급자 응답 대기 · 재시도 ${progress?.attempt ?? ''}${progress?.retryAt ? ' 예정 ' + new Date(progress.retryAt).toLocaleTimeString() : ''}`;
+  labels.retrying = t("Provider busy · retry {0}{1}", [progress?.attempt ?? '', progress?.retryAt ? ' at ' + new Date(progress.retryAt).toLocaleTimeString() : '']);
+  const mode = $<HTMLSelectElement>('chatAutomation').value === 'loop' ? t('Loop') : t('Goal');
+  labels.settling = `${mode} · ${wait?.reason === 'native-busy' ? t('ChatGPT resumed work · waiting before retry') : wait?.reason === 'silence' ? t('Waiting before recovery reload') : wait?.reason === 'quiet' ? t('Waiting for tool inactivity') :
+    wait?.reason === 'tools' ? t('Waiting for running tools') : wait?.reason === 'listening' ? t('Waiting for activity after recovery') : t('Answer settling')}`;
   row.hidden = !phase; if (!phase) return;
-  const busy = ['saving', 'preparing', 'generating', 'retrying', 'sending', 'answering', 'browser', 'queued', 'ready'].includes(phase) && !error;
+  const busy = ['settling', 'saving', 'preparing', 'generating', 'retrying', 'sending', 'answering', 'browser', 'queued', 'ready'].includes(phase) && !error;
   row.setAttribute('aria-busy', String(busy));
   const marker = el('span', busy ? 'session-status is-working' : 'session-status');
-  const body = el('div', 'queue-label'); body.append(el('span', '', error ? `${labels.failed}: ${error}` : labels[phase] ?? phase));
+  const body = el('div', 'queue-label'); body.append(el('span', '', error ? `${labels.failed}: ${goalErrorMessage(error)}` : labels[phase] ?? phase));
   if (text && ['generating', 'answering', 'preparing'].includes(phase)) { const preview = el('pre', 'goal-live-preview', text.slice(-8000)); body.append(preview); }
   row.replaceChildren(marker, body);
+  if (phase === 'settling' && wait?.until) {
+    const seconds = Math.max(0, Math.ceil((wait.until - Date.now()) / 1000));
+    const timer = el('span', 'recovery-countdown', seconds ? t('Check in {0}', [`${Math.floor(seconds / 60)}:${String(seconds % 60).padStart(2, '0')}`]) : t('Checking for activity…'));
+    timer.setAttribute('role', 'timer'); timer.setAttribute('aria-live', 'off'); row.append(timer);
+  }
 }
 const cancelledStarts = new Set<string>();
-const queuedFollowup = (entry: InputEntry): boolean => entry.mode === 'finish' || (entry.mode === 'after-turn' && !!entry.sessionId && entry.purpose !== 'decision');
+const queuedFollowup = (entry: InputEntry): boolean => !entry.opening && (entry.mode === 'finish' || (entry.mode === 'after-turn' && !!entry.sessionId && entry.purpose !== 'decision'));
 function pendingComposerInput(): InputEntry | undefined {
   return [...startingInputs.values(), ...pendingComposerInputs].find(entry => (!queuedFollowup(entry) || entry.state === 'browser') && ['queued', 'browser'].includes(entry.state) &&
     (selectedId ? (entry.sessionId ?? entry.deliveredSessionId) === selectedId :
-      (pendingNewInput?.generation === selectionGeneration && pendingNewInput.id === entry.id) || (!entry.sessionId && !entry.deliveredSessionId && entry.purpose !== 'decision')));
+      pendingNewInput?.generation === selectionGeneration && pendingNewInput.id === entry.id));
 }
 let durationTimer: number | undefined;
 function paintDeliveryControls(): void {
@@ -773,38 +861,53 @@ function paintDeliveryControls(): void {
   const working = selectedId !== null && controlledSessionId === selectedId && controlledSelection === selectionGeneration && controlledTurnId !== null;
   const queueAtFinish = selectedId !== null && controlledSessionId === selectedId && controlledSelection === selectionGeneration && controlledQueueAtFinish;
   const canInject = selectedId !== null && controlledSessionId === selectedId && controlledSelection === selectionGeneration && controlledCanInject;
-  $('queueAtFinish').hidden = !queueAtFinish;
-  $('afterTurnLabel').textContent = queueAtFinish ? '종료 시점에 예약' : '현재 턴이 끝난 뒤';
+  const canSendDirectly = selectedId !== null && controlledSessionId === selectedId && controlledSelection === selectionGeneration && controlledCanSendDirectly;
+  const files = imageDrafts.get(draftKey()) ?? [];
+  const nativeFiles = files.some(file => 'id' in file) && !(canInject && injectableAttachments(files));
+  $('queueAtFinish').hidden = !queueAtFinish || nativeFiles;
+  ui($('afterTurnLabel'), 'textContent', () => queueAtFinish && !nativeFiles ? t("Queue at Session finish") : t("After this turn"));
   const generate = $<HTMLButtonElement>('generateFinishGoal');
   const queued = [...startingInputs.values(), ...pendingComposerInputs].some(entry =>
     (entry.sessionId ?? entry.deliveredSessionId) === selectedId && ['queued', 'browser', 'tool'].includes(entry.state));
   generate.hidden = !working || !controlledFinishWaiting || queued || controlledStopPending || !!finishGoalDraftView;
   generate.disabled = generate.dataset.busy === `${selectedId}:${controlledTurnId}`;
   const sendOption = $<HTMLSelectElement>('sendMode').querySelector('option[value="auto"]');
-  if (sendOption) sendOption.textContent = canInject ? '지금 전달' : '보내기';
-  if (!canInject && !queueAtFinish) $<HTMLSelectElement>('sendMode').value = 'auto';
+  const immediateLabel = () => nativeFiles && working ? t("After this turn") : canSendDirectly ? t("Send directly") : canInject ? t("Inject now") : t("Send");
+  if (sendOption) ui(sendOption, 'textContent', immediateLabel);
+  ui($('immediateDeliveryLabel'), 'textContent', immediateLabel);
+  const immediateAction = $('sendOptions').querySelector<HTMLElement>('[data-delivery="auto"]');
+  if (immediateAction) immediateAction.hidden = (nativeFiles && working) || canInject;
+  const injectionAction = $('sendOptions').querySelector<HTMLElement>('[data-delivery="tool"]');
+  const explicitInjection = (canInject || canSendDirectly) && (!files.length || injectableAttachments(files));
+  if (injectionAction) injectionAction.hidden = !explicitInjection;
+  if ($<HTMLSelectElement>('sendMode').value === 'tool' && !explicitInjection) $<HTMLSelectElement>('sendMode').value = 'auto';
+  if (canInject && explicitInjection && $<HTMLSelectElement>('sendMode').value === 'auto') $<HTMLSelectElement>('sendMode').value = 'tool';
+  if (!canInject && !canSendDirectly && !queueAtFinish) $<HTMLSelectElement>('sendMode').value = 'auto';
   const pending = pendingComposerInput();
-  const stop = (working || !!pending) && !$<HTMLTextAreaElement>('chatInput').value.trim() && !(imageDrafts.get(draftKey())?.length);
+  const stop = (working || !!pending) && !currentPreparedPlan() && !$<HTMLTextAreaElement>('chatInput').value.trim() && !(imageDrafts.get(draftKey())?.length);
   // Hover selects delivery for the next message. Clicking the empty-composer
   // Stop still acts immediately; there is no second Stop action in the menu.
-  $('sendOptions').hidden = !canInject && !queueAtFinish;
+  $('sendOptions').hidden = !canInject && !canSendDirectly && !queueAtFinish;
   const send = $<HTMLButtonElement>('chatSend');
+  const planMode = taskPlans.has(draftKey()), preparedPlan = currentPreparedPlan();
   send.disabled = !!preparedPlan && (preparedPlan.sending || preparedPlan.stages.some(stage => !stage.trim()));
   send.dataset.action = stop ? 'stop' : 'send';
-  send.setAttribute('aria-label', stop ? (controlledStopPending ? '중지 요청됨' : '응답 중지') : '메시지 보내기');
-  if (stop && !working && pending) send.setAttribute('aria-label', '전달 취소');
-  if (preparedPlan && !stop) send.setAttribute('aria-label', '전체 계획 시작');
-  else if (planMode && !stop) send.setAttribute('aria-label', '계획 생성');
+  ui(send, 'aria-label', () => stop ? (controlledStopPending ? t("Stop requested") : t("Stop turn")) : t("Send message"));
+  if (stop && !working && pending) ui(send, 'aria-label', () => t("Cancel delivery"));
+  const planAction = selectedId ? t("Queue plan at Session finish") : t("Start full plan");
+  if (preparedPlan && !stop) send.setAttribute('aria-label', planAction);
+  else if (planMode && !stop) ui(send, 'aria-label', () => t("Generate plan"));
   send.classList.toggle('is-plan-ready', !!preparedPlan && !stop);
-  send.title = stop && !working && pending ? '전달 취소' : preparedPlan && !stop ? '전체 계획 시작' : planMode && !stop ? '클릭하여 계획 생성' : '';
+  ui(send, 'title', () => stop && !working && pending ? t("Cancel delivery") : preparedPlan && !stop ? planAction : planMode && !stop ? t("Click to generate plan") : '');
   send.classList.toggle('is-stop', stop);
   for (const button of $('sendOptions').querySelectorAll<HTMLElement>('[data-delivery]')) {
-    button.setAttribute('aria-checked', String(button.dataset.delivery === $<HTMLSelectElement>('sendMode').value));
+    button.setAttribute('aria-checked', String(button.dataset.delivery === (nativeFiles && working && $<HTMLSelectElement>('sendMode').value !== 'tool' ? 'after-turn' : $<HTMLSelectElement>('sendMode').value)));
   }
 }
-function dockAction(label: string, symbol: string, click: () => void): HTMLButtonElement {
+function dockAction(label: string | (() => string), symbol: string, click: (event: MouseEvent) => void): HTMLButtonElement {
   const button = el('button', 'dock-action') as HTMLButtonElement;
-  button.type = 'button'; button.title = label; button.setAttribute('aria-label', label);
+  const description = typeof label === 'function' ? label : () => label;
+  button.type = 'button'; ui(button, 'title', description); ui(button, 'aria-label', description);
   button.append(icon(symbol)); button.onclick = click; return button;
 }
 function paintActiveGoal(): void {
@@ -813,66 +916,89 @@ function paintActiveGoal(): void {
   row.hidden = !selectedId || mode === 'off';
   if (row.hidden) { row.replaceChildren(); return; }
   const objective = $<HTMLTextAreaElement>('sessionObjective').value.trim();
-  const label = el('span', 'queue-label', `${mode === 'loop' ? 'Loop' : '목표 진행 중'}${objective ? ' · ' + objective : ''}`);
+  const label = el('span', 'queue-label', () => `${mode === 'loop' ? t("Loop") : t("Pursuing goal")}${objective ? ' · ' + objective : ''}`);
   label.title = objective;
   row.replaceChildren(icon('i-pulse'), label,
-    dockAction('자동 진행 끄기', 'i-power', () => { const select = $<HTMLSelectElement>('chatAutomation'); select.value = 'off'; select.dispatchEvent(new Event('change')); }),
-    dockAction('작업 편집', 'i-pencil', () => { $<HTMLDetailsElement>('composerSettings').open = true; $<HTMLTextAreaElement>('sessionObjective').focus(); }));
+    dockAction(() => t("Pause automation"), 'i-power', () => { const select = $<HTMLSelectElement>('chatAutomation'); select.value = 'off'; select.dispatchEvent(new Event('change')); }),
+    dockAction(() => t("Edit task"), 'i-pencil', event => {
+      // This opener is outside the menu; its click must not immediately dismiss it.
+      event.stopPropagation();
+      $<HTMLDetailsElement>('composerSettings').open = true;
+      $<HTMLTextAreaElement>('sessionObjective').focus();
+    }));
 }
-let planGeneration = 0;
-let planMode = false;
-let planRequestId: string | null = null;
-let preparedPlan: { selection: number; text: string; stages: string[]; sending: boolean } | null = null;
-function cancelTaskPlan(): void {
-  if (planRequestId) void api.cancelTaskRequest?.(planRequestId);
-  planRequestId = null;
-  preparedPlan = null;
-  ++planGeneration; planMode = false;
-  $('taskPlanPreview').hidden = true; $('taskPlanPreview').replaceChildren();
-  const button = $<HTMLButtonElement>('createPlan');
-  delete button.dataset.busy; button.removeAttribute('aria-busy');
-  $<HTMLTextAreaElement>('chatInput').placeholder = '메시지를 입력하세요…';
-  paintTaskActions();
-  paintDeliveryControls();
+type TaskPlanDraft = { text: string; requestId: string | null; stages: string[] | null; sending: boolean; progress: TaskProgress | null; error: string | null };
+// Planning belongs to its draft key. Completed stages own their captured objective
+// independently of composer edits; existing sessions hand them to the durable queue.
+const taskPlans = new Map<string, TaskPlanDraft>();
+function currentPreparedPlan(): (TaskPlanDraft & { stages: string[] }) | null {
+  const plan = taskPlans.get(draftKey());
+  return plan?.stages ? plan as TaskPlanDraft & { stages: string[] } : null;
+}
+function cancelTaskPlan(key = draftKey()): void {
+  const plan = taskPlans.get(key);
+  taskPlans.delete(key);
+  if (plan?.requestId) void api.cancelTaskRequest?.(plan.requestId);
+  if (draftKey() === key) paintTaskPlan();
+}
+function paintTaskPlan(): void {
+  const plan = taskPlans.get(draftKey());
+  const preview = $('taskPlanPreview'); preview.replaceChildren();
+  preview.hidden = !plan || (!plan.requestId && !plan.stages && !plan.error);
+  ui($<HTMLTextAreaElement>('chatInput'), 'placeholder', () => plan && !plan.text ? t("Describe the task to turn into a plan…") : t("Ask anything…"));
+  if (plan?.stages) paintPreparedPlan();
+  else if (plan?.error) {
+    const failure = plan.error;
+    const error = el('div', 'muted', () => failure === 'invalid_goal_decision_json' ? t("The planner response could not be read.") : goalErrorMessage(failure));
+    error.title = plan.error;
+    preview.append(error, el('div', 'muted', () => t("Send again to retry, or cancel the plan.")));
+  } else if (plan?.requestId) {
+    const progress = plan.progress;
+    const label = () => !progress ? t("Creating plan…") : progress.phase === 'retrying' ? t("Provider busy · retry {0}{1}", [progress.attempt ?? '', progress.retryAt ? t(' at {0}', [new Date(progress.retryAt).toLocaleTimeString()]) : '']) : progress.phase === 'cancelled' ? t("Plan cancelled") : progress.phase === 'preparing' ? t("Preparing plan…") : progress.phase === 'ready' ? t("Plan ready") : progress.phase === 'failed' ? t("Plan failed") : t("Writing plan…");
+    preview.append(el('span', 'muted', label));
+    if (progress?.text || progress?.error) preview.append(el('pre', 'task-progress-text', progress.error ? goalErrorMessage(progress.error) : progress.text));
+  }
+  paintTaskActions(); paintDeliveryControls();
 }
 async function createTaskPlan(backend: 'api' | 'chatgpt'): Promise<void> {
   const input = $<HTMLTextAreaElement>('chatInput'), text = input.value.trim();
-  planMode = true; paintTaskActions(); paintDeliveryControls();
-  if (!text) { input.placeholder = '계획으로 만들 작업을 입력하세요…'; input.focus(); return; }
-  const generation = ++planGeneration, selection = selectionGeneration;
-  const preview = $('taskPlanPreview'); preview.hidden = false;
-  preview.replaceChildren(el('span', 'muted', '계획 생성 중…'));
-  const button = $<HTMLButtonElement>('createPlan');
-  const caption = button.querySelector('span')!; const previous = caption.textContent;
-  button.dataset.busy = 'true'; button.setAttribute('aria-busy', 'true'); caption.textContent = '계획 생성 중…'; paintTaskActions();
-  const requestId = crypto.randomUUID();
-  if (planRequestId) void api.cancelTaskRequest?.(planRequestId);
-  planRequestId = requestId;
+  const key = draftKey();
+  cancelTaskPlan(key);
+  const sessionId = selectedId, projectId = selectedId ? sessions.find(row => row.id === selectedId)?.projectId ?? null : selectedProjectId;
+  const requestId = text ? crypto.randomUUID() : null;
+  const plan: TaskPlanDraft = { text, requestId, stages: null, sending: false, progress: null, error: null };
+  taskPlans.set(key, plan); paintTaskPlan();
+  if (!requestId) { input.focus(); return; }
+  const current = () => taskPlans.get(key) === plan;
   const unsubscribe = api.onTaskProgress?.(progress => {
-    if (progress.requestId !== requestId || generation !== planGeneration || selection !== selectionGeneration) return;
-    const label = progress.phase === 'retrying' ? `공급자 응답 대기 · 재시도 ${progress.attempt ?? ''}${progress.retryAt ? ' 예정 ' + new Date(progress.retryAt).toLocaleTimeString() : ''}` : progress.phase === 'cancelled' ? '계획 취소됨' : progress.phase === 'preparing' ? '계획 준비 중…' : progress.phase === 'ready' ? '계획 준비됨' : progress.phase === 'failed' ? '계획 생성 실패' : '계획 작성 중…';
-    preview.replaceChildren(el('span', 'muted', label));
-    if (progress.text || progress.error) preview.append(el('pre', 'task-progress-text', progress.error || progress.text));
+    if (progress.requestId !== requestId || !current()) return;
+    plan.progress = progress;
+    if (draftKey() === key) paintTaskPlan();
   });
-  let stages: string[] | null;
   try {
     const result = await api.draftTaskPlan(text, backend, requestId);
-    stages = result.ok ? result.data : null;
-    if (!result.ok && generation === planGeneration && selection === selectionGeneration) {
-      const error = el('div', 'muted', result.error === 'invalid_goal_decision_json' ? '계획 생성 응답을 읽지 못했습니다.' : result.error);
-      error.title = result.error; preview.replaceChildren(error);
+    if (!current()) return;
+    const draft = draftKey() === key ? input.value : inputDrafts.get(key) ?? '';
+    if (draft.trim() !== text) { cancelTaskPlan(key); return; }
+    if (result.ok) {
+      plan.stages = result.data;
+      plan.requestId = null;
+      // The accepted result now owns the captured request. Retire only its
+      // unchanged source draft, before queue admission can yield to new typing.
+      inputDrafts.delete(key);
+      if (draftKey() === key) { replaceComposerDraft(); input.value = ''; }
+      if (sessionId) await queuePreparedPlan(key, plan as TaskPlanDraft & { stages: string[] }, sessionId, projectId);
     }
+    else plan.error = result.error;
+  } catch (error) {
+    if (current()) plan.error = error instanceof Error ? error.message : String(error);
+  } finally {
+    unsubscribe?.(); plan.requestId = null;
+    if (current() && draftKey() === key) paintTaskPlan();
   }
-  finally { unsubscribe?.(); if (planRequestId === requestId) planRequestId = null; if (generation === planGeneration) { delete button.dataset.busy; button.removeAttribute('aria-busy'); caption.textContent = previous; paintTaskActions(); } }
-  if (generation !== planGeneration || selection !== selectionGeneration) return;
-  if (!stages) { preview.hidden = false; preview.append(el('div', 'muted', '다시 보내서 재시도하거나 계획을 취소하세요.')); return; }
-  if (input.value.trim() !== text) { preview.hidden = true; toast('작성 내용이 바뀌었습니다. 변경된 작업으로 계획을 다시 만드세요.'); return; }
-  preparedPlan = { selection, text, stages, sending: false };
-  paintPreparedPlan();
-  paintDeliveryControls();
 }
 function paintPreparedPlan(): void {
-  const plan = preparedPlan;
+  const plan = currentPreparedPlan();
   if (!plan) return;
   const preview = $('taskPlanPreview'); preview.hidden = plan.sending;
   // Sending hands presentation to the outbox/queued-stage rows. Keeping the editable
@@ -882,40 +1008,65 @@ function paintPreparedPlan(): void {
   preview.replaceChildren(...plan.stages.map((stage, index) => {
     const row = el('div', 'plan-stage');
     const heading = el('div', 'plan-stage-heading');
-    const label = el('span', 'stage-number', String(index + 1)); label.setAttribute('aria-label', `${index + 1}단계`);
-    const text = el('span', 'queue-label', stage); text.title = stage;
-    const field = document.createElement('textarea'); field.value = stage; field.maxLength = 16000; field.hidden = true;
-    field.setAttribute('aria-label', `${index + 1}단계 편집`);
-    const error = el('span', 'stage-error', '내용을 입력하거나 단계를 삭제하세요.'); error.id = `planStageError-${index}`; error.hidden = !!stage.trim();
+    const label = el('span', 'stage-number', String(index + 1)); ui(label, 'aria-label', () => t("Stage {0}", [index + 1]));
+    const text = el('span', 'queue-label', stage); text.title = stage; text.dir = 'auto';
+    const field = document.createElement('textarea'); field.dir = 'auto'; field.value = stage; field.maxLength = 16000; field.hidden = true;
+    ui(field, 'aria-label', () => t("Edit stage {0}", [index + 1]));
+    const error = el('span', 'stage-error', () => t("Enter text or delete this stage.")); error.id = `planStageError-${index}`; error.hidden = !!stage.trim();
     const validate = () => { error.hidden = !!field.value.trim(); field.setAttribute('aria-invalid', String(!error.hidden)); paintDeliveryControls(); };
     field.setAttribute('aria-describedby', error.id); field.setAttribute('aria-invalid', String(!error.hidden));
     field.oninput = () => { plan.stages[index] = field.value; text.textContent = field.value; text.title = field.value; validate(); };
-    const edit = dockAction(`${index + 1}단계 편집`, 'i-pencil', () => {
+    const edit = dockAction(() => t("Edit stage {0}", [index + 1]), 'i-pencil', () => {
       field.hidden = !field.hidden; edit.setAttribute('aria-expanded', String(!field.hidden)); if (!field.hidden) field.focus();
     });
     edit.setAttribute('aria-expanded', 'false');
-    const remove = dockAction(`${index + 1}단계 삭제`, 'i-trash', () => {
+    const remove = dockAction(() => t("Delete stage {0}", [index + 1]), 'i-trash', () => {
       if (plan.sending) return;
       plan.stages.splice(index, 1);
       if (plan.stages.length) { paintPreparedPlan(); paintDeliveryControls(); } else cancelTaskPlan();
     });
     edit.disabled = remove.disabled = field.disabled = plan.sending;
-    heading.title = index === 0 ? '원래 요청과 전체 계획을 함께 전송합니다. 이후 단계는 검증 항목으로 대기열에 추가됩니다.' : '첫 메시지에 포함하고, 설정에 따라 Session finish 또는 답변 완료 후 검증 단계로 전달합니다.';
+    ui(heading, 'title', () => selectedId ? t("Queued at Session finish; edit or delete this checkpoint independently.") : index === 0 ? t("Send includes your complete request and the full plan. Later stages are queued as verification checkpoints.") : t("Included in the first message, then queued as a checkpoint at Session finish or after a completed answer when enabled."));
     heading.append(label, text, edit, remove); row.append(heading, field, error); return row;
   }));
 }
 async function sendPreparedPlan(): Promise<void> {
-  const plan = preparedPlan;
+  const key = draftKey(), plan = currentPreparedPlan();
   if (!plan || plan.sending) return;
-  if (plan.selection !== selectionGeneration || $<HTMLTextAreaElement>('chatInput').value.trim() !== plan.text) { cancelTaskPlan(); return; }
+  if (selectedId) {
+    await queuePreparedPlan(key, plan, selectedId, sessions.find(row => row.id === selectedId)?.projectId ?? null);
+    return;
+  }
   const tasks = plan.stages.map(stage => stage.trim());
-  if (!tasks.length || tasks.some(task => !task) || JSON.stringify(tasks).length > 12000) { toast('빈 단계를 채우고 전체 계획을 12,000자 이내로 작성하세요.'); return; }
+  if (!tasks.length || tasks.some(task => !task) || JSON.stringify(tasks).length > 12000) { toast(t("Keep every stage nonempty and the plan below 12,000 characters.")); return; }
   plan.sending = true; paintPreparedPlan();
   try {
-    const sent = await sendComposer(undefined, tasks);
-    if (preparedPlan === plan && sent) { await refreshInputQueue(); if (preparedPlan === plan) cancelTaskPlan(); }
+    const sent = await sendComposer(undefined, tasks, plan.text);
+    if (taskPlans.get(key) === plan && sent) { await refreshInputQueue(); if (taskPlans.get(key) === plan) cancelTaskPlan(key); }
   } finally {
-    if (preparedPlan === plan) { plan.sending = false; paintPreparedPlan(); paintDeliveryControls(); }
+    if (taskPlans.get(key) === plan) { plan.sending = false; if (draftKey() === key) paintTaskPlan(); }
+  }
+}
+async function queuePreparedPlan(key: string, plan: TaskPlanDraft & { stages: string[] }, sessionId: string, projectId: string | null): Promise<void> {
+  if (plan.sending) return;
+  const stages = plan.stages.map(stage => stage.trim());
+  if (!stages.length || stages.some(stage => !stage) || JSON.stringify(stages).length > 12000) {
+    toast(t("Keep every stage nonempty and the plan below 12,000 characters.")); return;
+  }
+  plan.sending = true;
+  if (draftKey() === key) paintTaskPlan();
+  try {
+    const result = await run(api.sendInput({ id: crypto.randomUUID(), sessionId, projectId,
+      text: stages[0]!, objective: plan.text, authoredSource: 'objective', stages: stages.slice(1), mode: 'finish', dueAt: Date.now(), model: null, reasoningEffort: null }));
+    if (result) {
+      // The result already retired its source prompt. Admission leaves any newer
+      // composer draft and attachments alone; the durable queue owns the stages.
+      if (taskPlans.get(key) === plan) cancelTaskPlan(key);
+      await refreshInputQueue();
+    }
+  } finally {
+    plan.sending = false;
+    if (taskPlans.get(key) === plan && draftKey() === key) paintTaskPlan();
   }
 }
 function paintTaskActions(): void {
@@ -927,17 +1078,29 @@ function paintTaskActions(): void {
   save.hidden = off;
   const saved = objective.dataset.saved === objective.value && !!objective.value.trim();
   save.disabled = objective.disabled || !objective.value.trim() || save.dataset.busy === 'true' || saved;
-  save.querySelector('span')!.textContent = save.dataset.busy === 'true' ? '저장 중…' : saved ? '저장됨' : '작업 저장';
+  ui(save.querySelector('span')!, 'textContent', () => save.dataset.busy === 'true' ? t("Saving…") : saved ? t("Saved") : t("Save task"));
   const text = $<HTMLTextAreaElement>('chatInput').value.trim();
   for (const id of ['createPlan']) {
     const button = $<HTMLButtonElement>(id);
-    button.disabled = false;
+    const plan = taskPlans.get(draftKey()), planMode = !!plan;
+    if (plan?.requestId) { button.dataset.busy = 'true'; button.setAttribute('aria-busy', 'true'); }
+    else { delete button.dataset.busy; button.removeAttribute('aria-busy'); }
+    button.disabled = plan?.sending === true;
     button.setAttribute('aria-pressed', String(planMode));
-    button.querySelector('span')!.textContent = planMode ? '계획 취소' : '계획 만들기';
-    button.title = planMode ? '작성 내용을 유지하고 일반 메시지로 돌아가기' : text ? '메시지를 편집 가능한 단계로 나누기' : '먼저 메시지를 입력하세요';
+    ui(button.querySelector('span')!, 'textContent', () => planMode ? t("Cancel plan") : t("Create plan"));
+    ui(button, 'title', () => planMode ? t("Return to a normal message; keep your draft") : text ? t("Split your message into editable stages") : t("Write a message in the composer first"));
   }
 }
+function paintLoopDelivery(): void {
+  const model = confirmedComposerModel();
+  $('loopDeliveryRow').hidden = $<HTMLSelectElement>('chatAutomation').value !== 'loop' ||
+    !model || !isProModel(model.model, model.reasoningEffort);
+}
+function openingLoopDelivery(): boolean | undefined {
+  return selectedId === null ? $<HTMLSelectElement>('loopDelivery').value === 'after-turn' : undefined;
+}
 function paintAutomationSwitch(): void {
+  paintLoopDelivery();
   paintGoalProgress();
   paintActiveGoal();
   const select = $<HTMLSelectElement>('chatAutomation');
@@ -947,30 +1110,58 @@ function paintAutomationSwitch(): void {
   }
   $<HTMLSelectElement>('sessionObjectiveMode').value = select.value === 'loop' ? 'loop' : 'goal';
   const loop = select.value === 'loop';
-  document.querySelector('label[for="sessionObjective"]')!.textContent = loop ? 'Loop 지시문' : 'Goal';
-  $<HTMLTextAreaElement>('sessionObjective').placeholder = loop ? '매번 이어서 수행할 작업을 입력하세요.' : '이 대화의 목표를 입력하세요.';
+  ui(document.querySelector('label[for="sessionObjective"]')!, 'textContent', () => loop ? t("Loop instructions") : t("Goal"));
+  ui($<HTMLTextAreaElement>('sessionObjective'), 'placeholder', () => loop ? t("What should each continuation focus on?") : t("What should this chat achieve?"));
   paintTaskActions();
 }
 async function refreshSessionControls(): Promise<void> {
   const id = selectedId, generation = ++controlsGeneration;
+  const planHost = $('agentPlan');
+  if (planHost.dataset.sessionId !== (id ?? '')) renderAgentPlan(planHost, id, null);
   const menu = $('sessionControls');
+  if (controlledSessionId !== id || controlledSelection !== selectionGeneration) {
+    // Retire the previous selection's projection before awaiting the new owner's IPC.
+    // Replace the translation binding too, so a locale refresh cannot revive its status.
+    ui($('sessionControlStatus'), 'textContent', () => '');
+    for (const action of ['compactSession', 'cancelCompaction']) $(action).hidden = true;
+  }
   paintAutomationSwitch();
   if (!id) { controlledSessionId = null; controlledTurnId = null; paintDeliveryControls(); menu.hidden = false;
     $<HTMLTextAreaElement>('sessionObjective').disabled = false;
     paintTaskActions();
     for (const action of ['compactSession', 'cancelCompaction']) $(action).hidden = true;
     return; }
+  const opening = pendingComposerInputs.find(row => row.opening && row.sessionId === id && ['queued', 'browser'].includes(row.state));
+  if (!sessions.find(row => row.id === id)?.conversationId) {
+    controlledSessionId = id; controlledSelection = selectionGeneration; controlledTurnId = null;
+    controlledCanInject = false; controlledCanSendDirectly = false; controlledQueueAtFinish = false;
+    controlledStopPending = false; controlledFinishWaiting = false;
+    menu.hidden = false;
+    goalDraftView = null; goalWaitView = null; finishGoalDraftView = null; controlledRecovery = [];
+    $<HTMLSelectElement>('chatAutomation').value = opening?.automation ?? 'off';
+    $<HTMLSelectElement>('loopDelivery').value = opening?.loopAfterTurn ? 'after-turn' : 'finish';
+    const objective = $<HTMLTextAreaElement>('sessionObjective');
+    objective.value = opening?.objective ?? ''; objective.disabled = true;
+    objective.dataset.sessionId = id;
+    for (const action of ['compactSession', 'cancelCompaction']) $(action).hidden = true;
+    paintAutomationSwitch(); paintDeliveryControls();
+    return;
+  }
   const controls = await run(api.getSessionControls(id));
   if (generation !== controlsGeneration || id !== selectedId) return;
+  renderAgentPlan(planHost, id, controls?.plan ?? null);
   controlledSessionId = id;
   controlledSelection = selectionGeneration;
   controlledTurnId = controls?.activeTurnId ?? null;
   goalDraftView = controls?.goalDraft ?? null;
+  goalWaitView = controls?.goalWait ?? null;
   finishGoalDraftView = controls?.finishGoalDraft ?? null;
   controlledStopPending = controls?.stopPending === true;
   controlledFinishWaiting = controls?.finishWaiting === true;
   controlledQueueAtFinish = controls?.queueAtFinish === true;
   controlledCanInject = controls?.canInject ?? controlledTurnId !== null;
+  controlledCanSendDirectly = controls?.canSendDirectly === true;
+  controlledRecovery = controls?.recovery ?? [];
   paintDeliveryControls();
   paintStateLine();
   menu.hidden = !controls;
@@ -988,24 +1179,16 @@ async function refreshSessionControls(): Promise<void> {
   paintTaskActions();
   const draftMode = $<HTMLSelectElement>('chatAutomation');
   if (!draftMode.dataset.edited) draftMode.value = controls.automation;
+  if (!$<HTMLSelectElement>('loopDelivery').disabled)
+    $<HTMLSelectElement>('loopDelivery').value = controls.loopAfterTurn ? 'after-turn' : 'finish';
   paintAutomationSwitch();
   $<HTMLButtonElement>('compactSession').disabled = !!controls.blocked || !!controls.job?.busy;
   $('cancelCompaction').hidden = !controls.job?.busy;
-  $('sessionControlStatus').textContent = controls.blocked === 'worker' ? '이 보조 에이전트는 주 에이전트가 관리합니다.' : controls.blocked === 'blocked' ? '이 대화는 차단되어 있습니다.' : controls.job?.busy ? 'ChatGPT에서 요약 후 이어가기가 진행 중입니다.' : '';
+  ui($('sessionControlStatus'), 'textContent', () => controls.blocked === 'worker' ? t("This sub-agent is managed by its prime.") : controls.blocked === 'blocked' ? t("This chat is blocked.") : controls.job?.busy ? t("Compaction is running in ChatGPT.") : '');
 }
 
-async function navigateHistory(before: number | null, prepend = false): Promise<void> {
-  const selected = selectedId;
-  const selection = selectionGeneration;
-  historyBefore = before;
-  detailCursor = null;
-  const loading = loadDetail(true, prepend);
-  const generation = detailLoadGeneration;
-  await loading;
-  if (selectedId !== selected || selectionGeneration !== selection || detailLoadGeneration !== generation) return;
-  if (!prepend) $('chatBody').scrollTop = before === null ? $('chatBody').scrollHeight : 0;
-}
-async function loadDetail(navigate = false, prepend = false, newerFrom?: number): Promise<void> {
+async function loadDetail(navigate = false, olderBefore?: number, newerFrom?: number): Promise<void> {
+  const prepend = olderBefore !== undefined;
   const wanted = selectedId;
   if (wanted !== null && historyBefore !== null && detailFor === wanted && !navigate) { void refreshSessionControls(); paintDetail(); return; }
   const generation = ++detailLoadGeneration;
@@ -1017,16 +1200,30 @@ async function loadDetail(navigate = false, prepend = false, newerFrom?: number)
     totalEvents = 0;
     detailFor = null;
     detailCursor = null;
+    $('timeline').style.removeProperty('--timeline-scroll-reserve');
     paintDetail();
     return;
   }
-  if (detailFor !== wanted) historyBefore = null;
+  const opening = detailFor !== wanted;
+  if (opening) historyBefore = null;
   // Live deltas must not evict a historical page while the user is reading it.
-  const incremental = newerFrom === undefined && historyBefore === null && detailFor === wanted && detailCursor !== null;
+  const incremental = !prepend && newerFrom === undefined && historyBefore === null && detailFor === wanted && detailCursor !== null;
   const detail = await run(
-    api.getSession(wanted, newerFrom !== undefined ? { from: newerFrom, limit: MAX_TIMELINE_ROWS / 2 } : incremental ? { from: detailCursor!, limit: MAX_TIMELINE_ROWS } : { ...(historyBefore !== null ? { before: historyBefore } : {}), limit: prepend ? MAX_TIMELINE_ROWS / 2 : MAX_TIMELINE_ROWS })
+    api.getSession(wanted, newerFrom !== undefined ? { from: newerFrom, limit: MAX_TIMELINE_ROWS / 2 } : incremental ? { from: detailCursor!, limit: MAX_TIMELINE_ROWS } : { ...(olderBefore !== undefined ? { before: olderBefore } : historyBefore !== null ? { before: historyBefore } : {}), limit: prepend ? MAX_TIMELINE_ROWS / 2 : MAX_TIMELINE_ROWS })
   );
-  if (!detail || generation !== detailLoadGeneration || selectedId !== wanted) return;
+  if (generation !== detailLoadGeneration || selectedId !== wanted) return;
+  if (!detail) {
+    // A failed destination read must not leave another chat displayed indefinitely.
+    // run() already presents the read error; keep the destination empty and retryable.
+    if (opening) {
+      $('timeline').replaceChildren();
+      $('timeline').removeAttribute('inert');
+      $('timeline').removeAttribute('aria-busy');
+    }
+    return;
+  }
+  // An empty older page is not navigation. Keep the live cursor and viewport intact.
+  if (prepend && !detail.events.length) return;
   // User/assistant prose is canonical in messages.json, while structured page activity stays
   // append-only by design: ChatGPT can grow one commentary caption or rewrite one activity
   // label several times. `foldProgress` turns those snapshots back into the one logical row
@@ -1037,18 +1234,15 @@ async function loadDetail(navigate = false, prepend = false, newerFrom?: number)
   else {
     const folded = chronological(foldProgress(detail.events));
     if (newerFrom !== undefined) {
-      events = chronological(foldProgress([...events, ...folded])).slice(-MAX_TIMELINE_ROWS);
+      events = retainTimelinePage(chronological(foldProgress([...events, ...folded])), 'newer');
       // Reaching the live tail restores ordinary delta reads. Paging itself preserves
       // the reader's row even when they were at the bottom of the previous window.
       if (detail.events.length < MAX_TIMELINE_ROWS / 2) historyBefore = null;
     } else if (prepend) {
-      const boundary = historyBefore!;
-      const retained = events.filter(event => event.seq >= boundary).slice(0, MAX_TIMELINE_ROWS - folded.length);
-      events = chronological(foldProgress([...folded, ...retained]));
-      // Keep the newly requested history reachable even if one retained answer exceeds
-      // the text budget by itself. The bounded page then starts at the older content.
-      let textCost = events.reduce((sum, event) => sum + eventTextCost(event), 0);
-      while (events.length > folded.length && textCost > MAX_TIMELINE_TEXT_CHARS) textCost -= eventTextCost(events.pop()!);
+      const boundary = olderBefore!;
+      historyBefore = boundary;
+      const retained = events.filter(event => event.seq >= boundary);
+      events = retainTimelinePage(chronological(foldProgress([...folded, ...retained])), 'older');
     } else events = folded.slice(Math.max(0, folded.length - MAX_TIMELINE_ROWS));
     detailFor = wanted;
   }
@@ -1057,7 +1251,11 @@ async function loadDetail(navigate = false, prepend = false, newerFrom?: number)
       ? detail.nextFrom
       : detail.events.reduce((cursor, event) => Math.max(cursor, event.seq + 1), incremental ? detailCursor! : 0);
   totalEvents = detail.total;
+  if (opening) $('timeline').style.removeProperty('--timeline-scroll-reserve');
   paintDetail(!prepend && newerFrom === undefined);
+  // A selection opens at the latest message; the previous chat's viewport is not
+  // a reading position in this one. Apply only after the current load has rendered.
+  if (opening) $('chatBody').scrollTop = $('chatBody').scrollHeight;
   void loadHandoff();
   // A burst can contain more than one renderer-sized page between coalesced notifications.
   // Drain it page by page rather than silently jumping the cursor or lifting the payload cap.
@@ -1090,8 +1288,13 @@ async function loadHandoff(): Promise<void> {
 
 function textBlock(className: string, value: string, truncated: boolean, chars: number): HTMLElement {
   const node = el('p', className, value);
+  // Recorded text is whatever language the user and ChatGPT were speaking. The stylesheet is
+  // written left-to-right throughout, so an Arabic or Hebrew message rendered without this
+  // reads with its punctuation and numbers on the wrong side. `auto` resolves from the first
+  // strong character, so Latin text is unaffected.
+  node.setAttribute('dir', 'auto');
   if (truncated) {
-    node.append(el('span', 'cut', ` … 생략됨, 원문 ${compactNumber(chars)}자`));
+    node.append(el('span', 'cut', () => t(" … cut, {0} characters in the original", [compactNumber(chars)])));
   }
   return node;
 }
@@ -1168,7 +1371,7 @@ function citationLabels(source: string, capture?: StoredText): Map<string, strin
       seen.add(href);
       const anchor = document.createElement('a'); anchor.href = href;
       anchor.textContent = new URL(href).hostname;
-      anchor.title = candidate.textContent?.trim().slice(0, 500) || '출처';
+      ui(anchor, 'title', () => candidate.textContent?.trim().slice(0, 500) || t("Source"));
       anchors.push(anchor.outerHTML);
     }
     if (anchors.length) links.set(marker, ` (${anchors.join(', ')})`);
@@ -1196,7 +1399,7 @@ export function renderedMarkdown(source: string, capture?: StoredText): HTMLElem
   // Fiber's canonical text can be complete while a background provider tab still
   // paints its first words. Render this revision directly; captured DOM HTML is
   // never evidence that it contains the current message revision.
-  const text = source.slice(0, MAX_RENDERED_HTML_CHARS);
+  const text = withoutMessageReaction(source).slice(0, MAX_RENDERED_HTML_CHARS);
   const citations = text.includes('\uE200') ? citationLabels(text, capture) : new Map<string, string>();
   // An inline tokenizer leaves literal citation examples inside code spans/fences intact.
   const parser = new Marked({ gfm: true, extensions: [{
@@ -1208,11 +1411,11 @@ export function renderedMarkdown(source: string, capture?: StoredText): HTMLElem
       if (url) {
         // Unlike opaque citation IDs, a native url token already carries its exact
         // authored label and destination. Captured React anchors may have no href.
-        const link = document.createElement('a'); link.textContent = url[1] || url[2] || '링크';
+        const link = document.createElement('a'); ui(link, 'textContent', () => url[1] || url[2] || t("Link"));
         if (safeExternalLink(url[2] ?? '')) link.setAttribute('href', url[2]!);
         return link.outerHTML;
       }
-      return citations.get(token.raw) ?? (token.raw.startsWith('\uE200filecite\uE202') ? '' : '<span title="기록에 이 출처 URL이 없습니다">[출처 링크 없음]</span>');
+      return citations.get(token.raw) ?? (token.raw.startsWith('\uE200filecite\uE202') ? '' : '<span title="The recording does not include this source URL">[source link unavailable]</span>');
     }
   }] });
   const html = parser.parse(text, { async: false });
@@ -1221,6 +1424,9 @@ export function renderedMarkdown(source: string, capture?: StoredText): HTMLElem
 
 export function renderedMessage(html: StoredText | null | undefined, fallback: string): HTMLElement {
   const box = el('div', 'msg');
+  // Same reason as textBlock, for the markdown path — and it is the fallback rather than the
+  // authority: an element below that carried its own direction keeps it.
+  box.setAttribute('dir', 'auto');
   const safeFallback = fallback.slice(0, MAX_RENDERED_HTML_CHARS);
   // A capture the store had to cut is markup that stops mid-element — very often inside a
   // code block, whose wrapper chrome is far larger than the code in it — so it presents part
@@ -1235,7 +1441,7 @@ export function renderedMessage(html: StoredText | null | undefined, fallback: s
   // Parsing untrusted captured HTML constructs a second tree before sanitisation. Bound it
   // before innerHTML so a valid but huge recorded turn cannot freeze/OOM the renderer.
   template.innerHTML = html.text.slice(0, MAX_RENDERED_HTML_CHARS);
-  const visit = (parent: ParentNode): void => {
+  const visit = (parent: ParentNode, directionOwned = false): void => {
     for (const node of [...parent.childNodes]) {
       // Namespace elements (SVG/MathML) are not HTMLElements. Checking HTMLElement here
       // would let exactly the foreign content in DROP_RENDERED_TAGS bypass traversal and
@@ -1247,7 +1453,15 @@ export function renderedMessage(html: StoredText | null | undefined, fallback: s
         element.remove();
         continue;
       }
-      visit(element);
+      const sourceDir = element.getAttribute('dir')?.toLowerCase();
+      const dir = sourceDir === 'ltr' || sourceDir === 'rtl' || sourceDir === 'auto' ? sourceDir : null;
+      // Native first-strong detection belongs to each prose block, not the whole
+      // answer. A list/quote or explicit captured direction owns its descendants:
+      // nested auto scopes would exclude their text from that owner's scan.
+      const automatic = !directionOwned && /^(P|H[1-6]|UL|OL|BLOCKQUOTE|TD|TH)$/.test(tagName);
+      const code = tagName === 'PRE' || tagName === 'CODE' || tagName === 'KBD';
+      const resolvedDir = RENDERED_TAGS.has(tagName) ? dir ?? (code ? 'ltr' : automatic ? 'auto' : null) : null;
+      visit(element, directionOwned || !!resolvedDir);
       if (!RENDERED_TAGS.has(tagName)) {
         element.replaceWith(...element.childNodes);
         continue;
@@ -1258,6 +1472,7 @@ export function renderedMessage(html: StoredText | null | undefined, fallback: s
       const colSpan = tagName === 'TD' || tagName === 'TH' ? element.getAttribute('colspan') : null;
       const rowSpan = tagName === 'TD' || tagName === 'TH' ? element.getAttribute('rowspan') : null;
       for (const attribute of [...element.attributes]) element.removeAttribute(attribute.name);
+      if (resolvedDir) element.setAttribute('dir', resolvedDir);
       if (href) {
         element.setAttribute('href', href);
         element.setAttribute('target', '_blank');
@@ -1291,7 +1506,7 @@ export function renderedMessage(html: StoredText | null | undefined, fallback: s
     const viewport = el('div', 'markdown-table');
     viewport.tabIndex = 0;
     viewport.setAttribute('role', 'region');
-    viewport.setAttribute('aria-label', 'Table');
+    ui(viewport, 'aria-label', () => t("Table"));
     table.replaceWith(viewport);
     viewport.append(table);
   }
@@ -1334,6 +1549,7 @@ function forgetTimelineRows(): void {
 
 function toolBody(event: Extract<SessionEvent, { kind: 'tool_call' }>, context?: { id: string; current: () => boolean }): HTMLElement {
   const { call } = event;
+  const summary = toolCallSummary(call);
   const box = document.createElement('details');
   box.className = `tool tone-${call.summary.tone}`;
   box.open = openTools.has(call.callId);
@@ -1346,14 +1562,13 @@ function toolBody(event: Extract<SessionEvent, { kind: 'tool_call' }>, context?:
   head.append(icon(KIND_ICON[call.summary.kind] ?? 'i-bolt', 'ico tool-ico'));
   head.append(el('b', '', call.summary.title));
   if (call.summary.detail) head.append(el('em', '', call.summary.detail));
-  if (call.summary.metric) head.append(el('span', 'metric', call.summary.metric));
+  if (summary.metric) head.append(el('span', 'metric', summary.metric));
   box.append(head);
 
   const raw = el('div', 'raw');
   const facts = el('p', 'raw-facts');
-  facts.textContent =
-    `${call.tool} · ${call.outcome} · ${Math.round(call.durationMs)} ms · ` +
-    `분류: ${ATTRIBUTION_LABELS[call.attribution] ?? call.attribution}`;
+  ui(facts, 'textContent', () => `${call.tool} · ${call.outcome} · ${Math.round(call.durationMs)} ms · ` +
+    t("placed by {0}", [ATTRIBUTION_LABELS[call.attribution] ?? call.attribution]));
   raw.append(facts);
 
   if (call.changes && call.changes.length > 0) {
@@ -1361,19 +1576,24 @@ function toolBody(event: Extract<SessionEvent, { kind: 'tool_call' }>, context?:
     for (const change of call.changes) {
       const li = el('li');
       li.append(el('code', '', change.path));
-      const counts = `+${change.added} −${change.removed}${change.approximate ? ' (approx.)' : ''}`;
+      const counts = `+${change.added} −${change.removed}${change.approximate ? t(" (approx.)") : ''}`;
       li.append(el('span', 'metric', counts));
       changes.append(li);
     }
     raw.append(changes);
   }
 
-  raw.append(el('h4', '', '입력값'));
+  raw.append(el('h4', '', () => t("Arguments")));
   raw.append(textBlock('pre', call.args.text, call.args.truncated, call.args.chars));
-  raw.append(el('h4', '', '결과'));
+  raw.append(el('h4', '', () => t("Result")));
   const images = call.assets?.filter(asset => ['image/png', 'image/jpeg', 'image/webp'].includes(asset.mimeType)) ?? [];
   const readable = toolResultText(call.result.text, call.result.truncated, images.length > 0);
   if (readable) raw.append(textBlock('pre', readable, call.result.truncated && images.length === 0, call.result.chars));
+  // Older recordings did not retain the reason an image asset was omitted. Explain
+  // the missing local preview without inferring a historical provider receipt.
+  if (call.tool === 'view_image' && call.outcome === 'ok' && images.length === 0) {
+    raw.append(el('p', 'meta', () => t("No image preview was retained in this recording.")));
+  }
   if (images.length && (context?.id || selectedId)) {
     const id = context?.id ?? selectedId!, generation = selectionGeneration;
     const attachments = el('div', 'tool-images');
@@ -1384,9 +1604,9 @@ function toolBody(event: Extract<SessionEvent, { kind: 'tool_call' }>, context?:
       for (const asset of images) {
         const data = await run(api.getSessionImage(id, asset.id));
         if (context ? !context.current() : id !== selectedId || generation !== selectionGeneration) return;
-        if (!data) { attachments.append(el('p', 'meta', '이미지를 불러올 수 없습니다')); continue; }
+        if (!data) { attachments.append(el('p', 'meta', () => t("Image unavailable"))); continue; }
         const image = document.createElement('img');
-        image.src = data; image.alt = `${call.tool} result`; image.loading = 'lazy';
+        image.src = data; image.alt = t("{0} result", [call.tool]); image.loading = 'lazy';
         image.style.cssText = 'display:block;max-width:100%;max-height:600px;object-fit:contain;margin:8px 0';
         attachments.append(image);
       }
@@ -1395,10 +1615,10 @@ function toolBody(event: Extract<SessionEvent, { kind: 'tool_call' }>, context?:
     raw.append(attachments);
     void load();
   }
-  if (call.result.assetId) raw.append(el('p', 'raw-facts', `전체 기록 응답: ${call.result.assetId}`));
+  if (call.result.assetId) raw.append(el('p', 'raw-facts', () => t("Full recorded response: {0}", [call.result.assetId])));
 
   for (const asset of call.assets ?? []) {
-    raw.append(el('p', 'raw-facts', `asset ${asset.id} · ${asset.mimeType} · ${compactNumber(asset.bytes)} bytes`));
+    raw.append(el('p', 'raw-facts', () => t("asset {0} · {1} · {2} bytes", [asset.id, asset.mimeType, compactNumber(asset.bytes)])));
   }
 
   box.append(raw);
@@ -1406,7 +1626,7 @@ function toolBody(event: Extract<SessionEvent, { kind: 'tool_call' }>, context?:
 }
 
 function hasLaterModelActivity(time: number): boolean {
-  return events.some(event => event.time > time && ['assistant_message', 'tool_call', 'page_tool', 'agent_message'].includes(event.kind));
+  return events.some(event => event.time > time && ['assistant_message', 'native_image', 'tool_call', 'page_tool', 'agent_message'].includes(event.kind));
 }
 
 function paintInputReceipt(row: HTMLElement, item: ReturnType<typeof timelineItems>[number]): void {
@@ -1417,23 +1637,74 @@ function paintInputReceipt(row: HTMLElement, item: ReturnType<typeof timelineIte
   receipt.parentElement?.classList.toggle('has-input-receipt', !receipt.hidden);
 }
 
-function eventBody(event: SessionEvent, context?: { id: string; current: () => boolean }): HTMLElement {
+/** The exact outbox input retains preview bytes until optional history storage succeeds. */
+function retainedInputImages(event: Extract<SessionEvent, { kind: 'user_message' }>, sessionId: string | null): InputImage[] {
+  if (!sessionId || !event.inputId) return [];
+  const root = pendingComposerInputs.find(entry => entry.id === event.inputId &&
+    (entry.sessionId ?? entry.deliveredSessionId) === sessionId &&
+    (entry.messageId ? entry.messageId === event.messageId : event.messageId === `input:${entry.id}`));
+  if (!root) return [];
+  const companion = root.companionInputId ? pendingComposerInputs.find(entry => entry.id === root.companionInputId &&
+    (entry.sessionId ?? entry.deliveredSessionId) === sessionId && entry.messageId === root.messageId) : undefined;
+  // Match combinedInput's canonical image order for asset-index fallback.
+  return [...root.images ?? [], ...companion?.images ?? [], ...root.toolImages ?? []].slice(0, 4);
+}
+
+function paintMessageReaction(box: HTMLElement, value: unknown): void {
+  const reaction = messageReaction(value);
+  const existing = box.querySelector<HTMLElement>('.message-reaction');
+  if (!reaction) { existing?.remove(); return; }
+  if (existing?.textContent === reaction) return;
+  const badge = existing ?? el('span', 'message-reaction');
+  badge.textContent = reaction;
+  badge.setAttribute('role', 'img');
+  ui(badge, 'aria-label', () => t("ChatGPT reacted with {0}", [reaction]));
+  if (!existing) box.append(badge);
+}
+
+function eventBody(event: SessionEvent, context?: { id: string; current: () => boolean; history: readonly SessionEvent[] }): HTMLElement {
   switch (event.kind) {
     case 'session_start':
-      return el('p', 'meta', `세션 시작 — ${event.title}`);
+      return el('p', 'meta', () => t("Session started — {0}", [event.title]));
     case 'user_message': {
       const box = el('div', 'said is-user');
-      box.append(el('b', '', '사용자'));
+      box.classList.add('has-reaction-slot');
+      box.append(el('b', '', () => t("You")));
       const attachments = el('div', 'message-attachments');
       if (event.attachments?.length) attachments.append(...event.attachments.map(file => attachmentCard(file)));
       const assets = event.assets?.filter(asset => asset.mimeType === 'image/webp').slice(0, 4) ?? [];
-      if (event.attachments?.length || assets.length) box.append(attachments);
-      const userText = event.authoredText ?? event.message.text;
+      const retained = retainedInputImages(event, context?.id ?? selectedId);
+      const preview = (data: string, retainedOnly = false, slot?: HTMLElement) => {
+        const image = document.createElement('img');
+        image.src = data; image.alt = t("User attachment"); image.loading = 'lazy';
+        const frame = slot ?? el('div', 'user-image-slot');
+        frame.replaceChildren(image);
+        if (!slot) attachments.append(frame);
+        if (retainedOnly) {
+          const notice = el('span', 'retained-image-notice', () => t("Not saved to history"));
+          ui(notice, 'title', () => t("Image preview retained with this delivery; not yet saved to history."));
+          frame.append(notice);
+        }
+      };
+      // History selection measures the viewport before IPC completes. Reserve each saved
+      // image's final footprint now; loading, pixels and failure all occupy the same slot.
+      const slots = assets.map(() => {
+        const slot = el('div', 'user-image-slot');
+        slot.append(el('span', 'meta', () => t("Image preview is loading")));
+        attachments.append(slot);
+        return slot;
+      });
+      if (event.attachments?.length || assets.length || retained.length) box.append(attachments);
+      if (!assets.length) for (const image of retained) preview(image.dataUrl, true);
+      // Native ChatGPT can prepend a blank paragraph. Ignore it only when a
+      // complete instruction frame validates; keep the authored suffix exact.
+      const userText = event.authoredText ?? userPromptText(event.message.text.trimStart()) ?? event.message.text;
       if (userText) box.append(textBlock('msg user-message-text', userText, event.authoredText === undefined && event.message.truncated, event.authoredText?.length ?? event.message.chars));
+      paintMessageReaction(box, event.reaction);
       if (event.inputDelivery) {
         box.classList.add('has-input-receipt');
         const receipt = el('span', 'input-receipt');
-        const label = event.inputDelivery === 'offered' ? '현재 턴에 전달됨 · 수신 확인 대기' : '전달 확인됨';
+        const label = event.inputDelivery === 'offered' ? t("Sent to the active turn · awaiting receipt") : t("Delivery confirmed");
         receipt.title = label; receipt.setAttribute('aria-label', label);
         receipt.append(icon(event.inputDelivery === 'offered' ? 'i-clock' : 'i-check'));
         box.append(receipt);
@@ -1441,13 +1712,13 @@ function eventBody(event: SessionEvent, context?: { id: string; current: () => b
       if (assets.length && (context?.id || selectedId)) {
         const id = context?.id ?? selectedId!, generation = selectionGeneration;
         void (async () => {
-          for (const asset of assets) {
+          for (const [index, asset] of assets.entries()) {
             const data = await run(api.getSessionImage(id, asset.id));
             if (context ? !context.current() : id !== selectedId || generation !== selectionGeneration) return;
-            if (!data) { attachments.append(el('p', 'meta', '이미지를 불러올 수 없습니다')); continue; }
-            const image = document.createElement('img');
-            image.src = data; image.alt = '사용자 첨부'; image.loading = 'lazy';
-            attachments.append(image);
+            const slot = slots[index]!;
+            if (data) preview(data, false, slot);
+            else if (retained[index]) preview(retained[index]!.dataUrl, true, slot);
+            else slot.replaceChildren(el('span', 'meta', () => t("Image unavailable")));
           }
         })();
       }
@@ -1455,8 +1726,50 @@ function eventBody(event: SessionEvent, context?: { id: string; current: () => b
     }
     case 'assistant_message': {
       const box = el('div', 'said');
-      box.append(el('b', '', event.final ? 'ChatGPT' : 'ChatGPT (작성 중)'));
+      box.append(el('b', '', () => event.final ? 'ChatGPT' : t("ChatGPT (partial)")));
       box.append(renderedMarkdown(event.message.text, event.renderedHtml));
+      return box;
+    }
+    case 'native_image': {
+      const box = el('div', 'said native-image');
+      box.append(el('b', '', () => t("ChatGPT generated image")));
+      const frame = el('div', 'generated-image-frame');
+      const width = event.width ?? event.previewWidth ?? 1;
+      const height = event.height ?? event.previewHeight ?? 1;
+      frame.style.aspectRatio = `${Math.max(1, width)} / ${Math.max(1, height)}`;
+      const unavailable = () => {
+        frame.classList.toggle('is-unavailable', event.previewStatus !== 'pending');
+        frame.replaceChildren(el('p', 'meta', () => {
+        if (event.previewStatus === 'pending') return t("Image preview is loading");
+        if (event.previewError === 'removed') return t("Image removed from local storage");
+        if (event.previewError === 'quota') return t("Image preview unavailable — recording storage is full");
+        if (event.previewError === 'oversized') return t("Image preview unavailable — image exceeds the recording limit");
+        return t("Image preview unavailable");
+        }));
+        if (event.previewStatus !== 'pending') frame.append(imageStorageButton());
+      };
+      if (event.asset) frame.append(el('p', 'meta', () => t("Image preview is loading")));
+      else unavailable();
+      box.append(frame);
+      const id = context?.id ?? selectedId;
+      if (event.asset && id) {
+        const generation = selectionGeneration;
+        void (async () => {
+          const data = await run(api.getSessionImage(id, event.asset!.id));
+          if (context ? !context.current() : id !== selectedId || generation !== selectionGeneration) return;
+          if (!data) {
+            const pane = context ? box.closest<HTMLElement>('.agent-panel-body') : $('chatBody');
+            const timeline = context ? pane : $('timeline');
+            const restore = pane && timeline && box.isConnected ? preserveTimelineViewport(pane, timeline) : () => {};
+            unavailable(); restore();
+            return;
+          }
+          const image = document.createElement('img');
+          image.src = data;
+          image.alt = t("ChatGPT generated image");
+          frame.replaceChildren(image);
+        })();
+      }
       return box;
     }
     case 'progress':
@@ -1467,25 +1780,24 @@ function eventBody(event: SessionEvent, context?: { id: string; current: () => b
       return line;
     }
     case 'turn_start':
-      return el('p', 'meta', event.detail ? `턴 다시 열림 — ${event.detail}` : '응답 시작');
+      return el('p', 'meta', () => event.detail ? t("Turn reopened — {0}", [event.detail]) : t("Turn started"));
     case 'turn_end': {
       const line = el(
         'p',
         event.outcome === 'completed' ? 'meta' : 'meta is-warn',
-        `턴 ${TURN_OUTCOME_LABELS[event.outcome]}${event.detail ? ` — ${event.detail}` : ''}`
+        () => t("Turn {0}{1}", [t(TURN_OUTCOME_LABELS[event.outcome]), event.detail ? ` — ${event.detail}` : ''])
       );
       return line;
     }
     case 'chat_error': {
       const notice = el('div', 'chat-error-notice');
       notice.setAttribute('role', 'status');
-      const localVisibility = event.message.text ===
-        'No visible progress for ten minutes. The turn is still marked as generating.';
-      const title = el('strong', '', localVisibility
-        ? 'COS에서 화면 진행을 확인하지 못했습니다.' : 'ChatGPT에서 문제를 보고했습니다.');
-      notice.append(title, localVisibility
-        ? el('p', 'msg', '10분 동안 화면상 진행을 확인하지 못했습니다. 생성 표시는 남아 있으며, 작업이 중단되거나 완료됐다는 뜻은 아닙니다.')
-        : textBlock('msg', event.message.text, event.message.truncated, event.message.chars));
+      const presentation = () => chatErrorPresentation(event, context?.history ?? events);
+      // The timeline signature includes this projection, so later completion/work repaints it.
+      notice.classList.toggle('is-resolved', presentation().resolved);
+      const title = el('strong', '', () => presentation().title);
+      notice.append(title, textBlock('msg', presentation().message, event.message.truncated, event.message.chars),
+        el('p', 'chat-error-next', () => presentation().next));
       return notice;
     }
     case 'tool_call':
@@ -1493,10 +1805,10 @@ function eventBody(event: SessionEvent, context?: { id: string; current: () => b
     case 'note':
       return el('p', 'meta', event.message.text);
     /**
-     * Rendered rather than left to fall through to "알 수 없는 이벤트".
+     * Rendered rather than left to fall through to "Unknown event".
      *
      * The timeline is how the user checks what the agents actually said to each other, and
-     * a run of grey "알 수 없는 이벤트" rows in the middle of a multi-agent session reads as a
+     * a run of grey "Unknown event" rows in the middle of a multi-agent session reads as a
      * broken log — the one impression a session recorder cannot afford to give.
      */
     case 'agent_message': {
@@ -1504,16 +1816,15 @@ function eventBody(event: SessionEvent, context?: { id: string; current: () => b
       box.className = 'agent-communication';
       // Which end of the message this record is. The same message is written once here and
       // once in the other agent's session, so without this a pair reads as two messages.
-      box.title =
-        event.delivery === 'sent'
-          ? `${event.from}에서 보냄 · 앱이 수신한 시점에 기록`
-          : `${event.to}에서 받음 · 전달 확인 시점에 기록`;
+      ui(box, 'title', () => event.delivery === 'sent'
+          ? t("Sent by {0}; recorded when the app accepted it", [event.from])
+          : t("Received by {0}; recorded when it acknowledged delivery", [event.to]));
       const summary = el('summary');
       const worker = event.from === 'prime' ? event.to : event.from;
       const avatar = el('span', 'agent-avatar', worker.replace(/^worker-/, ''));
       avatar.dataset.color = String([...worker].reduce((sum, char) => sum + char.charCodeAt(0), 0) % 6);
       avatar.setAttribute('aria-hidden', 'true');
-      summary.append(avatar, el('span', '', communicationTitle(event)));
+      summary.append(avatar, el('span', '', () => communicationTitle(event)));
       const communicationKey = `agent:${context?.id ?? selectedId}:${event.seq}`;
       box.open = openTools.has(communicationKey);
       box.addEventListener('toggle', () => { if (box.open) openTools.add(communicationKey); else openTools.delete(communicationKey); });
@@ -1523,9 +1834,9 @@ function eventBody(event: SessionEvent, context?: { id: string; current: () => b
         const matches = sessions.filter(entry => entry.origin?.kind === 'worker' && entry.origin.fromSessionId === selectedId && entry.origin.agentId === worker);
         if (matches.length === 1) {
           const open = el('button', 'btn agent-chat-open'); open.setAttribute('type', 'button');
-          open.setAttribute('aria-label', `${worker} 대화 열기`);
+          ui(open, 'aria-label', () => t("Open {0} chat", [worker]));
           const arrow = icon('i-out'); arrow.setAttribute('aria-hidden', 'true');
-          open.append(el('span', '', '작업자 대화 열기'), arrow);
+          open.append(el('span', '', () => t("Open worker chat")), arrow);
           open.onclick = () => void agentPanel?.open(matches[0]!.id); box.append(open);
         }
       }
@@ -1535,15 +1846,17 @@ function eventBody(event: SessionEvent, context?: { id: string; current: () => b
       return el(
         'p',
         'meta is-good',
-        `이어가기 요약 저장됨 — ${compactNumber(event.chars)}자 (${event.reason})`
+        () => t("Handoff saved — {0} characters ({1})", [compactNumber(event.chars), event.reason])
       );
     default:
-      return el('p', 'meta', '알 수 없는 이벤트');
+      return el('p', 'meta', () => t("Unknown event"));
   }
 }
 
 function eventRow(event: SessionEvent): HTMLElement {
   const row = el('div', `ev ev-${event.kind}`);
+  if (event.kind === 'assistant_message' && !withoutMessageReaction(event.message.text).trim()) row.hidden = true;
+  tagImageRow(row, event);
   const time = document.createElement('time');
   time.textContent = clockTime(event.time);
   time.title = new Date(event.time).toLocaleString();
@@ -1562,7 +1875,7 @@ function eventRow(event: SessionEvent): HTMLElement {
       el(
         'p',
         'meta',
-        '요약 후 이어가기로 교체된 이전 대화의 호출입니다. 이전 응답이 계속 실행되어 의도적으로 거부했습니다. 복구가 필요하지 않습니다.'
+        () => t("From a chat that Compact & Resume had already replaced — ChatGPT kept running its stopped turn there. Refused by design; nothing to repair.")
       )
     );
   }
@@ -1607,9 +1920,9 @@ function paintAgentFilter(): void {
     if (agentFilter === value) button.classList.add('is-sel');
     return button;
   };
-  buttons.push(chip(null, '전체'));
+  buttons.push(chip(null, t("All")));
   for (const agent of named) buttons.push(chip(agent, agent));
-  if (anyUnattributed) buttons.push(chip(UNATTRIBUTED, '대화 미확인'));
+  if (anyUnattributed) buttons.push(chip(UNATTRIBUTED, t("Unattributed")));
   box.replaceChildren(...buttons);
   box.hidden = false;
 }
@@ -1646,11 +1959,47 @@ function eventTextCost(event: SessionEvent): number {
   }
 }
 
-/** Newest-first selection, returned chronologically, under row and text/HTML budgets. */
+/** Eviction follows the measured reader viewport, not an arbitrary half-page.
+ * Keep the current visible rows plus the incoming stage; ordinary tall histories
+ * still settle at 160 records. Dense collapsed activity has bounded extra room. */
+function retainTimelinePage(source: SessionEvent[], direction: 'older' | 'newer'): SessionEvent[] {
+  const pane = $('chatBody');
+  const edge = pane.getBoundingClientRect().top;
+  const protectedKeys = new Set<string>();
+  for (const row of $('timeline').querySelectorAll<HTMLElement>('[data-timeline-key]')) {
+    const rect = row.getBoundingClientRect();
+    if (rect.height <= 0 || rect.bottom <= edge - pane.clientHeight) continue;
+    if (rect.top >= edge + 2 * pane.clientHeight) break;
+    protectedKeys.add(row.dataset.timelineKey!);
+    if (row.matches('.tool-group:not([open])')) {
+      for (const child of row.querySelectorAll<HTMLElement>('[data-timeline-key]')) protectedKeys.add(child.dataset.timelineKey!);
+    }
+  }
+  const protectedSeqs = new Set<number>();
+  for (const item of timelineItems(source)) {
+    if (item.kind !== 'compaction' || !protectedKeys.has(itemKey(item))) continue;
+    const block = item.block;
+    protectedSeqs.add(block.seq);
+    for (const event of [block.prompt, block.brief, block.end, block.handoff, block.resume, ...block.notes]) {
+      if (event) protectedSeqs.add(event.seq);
+    }
+  }
+  const protectedIndexes = source.flatMap((event, index) => protectedSeqs.has(event.seq) || protectedKeys.has(itemKey({ kind: 'event', event })) ? [index] : []);
+  const first = protectedIndexes[0] ?? source.length;
+  const last = protectedIndexes.at(-1) ?? -1;
+  if (direction === 'older') {
+    const end = Math.min(source.length, Math.max(MAX_TIMELINE_ROWS, last + 1));
+    return source.slice(0, Math.min(end, MAX_TIMELINE_RESIDENT_ROWS));
+  }
+  const start = Math.max(0, Math.min(source.length - MAX_TIMELINE_ROWS, first));
+  return source.slice(Math.max(start, source.length - MAX_TIMELINE_RESIDENT_ROWS));
+}
+
+/** Newest-first selection, returned chronologically, under resident and text/HTML budgets. */
 function boundedTimeline(source: SessionEvent[]): { shown: SessionEvent[]; omitted: number } {
   let chars = 0;
   let start = source.length;
-  while (start > 0 && source.length - start < MAX_TIMELINE_ROWS) {
+  while (start > 0 && source.length - start < MAX_TIMELINE_RESIDENT_ROWS) {
     const next = source[start - 1]!;
     const cost = Math.min(eventTextCost(next), MAX_TIMELINE_TEXT_CHARS);
     if (start < source.length && chars + cost > MAX_TIMELINE_TEXT_CHARS) break;
@@ -1666,7 +2015,7 @@ function boundedTimeline(source: SessionEvent[]): { shown: SessionEvent[]; omitt
  * One Compact & Resume, folded out of the rows the recorder wrote for it.
  *
  * The recorder stores a compaction as it happened: the brief request typed into chat A, the
- * brief ChatGPT answered with, the app's own "이어가기 요약 저장됨" line, and the bootstrap typed
+ * brief ChatGPT answered with, the app's own "handoff saved" line, and the bootstrap typed
  * into chat B — four rows, three of them long, in an order that reflects when each was
  * observed rather than what they were. Read as a timeline they look like three separate
  * things going on; they are one thing with three steps, and this is that thing.
@@ -1683,12 +2032,11 @@ interface CompactionBlock {
    */
   turnId: string | null;
   brief: Extract<SessionEvent, { kind: 'assistant_message' }> | null;
+  end: Extract<SessionEvent, { kind: 'turn_end' }> | null;
   handoff: Extract<SessionEvent, { kind: 'handoff' }> | null;
   resume: Extract<SessionEvent, { kind: 'user_message' }> | null;
   /** What the app said about this compaction, newest last — an abandonment and why. */
   notes: Array<Extract<SessionEvent, { kind: 'note' }>>;
-  /** Something was recorded after this compaction, so a step still missing has failed. */
-  moved: boolean;
 }
 
 type TimelineItem = { kind: 'event'; event: SessionEvent } | { kind: 'compaction'; block: CompactionBlock };
@@ -1702,8 +2050,8 @@ function continuationMarker(event: SessionEvent): { kind: 'HANDOFF' | 'RESUME'; 
 /**
  * The timeline with each compaction folded into one item.
  *
- * A card opens at the marked brief request and, until anything unrelated is recorded,
- * absorbs what belongs to it: the turn that answers it, the answer (the brief), the app's
+ * A card opens at the marked brief request and absorbs what belongs to it: the turn
+ * that answers it, the answer (the brief), the app's
  * handoff line. The marked bootstrap in the replacement chat closes the same card by token,
  * wherever it lands, and so does an app note naming the token. A bootstrap whose request has
  * scrolled out of the window still gets a card, with the steps it implies already done.
@@ -1728,10 +2076,10 @@ function timelineItems(source: SessionEvent[]): TimelineItem[] {
         prompt: null,
         turnId: null,
         brief: null,
+        end: null,
         handoff: null,
         resume: null,
-        notes: [],
-        moved: false
+        notes: []
       };
       blocks.set(token, block);
       items.push({ kind: 'compaction', block });
@@ -1775,25 +2123,29 @@ function timelineItems(source: SessionEvent[]): TimelineItem[] {
         continue;
       }
       if (event.kind === 'assistant_message') {
+        if (open.turnId && event.turnId && event.turnId !== open.turnId) {
+          items.push({ kind: 'event', event });
+          continue;
+        }
         open.brief = event;
         if (event.turnId !== undefined) open.turnId = event.turnId;
         continue;
       }
-      if (event.kind === 'turn_start' && !open.brief && !open.handoff) {
+      if (event.kind === 'turn_start' && !open.brief && !open.handoff && !open.end) {
         open.turnId = event.turnId ?? null;
         continue;
       }
       const sameTurn = open.turnId !== null && event.turnId === open.turnId;
       if (sameTurn && (event.kind === 'turn_end' || event.kind === 'progress' || event.kind === 'page_tool')) {
+        if (event.kind === 'turn_end') open.end = event;
         continue;
       }
-      open = null;
+      // Local calls can finish or be refused after the source request. They remain
+      // ordinary visible rows and cannot close the summary's grouping or decide its fate.
+      // Only another authored user message starts an unrelated conversation step.
+      if (event.kind === 'user_message') open = null;
     }
     items.push({ kind: 'event', event });
-  }
-  for (let index = 0; index < items.length - 1; index++) {
-    const item = items[index]!;
-    if (item.kind === 'compaction') item.block.moved = true;
   }
   return items;
 }
@@ -1805,78 +2157,93 @@ const ABANDONED_NOTE = /^Compact & Resume abandoned\s*[\u2014-]\s*/i;
 /**
  * One sentence for where the compaction is, or where it died.
  *
- * Green is a replacement chat that opened; red is a step that will not come — the app said
- * so, or the chat carried on without it; grey is the step still in flight. The app's own
- * abandonment note wins over any inference, because it names the reason.
+ * Success and failure come from the recorded continuation, never from later activity
+ * in this timeline. Refused source calls are compatible with a still-running handoff.
  */
 function compactionState(block: CompactionBlock): { text: string; tone: CompactionTone } {
+  const chars = block.handoff ? t(" ({0} characters)", [compactNumber(block.handoff.chars)]) : '';
+  if (block.resume) return { text: t("New chat opened at {0}{1}", [clockTime(block.resume.time), chars]), tone: 'good' };
   const abandoned = [...block.notes].reverse().find((note) => ABANDONED_NOTE.test(note.message.text));
-  if (abandoned) return { text: `실패 — ${abandoned.message.text.replace(ABANDONED_NOTE, '')}`, tone: 'bad' };
-  const chars = block.handoff ? ` (${compactNumber(block.handoff.chars)} characters)` : '';
-  if (block.resume) return { text: `새 대화 열림: ${clockTime(block.resume.time)}${chars}`, tone: 'good' };
+  if (abandoned) return { text: t("Failed — {0}", [abandoned.message.text.replace(ABANDONED_NOTE, '')]), tone: 'bad' };
   if (block.handoff) {
-    return block.moved
-      ? { text: `요약 저장됨${chars} · 새 대화를 열지 못해 기존 대화를 유지합니다`, tone: 'bad' }
-      : { text: `요약 저장됨${chars} · 새 대화 열기 중…`, tone: 'wait' };
+    return { text: t("Summary saved{0} — opening the new chat…", [chars]), tone: 'wait' };
+  }
+  if (block.end && block.end.outcome !== 'completed') {
+    const status = block.end.outcome === 'stopped' ? t("Summary generation stopped")
+      : block.end.outcome === 'failed' ? t("Summary generation failed")
+      : t("Summary generation ended without a completed handoff");
+    return { text: block.end.detail ? t("{0} — {1}", [status, block.end.detail]) : status, tone: 'bad' };
   }
   if (block.brief?.final) {
-    return block.moved
-      ? { text: '요약을 작성했지만 앱에 저장하지 못했습니다. 기존 대화를 유지합니다.', tone: 'bad' }
-      : { text: '요약 작성 완료 — 저장 중…', tone: 'wait' };
+    return { text: t("Summary written — saving the handoff…"), tone: 'wait' };
   }
-  if (block.brief) return { text: 'ChatGPT가 요약 작성 중…', tone: 'wait' };
-  return block.moved
-    ? { text: '요약이 작성되지 않아 기존 대화를 유지합니다.', tone: 'bad' }
-    : { text: '요약 요청 완료 — ChatGPT 응답 대기 중…', tone: 'wait' };
+  if (block.brief) return { text: t("ChatGPT is writing the summary…"), tone: 'wait' };
+  return { text: t("Summary requested — waiting for ChatGPT…"), tone: 'wait' };
 }
 
-function compactionRow(block: CompactionBlock): HTMLElement {
+function compactionRow(block: CompactionBlock, previous?: HTMLElement): HTMLElement {
   const key = `compaction:${block.token}`;
   const state = compactionState(block);
 
-  const box = document.createElement('details');
+  const row = previous ?? el('div', 'ev ev-compaction');
+  const box = previous?.querySelector<HTMLDetailsElement>('details.compaction') ?? document.createElement('details');
   box.className = `tool compaction tone-${state.tone}`;
-  box.open = openTools.has(key);
-  box.addEventListener('toggle', () => {
-    if (box.open) openTools.add(key);
-    else openTools.delete(key);
-  });
+  if (!previous) {
+    box.open = openTools.has(key);
+    box.addEventListener('toggle', () => {
+      if (box.open) openTools.add(key);
+      else openTools.delete(key);
+    });
+  }
 
-  const head = document.createElement('summary');
-  head.append(icon('i-steps', 'ico tool-ico'));
-  head.append(el('b', '', '요약 후 이어가기:'));
-  head.append(el('span', 'state', state.text));
-  box.append(head);
+  if (!previous) {
+    const head = document.createElement('summary');
+    head.append(icon('i-steps', 'ico tool-ico'));
+    head.append(el('b', '', () => t("Compact & Resume:")));
+    head.append(el('span', 'state'));
+    box.append(head);
+  }
+  ui(box.querySelector<HTMLElement>('summary .state')!, 'textContent', () => compactionState(block).text);
 
   const raw = el('div', 'raw');
   if (block.prompt) {
-    raw.append(el('h4', '', '요약 요청'));
+    raw.append(el('h4', '', () => t("Brief request")));
     // The routing marker is the app's, not the user's; the card already says what this is.
-    const request = block.prompt.message.text.replace(CONTINUATION_MARKER, '');
+    const request = (userPromptText(block.prompt.message.text) ?? block.prompt.message.text).replace(CONTINUATION_MARKER, '');
     raw.append(textBlock('pre', request, block.prompt.message.truncated, block.prompt.message.chars));
   }
   if (block.brief) {
-    raw.append(el('h4', '', block.brief.final ? 'Summary' : '요약 (작성 중)'));
+    const brief = block.brief;
+    raw.append(el('h4', '', () => brief.final ? t("Summary") : t("Summary (still writing)")));
     raw.append(renderedMarkdown(block.brief.message.text));
   }
   if (block.handoff) {
+    const saved = block.handoff;
     raw.append(
-      el('p', 'raw-facts', `이어가기 요약 저장됨 — ${compactNumber(block.handoff.chars)}자 (${block.handoff.reason})`)
+      el('p', 'raw-facts', () => t("Handoff saved — {0} characters ({1})", [compactNumber(saved.chars), saved.reason]))
     );
   }
   if (block.resume) {
+    const resumed = block.resume;
     raw.append(
       el(
         'p',
         'raw-facts',
-        `새 대화에 이어가기 메시지 전송 — ${compactNumber(block.resume.message.chars)}자 · ${clockTime(block.resume.time)}`
+        () => t("Bootstrap sent into the new chat — {0} characters at {1}", [compactNumber(resumed.message.chars), clockTime(resumed.time)])
       )
     );
   }
   for (const note of block.notes) raw.append(el('p', 'raw-facts', `${clockTime(note.time)} — ${note.message.text}`));
-  box.append(raw);
+  const oldRaw = box.querySelector<HTMLElement>('.raw');
+  if (oldRaw) {
+    // Streaming changes only the affected section. Keep the disclosure, focus and
+    // unchanged request mounted instead of replacing the whole reading surface.
+    const oldParts = [...oldRaw.children];
+    reconcileChildren(oldRaw, [...raw.children].map((part, index) =>
+      (oldParts[index]?.isEqualNode(part) ? oldParts[index] : part) as HTMLElement));
+  } else box.append(raw);
 
-  const row = el('div', 'ev ev-compaction');
+  if (previous) return row;
   const time = document.createElement('time');
   time.textContent = clockTime(block.time);
   time.title = new Date(block.time).toLocaleString();
@@ -1894,18 +2261,25 @@ function itemSignature(item: TimelineItem): string {
       block.token,
       block.prompt?.seq ?? '',
       block.brief ? `${block.brief.seq}:${block.brief.message.chars}:${block.brief.renderedHtml?.chars ?? 0}:${block.brief.state}` : '',
+      block.end ? `${block.end.seq}:${block.end.outcome}:${block.end.detail ?? ''}` : '',
       block.handoff?.seq ?? '',
       block.resume?.seq ?? '',
-      block.notes.map((note) => note.seq).join(','),
-      block.moved ? 'moved' : ''
+      block.notes.map((note) => note.seq).join(',')
     ].join('|');
   }
   const { event } = item;
-  const parts: Array<string | number> = [event.seq, event.time, event.kind, event.agent ?? ''];
+  const parts: Array<string | number> = [event.kind === 'user_message' ? '' : event.seq, event.time, event.kind, event.agent ?? ''];
   switch (event.kind) {
-    case 'user_message':
-      parts.push(event.message.chars, event.authoredText ?? '', event.inputDelivery ?? '');
+    case 'user_message': {
+      // A badge-only revision patches the existing bubble, preserving loaded images
+      // and selection. Every other recorded field still invalidates its body.
+      const { seq: _seq, reaction: _reaction, ...body } = event;
+      parts.push(JSON.stringify(body));
+      // Bytes are immutable for an accepted input. Queue arrival must repaint a
+      // canonical row even if its recorded revision did not change.
+      parts.push(...retainedInputImages(event, selectedId).map(image => `${image.name}:${image.dataUrl.length}`));
       break;
+    }
     case 'progress':
     case 'chat_error':
     case 'note':
@@ -1914,6 +2288,10 @@ function itemSignature(item: TimelineItem): string {
       break;
     case 'assistant_message':
       parts.push(event.message.chars, event.renderedHtml?.chars ?? 0, event.state ?? '', event.final ? 'final' : '');
+      break;
+    case 'native_image':
+      parts.push(event.messageId, event.providerAssetId, event.providerStatus ?? '', event.previewStatus, event.asset?.id ?? '',
+        event.previewWidth ?? '', event.previewHeight ?? '', event.previewError ?? '');
       break;
     case 'tool_call':
       parts.push(
@@ -1942,7 +2320,11 @@ function itemSignature(item: TimelineItem): string {
 }
 
 function itemKey(item: TimelineItem): string {
-  return item.kind === 'compaction' ? `compaction:${item.block.token}` : `event:${item.event.seq}`;
+  if (item.kind === 'compaction') return `compaction:${item.block.token}`;
+  // A canonical revision advances the update cursor, not the identity of the row
+  // anchoring the viewport and the following activity disclosure.
+  const message = canonicalMessageKey(item.event);
+  return message ? `message:${message}` : `event:${item.event.seq}`;
 }
 
 /** One activity disclosure between authored messages; communication keeps its own identity inside. */
@@ -1965,7 +2347,11 @@ function groupToolRows(rows: HTMLElement[], scope = selectedId, groups = toolGro
     let end = i + 1;
     while (end < rows.length && rows[end]!.matches('.ev-tool_call, .ev-page_tool, .ev-agent_message') && rows[end]!.dataset.activityBoundary === rows[i]!.dataset.activityBoundary) end++;
     if (end - i === 1) { grouped.push(rows[i++]!); continue; }
-    const key = `group:${scope}:${rows[i]!.dataset.timelineKey}`;
+    // Paging can extend or trim the beginning of an activity group. Its first
+    // member is therefore not a new disclosure/viewport identity.
+    const previous = rows.slice(i, end).map(row => row.closest<HTMLElement>('.tool-group'))
+      .find(group => group?.dataset.timelineKey && groups.get(group.dataset.timelineKey) === group && !retained.has(group.dataset.timelineKey));
+    const key = previous?.dataset.timelineKey ?? `group:${scope}:${rows[i]!.dataset.timelineKey}`;
     retained.add(key);
     let group = groups.get(key);
     if (!group) {
@@ -1979,9 +2365,9 @@ function groupToolRows(rows: HTMLElement[], scope = selectedId, groups = toolGro
     }
     const latest = rows[end - 1]!;
     const latestHead = latest.querySelector('.tool > summary, .agent-communication > summary, .thinking-line');
-    const label = latestHead?.querySelector('b, span:not(.agent-avatar)')?.textContent || '활동';
+    const label = latestHead?.querySelector('b, span:not(.agent-avatar)')?.textContent || t("Activity");
     group.querySelector('.activity-title')!.textContent = label;
-    group.querySelector('summary')!.title = `작업 ${end - i}개 · ${label}`;
+    ui(group.querySelector('summary')!, 'title', () => t("{0} actions · {1}", [end - i, label]));
     const symbol = latestHead?.querySelector('svg, .agent-avatar');
     group.querySelector('.activity-symbol')!.replaceChildren(...(symbol ? [symbol.cloneNode(true)] : []));
     reconcileChildren(group.lastElementChild!, rows.slice(i, end));
@@ -1991,16 +2377,64 @@ function groupToolRows(rows: HTMLElement[], scope = selectedId, groups = toolGro
   return grouped;
 }
 
-function paintDetail(followBottom = true): void {
+/** Adjacent images from one response share a compact gallery, retaining canonical rows. */
+function tagImageRow(row: HTMLElement, event: SessionEvent): void {
+  if (event.kind !== 'native_image') return;
+  row.dataset.imageAgent = event.agent ?? '';
+  row.dataset.imageMessage = event.messageId;
+  row.dataset.imageTurn = event.turnId ?? '';
+}
+function groupImageRows(rows: HTMLElement[]): HTMLElement[] {
+  const result: HTMLElement[] = [];
+  for (let i = 0; i < rows.length;) {
+    const first = rows[i]!;
+    if (!first.dataset.imageMessage) { result.push(first); i++; continue; }
+    const messages = new Set([first.dataset.imageMessage]);
+    const turns = new Set(first.dataset.imageTurn ? [first.dataset.imageTurn] : []);
+    let end = i + 1;
+    while (end < rows.length) {
+      const next = rows[end]!.dataset;
+      if (!next.imageMessage || next.imageAgent !== first.dataset.imageAgent) break;
+      if (!messages.has(next.imageMessage) && !(next.imageTurn && turns.has(next.imageTurn))) break;
+      messages.add(next.imageMessage);
+      if (next.imageTurn) turns.add(next.imageTurn);
+      end++;
+    }
+    const gallery = rows.slice(i, end).map(row => row.closest<HTMLElement>('.generated-image-gallery'))
+      .find((node): node is HTMLElement => !!node) ?? el('div', 'generated-image-gallery');
+    reconcileChildren(gallery, rows.slice(i, end));
+    result.push(gallery); i = end;
+  }
+  return result;
+}
+
+function composerSessionSelection(summary: SessionSummary | null | undefined) {
+  if (summary?.conversationId) return summary.selectedModel;
+  const opening = pendingComposerInputs.find(row => row.opening && row.sessionId === summary?.id && ['queued', 'browser'].includes(row.state));
+  return opening?.model ? { model: opening.model, reasoningEffort: opening.reasoningEffort ?? undefined, observedAt: opening.createdAt } : null;
+}
+function paintDetail(followBottom = historyBefore === null): void {
   paintStateLine();
   const summary = sessions.find((s) => s.id === selectedId) ?? null;
-  applyComposerSessionModel(selectedId ? `${selectedId}:${selectionGeneration}` : null, summary?.selectedModel ?? null);
+  applyComposerSessionModel(selectedId ? `${selectedId}:${selectionGeneration}` : null, composerSessionSelection(summary) ?? null);
   const config = deps.state()?.config;
   if (config) paintContextMeter(summary, config, confirmedComposerModel());
-  $('chatTitle').textContent = summary ? summary.title || '제목 없는 세션' : '새 대화';
+  ui($('chatTitle'), 'textContent', () => summary ? summary.title || t("Untitled session") : t("New chat"));
 
   paintDeliveryControls();
   paintAgentFilter();
+  // Selection retires data/control ownership immediately, but the last painted rows
+  // remain inert until the destination arrives. Queue/status repaints must not turn
+  // this short loading interval into the New Chat welcome screen.
+  if (selectedId !== null && detailFor !== selectedId) {
+    $('inputQueue').setAttribute('inert', '');
+    $('timelineEmpty').hidden = true;
+    $('chatFoot').hidden = true;
+    return;
+  }
+  $('timeline').removeAttribute('inert');
+  $('timeline').removeAttribute('aria-busy');
+  $('inputQueue').removeAttribute('inert');
   const filtered = visibleEvents();
   const windowed = boundedTimeline(filtered);
   const shown = windowed.shown;
@@ -2010,72 +2444,88 @@ function paintDetail(followBottom = true): void {
   const pane = $('chatBody');
   const restoreViewport = preserveTimelineViewport(pane, $('timeline'), followBottom);
   const timelineRows: HTMLElement[] = [];
-  if (selectedId && historyBefore !== null) {
-    const navigation = el('div', 'timeline-window-note');
-    const latest = el('button', 'btn small', '최신 기록으로');
-    latest.dataset.history = 'latest';
-    latest.addEventListener('click', () => void navigateHistory(null));
-    navigation.append(latest);
-    timelineRows.push(navigation);
-  }
   const keep = new Set<string>();
   let activityBoundary = '';
-  const recovery = [...shown].reverse().find(event => event.source === 'app' && event.kind === 'progress' && event.progressId?.startsWith('browser-repair:'));
-  const recoveryStatus = $('recoveryStatus');
-  const recoverySession = selectedId;
-  const recoveryRevision = recovery?.kind === 'progress' ? JSON.stringify([recovery.progressId, recovery.time, recovery.message.text]) : '';
-  recoveryStatus.hidden = !recovery || Date.now() - recovery.time > 120000 || (!!recoverySession && dismissedRecoveryNotices.get(recoverySession) === recoveryRevision);
-  recoveryStatus.replaceChildren();
-  if (!recoveryStatus.hidden && recovery?.kind === 'progress') recoveryStatus.append(icon('i-pulse'), el('span', 'queue-label', recovery.message.text),
-    dockAction('복구 알림 닫기', 'i-x', () => {
-      if (recoverySession) dismissedRecoveryNotices.set(recoverySession, recoveryRevision);
-      recoveryStatus.hidden = true; recoveryStatus.replaceChildren();
-    }));
+  paintRecoveryStatus();
+  const oldest = shown.length ? Math.min(...shown.map(event => event.time)) : 0;
+  const newest = shown.length ? Math.max(...shown.map(event => event.time)) : 0;
+  const retiredInputs = pendingComposerInputs.filter(entry => historicalAutomaticInput(entry) &&
+    (entry.sessionId ?? entry.deliveredSessionId) === selectedId && !dismissedInputNotices.has(entry.id) &&
+    agentFilter === null && entry.createdAt >= oldest && (historyBefore === null || entry.createdAt <= newest))
+    .sort((a, b) => a.createdAt - b.createdAt);
+  const appendRetiredInputs = (until: number) => {
+    while (retiredInputs.length && retiredInputs[0]!.createdAt <= until) {
+      const entry = retiredInputs.shift()!;
+      const key = `retired-input:${entry.id}`;
+      const sig = JSON.stringify([entry.text, entry.error, entry.createdAt]);
+      keep.add(key);
+      const cached = rowCache.get(key);
+      const row = cached?.sig === sig ? cached.row : inputMessageRow(entry, true);
+      if (row !== cached?.row) {
+        const time = document.createElement('time');
+        time.textContent = new Date(entry.createdAt).toLocaleString();
+        row.prepend(time);
+      }
+      row.dataset.timelineKey = key;
+      rowCache.set(key, { sig, row });
+      timelineRows.push(row);
+      activityBoundary = key;
+    }
+  };
+  const duplicateErrors = duplicateChatErrors(events);
   for (const item of timelineItems(shown)) {
+    if (item.kind === 'event' && duplicateErrors.has(item.event.seq)) continue;
+    appendRetiredInputs(item.kind === 'event' ? item.event.time : item.block.time);
     if (item.kind === 'compaction' || !['tool_call', 'page_tool', 'agent_message'].includes(item.event.kind)) activityBoundary = itemKey(item);
     if (!deps.state()?.config.ui.developerMode && item.kind === 'event' && item.event.source === 'app' && item.event.kind === 'progress' && item.event.progressId?.startsWith('browser-repair:')) continue;
     if (!deps.state()?.config.ui.developerMode && item.kind === 'event' && ['session_start', 'session_end', 'turn_start', 'turn_end', 'note'].includes(item.event.kind)) continue;
     const key = itemKey(item);
-    const sig = itemSignature(item);
+    const sig = itemSignature(item) + (item.kind === 'event' && item.event.kind === 'chat_error'
+      ? JSON.stringify(chatErrorPresentation(item.event, events)) : '');
     keep.add(key);
     const cached = rowCache.get(key);
     if (cached && cached.sig === sig) {
       cached.row.dataset.activityBoundary = activityBoundary;
+      if (item.kind === 'event' && item.event.kind === 'user_message') {
+        paintMessageReaction(cached.row.querySelector<HTMLElement>('.said.is-user')!, item.event.reaction);
+      }
       paintInputReceipt(cached.row, item);
       timelineRows.push(cached.row);
       continue;
     }
-    const row = item.kind === 'compaction' ? compactionRow(item.block) : eventRow(item.event);
+    const row = item.kind === 'compaction' ? compactionRow(item.block, cached?.row) : eventRow(item.event);
     row.dataset.timelineKey = key;
     row.dataset.activityBoundary = activityBoundary;
     paintInputReceipt(row, item);
     rowCache.set(key, { sig, row });
     timelineRows.push(row);
   }
+  appendRetiredInputs(Infinity);
   for (const key of rowCache.keys()) if (!keep.has(key)) rowCache.delete(key);
-  reconcileChildren($('timeline'), groupToolRows(timelineRows));
-  $('timelineEmpty').hidden = timelineRows.length > 0 || $('inputQueue').childElementCount > 0;
+  reconcileChildren($('timeline'), groupImageRows(groupToolRows(timelineRows)));
+  paintPendingInputs();
+  $('timelineEmpty').hidden = selectedId !== null || timelineRows.length > 0 || $('inputQueue').childElementCount > 0;
   restoreViewport();
 
   const facts: string[] = [];
   if (summary) {
-    facts.push(`이벤트 ${totalEvents}개`);
-    if (events.length < totalEvents) facts.push(`현재 페이지 ${events.length}개 표시`);
+    facts.push(t(totalEvents === 1 ? '{0} event' : '{0} events', [totalEvents]));
+    if (events.length < totalEvents) facts.push(t("showing a bounded page of {0}", [events.length]));
     if (agentFilter !== null) {
-      facts.push(`${agentFilter === UNATTRIBUTED ? '대화 미확인' : agentFilter} 필터 · ${filtered.length}개 일치`);
+      facts.push(t("filtered to {0} — {1} matched", [agentFilter === UNATTRIBUTED ? 'unattributed' : agentFilter, filtered.length]));
     }
-    if (windowed.omitted > 0) facts.push(`최신 ${shown.length}개 표시`);
-    facts.push(`현재 대화 맥락 약 ${compactNumber(summary.contextTokens)}토큰(추정)`);
+    if (windowed.omitted > 0) facts.push(t("{0} newest rendered", [shown.length]));
+    facts.push(t("~{0} rough current-chat context tokens", [compactNumber(summary.contextTokens)]));
     const level = pressureOf(summary.id);
     if (level && level.level !== 'ok') {
       facts.push(
         level.level === 'huge'
-          ? '요약 기준 초과 — 이어가기 전에 요약하세요.'
-          : '대화가 깁니다 — 곧 요약하는 것이 좋습니다.'
+          ? t("past the compaction threshold — compact before continuing")
+          : t("large — compaction is worth doing soon")
       );
     }
     if (summary.lastTurnOutcome && summary.lastTurnOutcome !== 'completed') {
-      facts.push(`최근 턴 ${TURN_OUTCOME_LABELS[summary.lastTurnOutcome]}`);
+      facts.push(t("last turn {0}", [t(TURN_OUTCOME_LABELS[summary.lastTurnOutcome])]));
     }
   }
   $('chatFoot').textContent = facts.join(' · ');
@@ -2095,9 +2545,10 @@ function paintDetail(followBottom = true): void {
 function paintHandoff(): void {
   const hand = $('handoffBox');
   if (handoff) {
+    const saved = handoff;
     const parts: HTMLElement[] = [];
     const head = el('p', 'hint');
-    head.textContent = `${compactNumber(handoff.text.length)}자 · 이벤트 ${handoff.sourceEvents}개 기반(약 ${compactNumber(handoff.sourceTokens)}토큰) · ${ago(handoff.createdAt)}`;
+    ui(head, 'textContent', () => t("{0} characters · from {1} events (~{2} tokens) · {3}", [compactNumber(saved.text.length), saved.sourceEvents, compactNumber(saved.sourceTokens), ago(saved.createdAt)]));
     parts.push(head);
     for (const note of handoff.notes) parts.push(el('p', 'hint is-warn', note));
     parts.push(el('pre', 'pre', handoff.text));
@@ -2112,22 +2563,42 @@ function paintHandoff(): void {
   paintStateLine();
 }
 
-/**
- * One line under the header saying what is happening right now.
- *
- * The complaint this answers: the only place a user could find out whether a worker's chat
- * had opened was the raw Activity log, which is a diagnostics view rather than an answer to
- * "what is happening".
- */
+/** The live deadline takes precedence over the existing dismissible repair receipt. */
+function paintRecoveryStatus(): boolean {
+  const host = $('recoveryStatus');
+  const countdowns = selectedId && controlledSessionId === selectedId && controlledSelection === selectionGeneration ? controlledRecovery : [];
+  if (renderRecoveryCountdowns(host, countdowns)) return true;
+  const recovery = detailFor === selectedId ? [...events].reverse().find(event => event.source === 'app' && event.kind === 'progress' && event.progressId?.startsWith('browser-repair:')) : undefined;
+  const sessionId = selectedId;
+  const revision = recovery?.kind === 'progress' ? JSON.stringify([recovery.progressId, recovery.time, recovery.message.text]) : '';
+  host.hidden = !recovery || Date.now() - recovery.time > 120000 || (!!sessionId && dismissedRecoveryNotices.get(sessionId) === revision);
+  host.replaceChildren();
+  if (!host.hidden && recovery?.kind === 'progress') {
+    const row = el('div', 'recovery-notice');
+    row.append(icon('i-pulse'), el('span', 'queue-label', recovery.message.text),
+      dockAction(() => t('Dismiss recovery notice'), 'i-x', () => {
+        if (sessionId) dismissedRecoveryNotices.set(sessionId, revision);
+        host.hidden = true; host.replaceChildren();
+      }));
+    host.append(row);
+  }
+  return false;
+}
+
+/** One line under the header saying what is happening right now. */
 function paintStateLine(): void {
   window.clearTimeout(durationTimer);
   durationTimer = undefined;
   const note = $('chatState');
-  const { text, tone } = stateLine();
-  note.textContent = text;
+  const { tone, working, ticking } = stateLine();
+  ui(note, 'textContent', () => stateLine().text);
   note.className = `subhead-note${tone ? ` ${tone}` : ''}`;
-  note.classList.toggle('is-working', text.startsWith('작업 중'));
-  if (visible && text.startsWith('작업 중 · ')) durationTimer = window.setTimeout(paintStateLine, 1000);
+  // Running state and timer ownership cannot depend on a translated label.
+  note.classList.toggle('is-working', working === true);
+  const recovering = paintRecoveryStatus();
+  const goalWaiting = controlledSessionId === selectedId && controlledSelection === selectionGeneration && !!goalWaitView;
+  if (goalWaiting) paintGoalProgress();
+  if (visible && (ticking || recovering || goalWaiting)) durationTimer = window.setTimeout(paintStateLine, 1000);
   repaintBadges();
 }
 
@@ -2148,7 +2619,7 @@ function badgeSignature(): string {
   return sessions.map((entry) => sessionBadges(entry).map((badge) => badge.text).join(',')).join('|');
 }
 
-function stateLine(): { text: string; tone: '' | 'is-live' | 'is-bad' } {
+function stateLine(): { text: string; tone: '' | 'is-live' | 'is-bad'; working?: boolean; ticking?: boolean } {
   if (!deps.state()?.config.ui.developerMode) {
     const summary = sessions.find(entry => entry.id === selectedId);
     if (!summary || detailFor !== selectedId) return { text: '', tone: '' };
@@ -2159,10 +2630,10 @@ function stateLine(): { text: string; tone: '' | 'is-live' | 'is-bad' } {
     const startedAt = summary.finishTurn?.turnId === turnId ? summary.finishTurn.startedAt
       : events.find(event => event.kind === 'turn_start' && event.turnId === turnId)?.time;
     const endedAt = events.find(event => event.kind === 'turn_end' && event.turnId === turnId)?.time;
-    if (startedAt === undefined) return { text: active ? '작업 중…' : '', tone: '' };
+    if (startedAt === undefined) return { text: active ? t("Working…") : '', tone: '', working: !!active };
     if (!active && endedAt === undefined) return { text: '', tone: '' };
     const seconds = Math.max(0, Math.floor(((active ? Date.now() : endedAt!) - startedAt) / 1000));
-    return { text: `${active ? '작업 중' : '작업함'} · ${seconds >= 60 ? `${Math.floor(seconds / 60)}분 ` : ''}${seconds % 60}초`, tone: '' };
+    return { text: t("{0} for {1}{2}s", [active ? t("Working") : t("Worked"), seconds >= 60 ? `${Math.floor(seconds / 60)}m ` : '', seconds % 60]), tone: '', working: !!active, ticking: !!active };
   }
   // Recording follows the conversation the browser can see. A tool call arrives over the
   // connector carrying nothing that identifies its caller, so work driven from the phone,
@@ -2171,7 +2642,7 @@ function stateLine(): { text: string; tone: '' | 'is-live' | 'is-bad' } {
   const selected = sessions.find((entry) => entry.id === selectedId) ?? null;
   if (selected && selected.conversationId === null) {
     return {
-      text: '대화를 확인하지 못한 작업입니다. 다른 기기에서 실행했거나 ChatGPT 탭이 열려 있지 않을 수 있습니다.',
+      text: t("Work this app could not place in a chat — driven from another device, or with no ChatGPT tab open"),
       tone: ''
     };
   }
@@ -2180,21 +2651,21 @@ function stateLine(): { text: string; tone: '' | 'is-live' | 'is-bad' } {
   if (workers.length === 0) return { text: '', tone: '' };
   const count = (state: AgentState): number => workers.filter((agent) => agent.state === state).length;
   const parts: string[] = [];
-  if (count('active') > 0) parts.push(`${count('active')}개 작업 중`);
+  if (count('active') > 0) parts.push(t("{0} working", [count('active')]));
   // "invited" is a worker whose ChatGPT tab has been asked for but has not joined yet.
-  if (count('invited') > 0) parts.push(`${count('invited')}개 열기 중`);
+  if (count('invited') > 0) parts.push(t("{0} opening", [count('invited')]));
   // Detached is a live worker with no tab: its turn is running on OpenAI's servers and its
   // tool calls still arrive here, so it is counted among the working rather than the lost.
-  if (count('detached') > 0) parts.push(`${count('detached')}개 탭 없이 작업 중`);
-  if (count('waking') > 0) parts.push(`${count('waking')}개 재개 중`);
+  if (count('detached') > 0) parts.push(t("{0} working with no tab", [count('detached')]));
+  if (count('waking') > 0) parts.push(t("{0} waking up", [count('waking')]));
   // Said as "waiting" rather than counted with the finished ones: these are the run's reusable
   // chats, and the number the user wants is how much of the run is still available to it.
-  if (count('sleeping') > 0) parts.push(`${count('sleeping')}개 대기 중`);
-  if (count('finished') > 0) parts.push(`${count('finished')}개 종료됨`);
-  if (count('failed') > 0) parts.push(`${count('failed')}개 실패`);
+  if (count('sleeping') > 0) parts.push(t("{0} sleeping", [count('sleeping')]));
+  if (count('finished') > 0) parts.push(t("{0} finished", [count('finished')]));
+  if (count('failed') > 0) parts.push(t("{0} failed", [count('failed')]));
   const live = count('invited') + count('active') + count('detached') + count('waking');
   return {
-    text: `작업자 ${workers.length}개 · ${parts.join(' · ')}`,
+    text: `${workers.length === 1 ? t("1 worker") : t("{0} workers", [workers.length])} · ${parts.join(' · ')}`,
     tone: count('failed') > 0 ? 'is-bad' : live > 0 ? 'is-live' : ''
   };
 }
@@ -2215,11 +2686,10 @@ async function showExtensionPath(): Promise<void> {
   const dir = await run(api.extensionPath());
   const node = $('extensionPath');
   if (dir) {
-    node.textContent = `확장 폴더: ${dir}`;
+    ui(node, 'textContent', () => t("Extension folder: {0}", [dir]));
     node.classList.remove('is-warn');
   } else {
-    node.textContent =
-      '설치된 확장 폴더가 없습니다. 앱을 재설치하거나 소스의 extension/ 폴더를 사용하세요.';
+    ui(node, 'textContent', () => t("The extension folder is missing from this installation. Reinstall the app, or use the extension/ folder from a source checkout."));
     node.classList.add('is-warn');
     $<HTMLButtonElement>('bridgeFolder').disabled = true;
   }
@@ -2237,9 +2707,9 @@ function paintSwarm(state: SwarmState): void {
       el(
         'p',
         'hint',
-        state.retainedHistory
-          ? '실행 중인 작업자가 없습니다. 기존 작업자는 주 에이전트가 다시 사용할 수 있습니다. 그룹을 초기화하면 작업자 연결 기록이 영구 삭제됩니다.'
-          : '에이전트가 없습니다. 주 에이전트가 agents 도구의 spawn으로 작업자를 만듭니다.'
+        () => state.retainedHistory
+          ? t("No workers are running. Reusable worker histories are parked and remain available to their prime chats; Clear swarm permanently removes them.")
+          : t("No agents. The prime agent creates workers with the agents tool’s spawn action.")
       )
     );
   } else {
@@ -2260,15 +2730,14 @@ function paintSwarm(state: SwarmState): void {
           clear.append(icon('i-x'));
           clear.dataset.clear = agent.id;
           if (agent.runId) clear.dataset.runId = agent.runId;
-          clear.title =
-            agent.role === 'prime'
-              ? '실행 초기화 — 이 실행과 모든 작업자를 종료합니다.'
-              : `실행 초기화 — ${agent.id} 종료 후 슬롯 반환`;
+          ui(clear, 'title', () => agent.role === 'prime'
+              ? t("Clear session — ends this run and every worker in it")
+              : t("Clear session — ends {0} and frees its slot", [agent.id]));
           top.append(clear);
         }
         const sub = el('div', 'model-sub');
-        const bits = [`${agent.pending} pending`, `${agent.delivered} delivered`];
-        if (agent.conversationId) bits.push('대화 연결됨');
+        const bits = [t("{0} pending", [agent.pending]), t("{0} delivered", [agent.delivered])];
+        if (agent.conversationId) bits.push(t("chat bound"));
         sub.textContent = bits.join(' · ');
         row.append(top, sub);
         if (agent.task) row.append(el('p', 'hint', agent.task));
@@ -2316,8 +2785,10 @@ export function chatSettingsPatch(current: Config): {
   const threshold = number('autoCompactTokens', current.compaction.autoTokens, 10_000, 4_000_000);
   return {
     sessions: {
-      record: $<HTMLInputElement>('sessRecord').checked,
-      retainDays: number('sessRetain', current.sessions.retainDays, 0, 3650),
+      // Main enforces these invariants too. Keeping the canonical values in the complete
+      // renderer snapshot prevents an old/foreign control value from being proposed at all.
+      record: true,
+      retainDays: 0,
       // Both follow the single threshold above rather than being typed separately.
       advisoryTokens: threshold,
       limitTokens: urgentFrom(threshold)
@@ -2344,15 +2815,14 @@ export function chatSettingsPatch(current: Config): {
       helperModel: $<HTMLSelectElement>('helperModel').value || current.goal.helperModel || 'gpt-5.6-sol',
       helperReasoning: ($<HTMLSelectElement>('helperReasoning').value || current.goal.helperReasoning || 'high') as Config['goal']['helperReasoning'],
       provider: {
-        kind: $<HTMLSelectElement>('goalProvider').value === 'opencodex' ? 'custom'
-          : ($<HTMLSelectElement>('goalProvider').value || current.goal.provider?.kind || 'openrouter') as Config['goal']['provider']['kind'],
+        kind: customGoalProvider() ? 'custom' : 'openrouter',
         baseUrl: $<HTMLInputElement>('goalBaseUrl').value
       },
       // The api-backend model is picked from the catalogue and never typed, except on a
       // custom endpoint whose id is typed in its own field instead. `current` is the
       // fallback for the first save after a repaint.
       model:
-        $<HTMLSelectElement>('goalProvider').value !== 'openrouter'
+        customGoalProvider()
           ? $<HTMLInputElement>('goalCustomModel').value.trim() || current.goal.model
           : goalModel || current.goal.model,
       reasoning: $<HTMLSelectElement>('goalReasoning').value as Config['goal']['reasoning'],
@@ -2364,8 +2834,8 @@ export function chatSettingsPatch(current: Config): {
       loopPrompt:
         $<HTMLTextAreaElement>('goalLoopPrompt').value.trim() || DEFAULT_GOAL_LOOP_SYSTEM_PROMPT
     },
-    // Empty is a real choice here, not a value to repair: it means "add nothing of mine".
-    mcp: { instructions: $<HTMLTextAreaElement>('mcpInstructions').value.trim() }
+    // The retired editor no longer owns this stored configuration.
+    mcp: current.mcp ?? { instructions: '' }
   };
 }
 
@@ -2379,20 +2849,40 @@ export function chatSettingsPatch(current: Config): {
  * `<select>` would have to hold several hundred options nobody asked for.
  */
 let goalModel = DEFAULT_GOAL_MODEL;
-const OPENCODEX_BASE_URL = 'http://127.0.0.1:10100/v1';
-/** A presentation preset for the official custom endpoint, never a third provider kind. */
-function goalProviderChoice(goal: Config['goal']): 'openrouter' | 'custom' | 'opencodex' {
-  if (goal.provider?.kind !== 'custom') return 'openrouter';
-  return goal.provider.baseUrl.trim().replace(/\/+$/, '') === OPENCODEX_BASE_URL ? 'opencodex' : 'custom';
-}
 /** The catalogue as far as it has been paged in, and how long it actually is. */
-let goalModels: Array<{ id: string; name: string; created: number; contextLength: number }> = [];
+let goalModels: GoalModel[] = [];
+let selectedGoalModel: GoalModel | undefined;
+let goalCatalogEpoch = 0;
 let goalTotal = 0;
 let goalLoading = false;
 
+const OPENCODEX_BASE_URL = 'http://127.0.0.1:10100/v1';
+function customGoalProvider(): boolean {
+  return ['custom', 'opencodex'].includes($<HTMLSelectElement>('goalProvider').value);
+}
+function goalProviderChoice(goal: Config['goal']): string {
+  if (goal.provider?.kind !== 'custom') return 'openrouter';
+  return goal.provider.baseUrl.trim().replace(/\/+$/, '') === OPENCODEX_BASE_URL ? 'opencodex' : 'custom';
+}
+
+function invalidateGoalModels(): void {
+  goalCatalogEpoch++;
+  goalModels = [];
+  selectedGoalModel = undefined;
+  goalTotal = 0;
+}
+
+function paintGoalReasoning(selected?: Config['goal']['reasoning'], changingModel = false): void {
+  const select = $<HTMLSelectElement>('goalReasoning');
+  const model = goalModels.find(model => model.id === goalModel) ?? (selectedGoalModel?.id === goalModel ? selectedGoalModel : undefined);
+  const custom = customGoalProvider();
+  renderGoalReasoning(select, custom ? undefined : model, custom,
+    selected ?? (select.value || 'default') as Config['goal']['reasoning'], changingModel);
+}
+
 /** The release date OpenRouter publishes, as a person would date a model. */
 function releasedOn(created: number): string {
-  if (!created) return '출시일 미공개';
+  if (!created) return t("release date not published");
   return new Date(created * 1000).toLocaleDateString(undefined, { year: 'numeric', month: 'short', day: 'numeric' });
 }
 
@@ -2406,22 +2896,25 @@ async function loadGoalModels(reset: boolean): Promise<void> {
   if (goalLoading) return;
   goalLoading = true;
   if (reset) {
-    goalModels = [];
-    goalTotal = 0;
+    invalidateGoalModels();
   }
-  $('goalModelsState').textContent = '선택한 공급자의 모델을 불러오는 중…';
+  const epoch = goalCatalogEpoch;
+  ui($('goalModelsState'), 'textContent', () => t("Loading models from OpenRouter…"));
   $<HTMLButtonElement>('goalMore').disabled = true;
   const page = await run(api.listGoalModels(goalModels.length));
   goalLoading = false;
+  if (epoch !== goalCatalogEpoch) return;
   if (!page) {
     // `run` has already shown the reason. Say what it means *here*: the list is empty and
     // the model in use has not changed.
-    $('goalModelsState').textContent = '선택한 공급자에 연결하지 못했습니다. 기존 모델 선택은 유지됩니다.';
+    ui($('goalModelsState'), 'textContent', () => t("OpenRouter could not be reached. The model in use is unchanged."));
     $<HTMLButtonElement>('goalMore').disabled = goalModels.length === 0;
     return;
   }
   goalModels = [...goalModels, ...page.models];
+  selectedGoalModel = page.selectedModel;
   goalTotal = page.total;
+  paintGoalReasoning();
   paintGoalModels();
 }
 
@@ -2439,15 +2932,14 @@ function paintGoalModels(): void {
     row.dataset.model = model.id;
     if (model.id === goalModel) row.dataset.chosen = '1';
     row.append(el('b', 'goal-model-name', model.name));
-    const meta = [releasedOn(model.created), model.contextLength > 0 ? `${compactNumber(model.contextLength)} ctx` : '']
+    const meta = [releasedOn(model.created), model.contextLength > 0 ? t("{0} ctx", [compactNumber(model.contextLength)]) : '']
       .filter(Boolean)
       .join(' · ');
     row.append(el('em', 'goal-model-meta', `${model.id} · ${meta}`));
     list.append(row);
   }
   const shown = goalModels.length;
-  $('goalModelsState').textContent =
-    shown === 0 ? '조회된 모델이 없습니다.' : `전체 ${goalTotal}개 중 최신 ${shown}개 표시 · 출시일 내림차순`;
+  ui($('goalModelsState'), 'textContent', () => shown === 0 ? t("No models came back.") : t("Showing the {0} newest of {1}, newest release first.", [shown, goalTotal]));
   $<HTMLButtonElement>('goalMore').disabled = shown >= goalTotal;
   $<HTMLButtonElement>('goalMore').hidden = shown >= goalTotal;
   list.scrollTop = keep;
@@ -2459,7 +2951,7 @@ function paintGoalModels(): void {
 /**
  * Pages the catalogue in as the list is scrolled.
  *
- * "20개 더 보기" is the deliberate way to ask; scrolling to the bottom is the way people
+ * "Load 20 more" is the deliberate way to ask; scrolling to the bottom is the way people
  * actually ask. It fires a screenful early rather than at the exact bottom, so the next
  * twenty are usually already in place by the time the scroll arrives where they go.
  */
@@ -2494,17 +2986,19 @@ function applyGoal(state: AppState, previous?: Config): void {
   const { config } = state;
   applyChatChecked($<HTMLInputElement>('goalIncludeToolCalls'), config.goal.includeToolCalls === true, previous?.goal.includeToolCalls);
   const automation = $<HTMLSelectElement>('chatAutomation');
-  automation.disabled = !config.sessions.record;
-  automation.title = config.sessions.record ? '이 대화를 자동으로 계속 진행' : 'Goal·Loop를 사용하려면 대화 기록을 켜세요';
+  automation.disabled = false;
+  ui(automation, 'title', () => t("Continue this chat automatically"));
   paintAutomationSwitch();
   const secureStorageAvailable = state.secureStorage?.available ?? true;
   // This picker owns the last known OpenRouter selection. A custom deployment uses
   // its own input and must not replace that selection during an unrelated repaint.
   // A session opened directly on custom starts with the picker's defined default.
   if (config.goal.provider?.kind !== 'custom') goalModel = config.goal.model;
-  applyChatValue($<HTMLSelectElement>('goalReasoning'), config.goal.reasoning, previous?.goal.reasoning);
+  const reasoningSelect = $<HTMLSelectElement>('goalReasoning');
+  const reasoning = document.activeElement === reasoningSelect && previous && reasoningSelect.value !== previous.goal.reasoning
+    ? reasoningSelect.value as Config['goal']['reasoning'] : config.goal.reasoning;
+  if (previous && JSON.stringify(previous.goal.provider) !== JSON.stringify(config.goal.provider)) invalidateGoalModels();
   applyChatValue($<HTMLTextAreaElement>('goalPrompt'), config.goal.prompt, previous?.goal.prompt);
-  applyChatValue($<HTMLTextAreaElement>('mcpInstructions'), config.mcp?.instructions ?? '', previous?.mcp?.instructions);
   applyChatValue(
     $<HTMLTextAreaElement>('goalObjectivePrompt'),
     config.goal.objectivePrompt,
@@ -2528,25 +3022,26 @@ function applyGoal(state: AppState, previous?: Config): void {
   $('goalKeyField').hidden = customProvider;
   $('goalModelName').textContent = config.goal.model;
   const goalKey = $<HTMLInputElement>('goalKey');
-  goalKey.placeholder = state.hasGoalKey ? '•••••••• 저장됨' : 'sk-or-v1-…';
+  ui(goalKey, 'placeholder', () => state.hasGoalKey ? t("•••••••• stored") : 'sk-or-v1-…');
   goalKey.disabled = !secureStorageAvailable;
-  $('goalKeyState').textContent = !secureStorageAvailable
-    ? (state.secureStorage?.detail ?? '운영체제의 보안 자격 증명 저장소를 사용할 수 없습니다.')
+  ui($('goalKeyState'), 'textContent', () => !secureStorageAvailable
+    ? (state.secureStorage?.detail ?? t("Secure credential storage is unavailable."))
     : state.hasGoalKey
-      ? '운영체제 보안 저장소에 키가 저장되어 있습니다. 새 키를 입력하면 교체됩니다.'
-      : '운영체제 보안 저장소에 저장하며 공급자 인증에만 사용합니다. 브라우저에는 생성된 답변만 전달합니다.';
+      ? t("A key is stored with secure OS credential storage. Type a new one to replace it.")
+      : t("Stored with secure OS credential storage. It never leaves this app, and the browser is only ever handed the reply."));
   $('goalKeyState').classList.toggle('is-warn', !secureStorageAvailable);
   $<HTMLButtonElement>('goalKeyRemove').disabled = !state.hasGoalKey || !secureStorageAvailable;
   const goalCustomKey = $<HTMLInputElement>('goalCustomKey');
-  goalCustomKey.placeholder = state.hasCustomProviderKey ? '•••••••• 저장됨' : '키가 필요 없는 로컬 서버는 비워 두세요';
+  ui(goalCustomKey, 'placeholder', () => state.hasCustomProviderKey ? t("•••••••• stored") : t("leave empty for a keyless local server"));
   goalCustomKey.disabled = !secureStorageAvailable;
-  $('goalCustomKeyState').textContent = !secureStorageAvailable
-    ? (state.secureStorage?.detail ?? '운영체제의 보안 자격 증명 저장소를 사용할 수 없습니다.')
+  ui($('goalCustomKeyState'), 'textContent', () => !secureStorageAvailable
+    ? (state.secureStorage?.detail ?? t("Secure credential storage is unavailable."))
     : state.hasCustomProviderKey
-      ? '운영체제 보안 저장소에 키가 저장되어 있습니다. 새 키를 입력하면 교체됩니다.'
-      : '선택 사항입니다. 보안 저장소에 저장하고 설정한 API 주소로만 전송합니다. 브라우저에는 생성된 답변만 전달합니다.';
+      ? t("A key is stored with secure OS credential storage. Type a new one to replace it.")
+      : t("Optional. Stored with secure OS credential storage and sent only by the app to your configured API endpoint. The browser receives only the reply."));
   $('goalCustomKeyState').classList.toggle('is-warn', !secureStorageAvailable);
   $<HTMLButtonElement>('goalCustomKeyRemove').disabled = !state.hasCustomProviderKey || !secureStorageAvailable;
+  paintGoalReasoning(reasoning);
   if (goalModels.length > 0) paintGoalModels();
 }
 
@@ -2555,56 +3050,61 @@ function wireGoal(save: () => Promise<void>): void {
   $('goalPromptEdit').addEventListener('click', () => {
     const panel = $('goalPromptPanel');
     panel.hidden = !panel.hidden;
-    $('goalPromptEdit').textContent = panel.hidden ? '지시문 편집' : '지시문 닫기';
+    $('goalPromptEdit').textContent = panel.hidden ? 'Edit prompt' : 'Close prompt';
     if (!panel.hidden) $<HTMLTextAreaElement>('goalPrompt').focus();
   });
   $('goalPromptReset').addEventListener('click', async () => {
     $<HTMLTextAreaElement>('goalPrompt').value = DEFAULT_GOAL_SYSTEM_PROMPT;
     await save();
-    toast('별도 작업 없는 목표 지시문을 기본값으로 복원했습니다.');
+    toast('Goal prompt (no task) restored to default');
   });
   $<HTMLTextAreaElement>('goalObjectivePrompt').maxLength = MAX_GOAL_SYSTEM_PROMPT_CHARS;
   $('goalObjectivePromptEdit').addEventListener('click', () => {
     const panel = $('goalObjectivePromptPanel');
     panel.hidden = !panel.hidden;
-    $('goalObjectivePromptEdit').textContent = panel.hidden ? '지시문 편집' : '지시문 닫기';
+    $('goalObjectivePromptEdit').textContent = panel.hidden ? 'Edit prompt' : 'Close prompt';
     if (!panel.hidden) $<HTMLTextAreaElement>('goalObjectivePrompt').focus();
   });
   $('goalObjectivePromptReset').addEventListener('click', async () => {
     $<HTMLTextAreaElement>('goalObjectivePrompt').value = DEFAULT_GOAL_OBJECTIVE_SYSTEM_PROMPT;
     await save();
-    toast('작업 지정 목표 지시문을 기본값으로 복원했습니다.');
+    toast('Goal prompt (with a task) restored to default');
   });
   $<HTMLTextAreaElement>('goalLoopPrompt').maxLength = MAX_GOAL_SYSTEM_PROMPT_CHARS;
   $('goalLoopPromptEdit').addEventListener('click', () => {
     const panel = $('goalLoopPromptPanel');
     panel.hidden = !panel.hidden;
-    $('goalLoopPromptEdit').textContent = panel.hidden ? '지시문 편집' : '지시문 닫기';
+    $('goalLoopPromptEdit').textContent = panel.hidden ? 'Edit prompt' : 'Close prompt';
     if (!panel.hidden) $<HTMLTextAreaElement>('goalLoopPrompt').focus();
   });
   $('goalLoopPromptReset').addEventListener('click', async () => {
     $<HTMLTextAreaElement>('goalLoopPrompt').value = DEFAULT_GOAL_LOOP_SYSTEM_PROMPT;
     await save();
-    toast('반복 지시문을 기본값으로 복원했습니다.');
+    toast('Loop prompt restored to default');
   });
   // The catalogue is fetched on the first press and kept afterwards: the picker closing is
   // not a reason to spend another round trip on a list that changes weekly.
   $('goalPick').addEventListener('click', () => {
     const panel = $('goalModels');
     panel.hidden = !panel.hidden;
-    $('goalPick').textContent = panel.hidden ? '모델 선택' : '닫기';
+    $('goalPick').textContent = panel.hidden ? 'Select model' : 'Close';
     if (!panel.hidden && goalModels.length === 0) void loadGoalModels(true);
   });
   $('goalMore').addEventListener('click', () => void loadGoalModels(false));
+  $('goalReasoning').addEventListener('focus', () => {
+    if (!customGoalProvider() && !goalModels.some(model => model.id === goalModel) && selectedGoalModel?.id !== goalModel)
+      void loadGoalModels(true);
+  });
   $('goalModelList').addEventListener('scroll', maybePageGoalModels);
   $('goalModelList').addEventListener('click', (event) => {
     const row = (event.target as HTMLElement).closest<HTMLElement>('[data-model]');
     if (!row?.dataset.model) return;
     goalModel = row.dataset.model;
     $('goalModelName').textContent = goalModel;
+    paintGoalReasoning(undefined, true);
     paintGoalModels();
     void save();
-    toast(`목표·반복 모델: ${goalModel}`);
+    toast(`Goal model set to ${goalModel}`);
   });
   // On blur, like every other key in this app: not saved keystroke by keystroke, and the
   // field is emptied the moment it has been handed over.
@@ -2617,18 +3117,20 @@ function wireGoal(save: () => Promise<void>): void {
     if (key === '') return;
     const next = await run(api.setGoalKey(key));
     if (next) {
+      invalidateGoalModels();
       // A blur can be followed immediately by refocus + new typing while IPC is in flight.
       // Clear only the exact value that successfully crossed the secret-store boundary.
       if (input.value === submitted) input.value = '';
       applyGoal(next);
-      toast('OpenRouter 키를 저장했습니다.');
+      toast('OpenRouter key stored');
     }
   });
   $('goalKeyRemove').addEventListener('click', async () => {
     const next = await run(api.setGoalKey(''));
     if (next) {
+      invalidateGoalModels();
       applyGoal(next);
-      toast('OpenRouter 키를 삭제했습니다.');
+      toast('OpenRouter key removed');
     }
   });
   // Same blur-to-save discipline as the OpenRouter key above. Empty submits nothing:
@@ -2642,14 +3144,14 @@ function wireGoal(save: () => Promise<void>): void {
     if (next) {
       if (input.value === submitted) input.value = '';
       applyGoal(next);
-      toast('직접 설정한 API 키를 저장했습니다.');
+      toast('Custom provider key stored');
     }
   });
   $('goalCustomKeyRemove').addEventListener('click', async () => {
     const next = await run(api.setCustomProviderKey(''));
     if (next) {
       applyGoal(next);
-      toast('직접 설정한 API 키를 삭제했습니다.');
+      toast('Custom provider key removed');
     }
   });
 }
@@ -2659,9 +3161,9 @@ function wireGoal(save: () => Promise<void>): void {
  * the number it fires on is this app's own estimate rather than ChatGPT's accounting.
  */
 function applyAutoCompactHint(config: Config): void {
-  $('autoCompactHint').textContent = config.compaction.auto
-    ? '이 토큰 수에 도달하면 진행 중 응답을 멈추고 요약을 작성한 뒤 새 대화에서 이어갑니다.'
-    : '꺼짐 — ChatGPT 탭의 ‘요약 후 이어가기’ 버튼으로만 실행합니다.';
+  ui($('autoCompactHint'), 'textContent', () => config.compaction.auto
+    ? t("Interrupts an active answer at this many tokens, writes a handoff, and opens a fresh chat.")
+    : t("Off — only the Compact & resume button in the ChatGPT tab compacts."));
 }
 
 /**
@@ -2670,18 +3172,17 @@ function applyAutoCompactHint(config: Config): void {
  * A field that is not here does not save: it keeps what was typed until the next repaint
  * and then quietly reverts. `autoCompactTokens` was missing, which made the one number the
  * automatic trigger fires on the one control in the app that never kept what you typed.
- * `sessRecord` is deliberately absent — it lives in the Home permission list now, with
- * every other switch that decides what ChatGPT can reach, and saves from there.
+ * Recording and age retention are absent because history is always recorded and does not
+ * expire by age.
  */
 const CHAT_INPUTS = [
   'chatBrowser',
   'goalIncludeToolCalls',
   'planBackend',
-  'finishTool', 'finishAction', 'finishLeadMinutes', 'workerModel', 'workerReasoning', 'backgroundChats', 'browserOnly', 'autoRefreshPlugins',
+  'finishTool', 'finishLeadMinutes', 'workerModel', 'workerReasoning', 'backgroundChats', 'browserOnly', 'autoRefreshPlugins',
   'goalBackend',
   'loopBackend',
   'helperModel', 'helperReasoning',
-  'sessRetain',
   'autoCompact',
   'autoCompactTokens',
   'maWorkers',
@@ -2693,19 +3194,15 @@ const CHAT_INPUTS = [
   'goalReasoning',
   'goalPrompt',
   'goalObjectivePrompt',
-  'goalLoopPrompt',
-  'mcpInstructions'
+  'goalLoopPrompt'
 ];
 
 /** Writes app state into this panel's controls. Called from the renderer's apply(). */
 export function chatApply(state: AppState, previous?: Config): void {
   const { config, bridge } = state;
+  if (visible && selectedId) void refreshSessionControls();
   paintContextMeter(sessions.find(session => session.id === selectedId) ?? null, config, confirmedComposerModel());
   applyChatModels(config, previous);
-
-  // `sessRecord` is painted by the renderer's own apply(): it lives in the Home
-  // permission list now, with every other switch that decides what ChatGPT can reach.
-  applyChatValue($<HTMLInputElement>('sessRetain'), String(config.sessions.retainDays), previous?.sessions.retainDays);
 
   applyChatChecked($<HTMLInputElement>('autoCompact'), config.compaction.auto, previous?.compaction.auto);
   applyChatValue(
@@ -2739,19 +3236,17 @@ export function chatApply(state: AppState, previous?: Config): void {
   const browserRequired = browserExtensionRequired(config);
   $<HTMLButtonElement>('bridgeUnpair').disabled = !bridge.paired;
   const secureStorageAvailable = state.secureStorage?.available ?? true;
-  $('bridgeState').textContent = !browserRequired
-    ? '브라우저 연동 기능이 꺼져 있어 지금은 확장이 필요하지 않습니다.'
+  ui($('bridgeState'), 'textContent', () => !browserRequired
+    ? t("Browser-backed features are off. The extension is not needed right now.")
     : !secureStorageAvailable
-      ? (state.secureStorage?.detail ?? '보안 자격 증명 저장소를 사용할 수 없어 확장을 안전하게 연결할 수 없습니다.')
+      ? (state.secureStorage?.detail ?? t("Secure credential storage is unavailable, so the extension cannot pair safely."))
     : !bridge.running
-      ? '기록 또는 보조 에이전트에 필요한 로컬 브리지가 꺼져 있습니다.'
+      ? t("The local bridge is off even though recording or multi-agent mode needs it.")
       : bridge.present
-        ? `연결됨 · 127.0.0.1:${bridge.port ?? '?'} · 최근 수신 ${ago(bridge.lastSeenAt)}`
+        ? t("Connected. Listening on 127.0.0.1:{0} · last message {1}.", [bridge.port ?? '?', ago(bridge.lastSeenAt)])
         : bridge.paired
-          ? `승인됨 · 현재 브라우저 확장은 연결되지 않았습니다. ${
-              bridge.lastSeenAt === null ? '앱 시작 이후 확장의 접속이 없습니다.' : `최근 접속 ${ago(bridge.lastSeenAt)}.`
-            }`
-          : `127.0.0.1:${bridge.port ?? '?'}에서 대기 중 · 승인·접속한 브라우저 없음`;
+          ? t("Authorized, but the browser extension is not currently connected. {0}", [bridge.lastSeenAt === null ? t("It has not checked in since this app started.") : t("Last seen {0}.", [ago(bridge.lastSeenAt)])])
+          : t("Listening on 127.0.0.1:{0} · no browser is authorized or connected yet.", [bridge.port ?? '?']));
   $('bridgeState').classList.toggle('is-warn', browserRequired && (!bridge.present || !secureStorageAvailable));
   void showExtensionPath();
 
@@ -2760,6 +3255,7 @@ export function chatApply(state: AppState, previous?: Config): void {
 
 /** Called when the Chat tab becomes visible or is left, so it only polls when shown. */
 export function chatVisible(next: boolean): void {
+  if (visible === next) return;
   visible = next;
   if (next) void refreshAll();
   else {
@@ -2790,6 +3286,134 @@ function scheduleReload(): void {
   }, 400);
 }
 
+/** Retired automatic drafts belong to their creation time, never the live composer queue. */
+function historicalAutomaticInput(entry: InputEntry): boolean {
+  return !!entry.finishOwner && !entry.finishOwner.userRequested && entry.state === 'cancelled' && !!entry.error;
+}
+
+function inputMessageRow(entry: InputEntry, notice: boolean): HTMLElement {
+  const row = el('div', 'pending-message');
+  row.classList.toggle('is-delivered', !entry.error && ['sent', 'tool'].includes(entry.state));
+  row.classList.toggle('is-delivery-error', !!entry.error || entry.state === 'failed');
+  row.dataset.inputId = entry.id;
+  if (!visibleInputIds.has(entry.id)) row.classList.add('is-entering');
+  visibleInputIds.add(entry.id);
+  if (visibleInputIds.size > 100) visibleInputIds.delete(visibleInputIds.values().next().value!);
+  const status = () => entry.error || (entry.state === 'failed' ? t("Delivery not confirmed") : entry.state === 'decision' ? t("Preparing follow-up") : entry.state === 'browser' ? t("Delivery confirmation pending") : entry.state === 'tool' ? t("Sent to the active turn · awaiting receipt") : entry.dueAt > Date.now() ? t("Scheduled {0}", [new Date(entry.dueAt).toLocaleString()]) : entry.delivery === 'tool' ? t("Waiting for the next tool call") : t("Queued"));
+  const files = el('div', 'message-attachments');
+  if (entry.attachments?.length) files.append(...entry.attachments.map(file => attachmentCard(file)));
+  for (const image of entry.images ?? []) { const preview = document.createElement('img'); preview.src = image.dataUrl; preview.alt = image.name; files.append(preview); }
+  if (files.childElementCount) row.append(files);
+  if (entry.text) {
+    const text = el('div', 'pending-message-text', entry.text);
+    text.setAttribute('dir', 'auto');
+    row.append(text);
+  }
+  const receipt = el('span', 'pending-message-status');
+  ui(receipt, 'title', status); ui(receipt, 'aria-label', status);
+  if (entry.error || entry.state === 'failed') {
+    ui(receipt, 'textContent', status);
+  }
+  else receipt.append(icon(['sent', 'tool'].includes(entry.state) ? 'i-check' : 'i-clock'));
+  receipt.hidden = !entry.error && ['sent', 'tool'].includes(entry.state) && hasLaterModelActivity(entry.deliveredAt ?? entry.offeredAt ?? entry.createdAt);
+  row.append(receipt);
+  if (notice) {
+    const dismiss = dockAction(() => t("Dismiss delivery notice"), 'i-x', () => {});
+    dismiss.onclick = async () => {
+      dismiss.disabled = true;
+      const result = await run(api.cancelInput(entry.id));
+      if (result) dismissInputNotice(entry.id);
+      else dismiss.disabled = false;
+      void refreshInputQueue();
+    };
+    row.append(dismiss);
+    const retry = dockAction(() => t("Retry delivery"), 'i-retry', () => {});
+    retry.classList.add('delivery-retry');
+    const unqueuedPlan = entry.stages !== undefined && !entry.stagesApplied;
+    ui(retry, 'title', () => unqueuedPlan ? t("Retry stage one with the complete plan and queued checkpoints") : t("Restore this message to the composer for review and sending"));
+    retry.onclick = () => {
+      if (unqueuedPlan) { void retryPlannedInput(entry); return; }
+      const input = $<HTMLTextAreaElement>('chatInput');
+      if (input.value.trim() || imageDrafts.get(draftKey())?.length) { toast(t("Send or clear your current draft before retrying this message.")); return; }
+      replaceComposerDraft();
+      input.value = entry.text;
+      if (entry.images?.length) imageDrafts.set(draftKey(), [...entry.images]);
+      if (entry.attachments?.length) imageDrafts.set(draftKey(), [...(entry.images ?? []), ...entry.attachments]);
+      rememberDraft(); paintComposerImages(); paintDeliveryControls(); input.focus();
+      dismissInputNotice(entry.id);
+    };
+    row.append(retry);
+  }
+  if (['queued', 'browser'].includes(entry.state)) {
+    const cancel = dockAction(() => t("Cancel delivery"), 'i-x', () => {});
+    cancel.onclick = async () => {
+      cancel.disabled = true;
+      const result = await run(api.cancelInput(entry.id));
+      if (result) dismissInputNotice(entry.id);
+      void refreshInputQueue();
+    };
+    row.append(cancel);
+  }
+  if (entry.state === 'queued' && (entry.error?.startsWith('Message queued. Browser startup failed:') || entry.error?.startsWith('Local chat setup failed:'))) {
+    const retry = dockAction(() => t("Retry browser"), 'i-retry', () => {});
+    retry.classList.add('delivery-retry');
+    retry.onclick = async () => { retry.setAttribute('disabled', ''); await run(api.retryInputBrowser(entry.id)); void refreshInputQueue(); };
+    row.append(retry);
+  }
+  return row;
+}
+
+/** Local admission moves the draft; a native receipt alone may mark it sent. */
+async function adoptAcceptedOpening(entry: InputEntry): Promise<boolean> {
+  const pending = pendingNewInput;
+  const id = entry.opening ? entry.sessionId : entry.state === 'sent' ? entry.deliveredSessionId : null;
+  if (!id || !pending || pending.id !== entry.id || pending.generation !== selectionGeneration || !newChatSelected || selectedId !== null) return false;
+  let summary = sessions.find(row => row.id === id);
+  if (!summary) summary = (await run(api.getSession(id, { limit: 1 })))?.summary ?? undefined;
+  if (!summary || pendingNewInput !== pending || pending.generation !== selectionGeneration || selectedId !== null) return false;
+  pendingNewInput = null;
+  mergeSessionRows([summary]);
+  const from = draftKey();
+  inputDrafts.set(summary.id, $<HTMLTextAreaElement>('chatInput').value);
+  const images = imageDrafts.get(from);
+  if (images) imageDrafts.set(summary.id, images);
+  selectSession(summary.id);
+  inputDrafts.delete(from); imageDrafts.delete(from); newChatTasks.delete(from);
+  return true;
+}
+function paintPendingInputs(): void {
+  const all = pendingComposerInputs;
+  const belongsToSelection = (entry: InputEntry): boolean => selectedId === null
+    ? pendingNewInput?.generation === selectionGeneration && entry.id === pendingNewInput.id
+    : (entry.sessionId ?? entry.deliveredSessionId) === selectedId;
+  // A pre-acceptance or failed-materialization row belongs only to its exact draft.
+  // A fresh New Chat never inherits another opening.
+  const unbound = (entry: InputEntry) => selectedId === null && pendingNewInput?.id === entry.id && pendingNewInput.generation === selectionGeneration && !entry.deliveredSessionId && entry.purpose !== 'decision' && ['queued', 'browser'].includes(entry.state);
+  const notice = (entry: InputEntry) => belongsToSelection(entry) && entry.purpose !== 'decision' &&
+    ['failed', 'cancelled'].includes(entry.state) && !!entry.error && !dismissedInputNotices.has(entry.id);
+  const anchored = (entry: InputEntry) => detailFor === selectedId && (events.some(event =>
+    event.kind === 'user_message' && (event.inputId === entry.id ||
+      event.messageId === (entry.messageId ?? `input:${entry.id}`))) ||
+    // A delivered historical row outside this bounded page stays outside it.
+    ((entry.historyAnchored || entry.historyRecorded) && events.length > 0 &&
+      Math.min(...events.map(event => event.time)) > (entry.deliveredAt ?? entry.offeredAt ?? entry.createdAt)));
+  const rows = all.filter((entry) => !dismissedInputNotices.has(entry.id) && !(!notice(entry) && anchored(entry)) && !(queuedFollowup(entry) && ['queued', 'tool', 'browser'].includes(entry.state)) && (belongsToSelection(entry) || unbound(entry) || notice(entry)) &&
+    (notice(entry) || unbound(entry) || selectedId !== null || projectGroup(entry.projectId) === selectedProjectId) &&
+    (notice(entry) || !['sent', 'cancelled'].includes(entry.state) || (entry.state === 'sent' && entry.messageId && !anchored(entry))));
+  for (const entry of startingInputs.values()) if (belongsToSelection(entry) && !all.some(row => row.id === entry.id)) rows.push(entry);
+  const host = $('inputQueue');
+  const previous = new Map([...host.querySelectorAll<HTMLElement>(':scope > .pending-message')].map(row => [row.dataset.inputId, row]));
+  const next = rows.filter(entry => !historicalAutomaticInput(entry)).map(entry => {
+    const sig = JSON.stringify([entry.text, entry.state, entry.error, entry.dueAt, notice(entry), entry.stagesApplied,
+      entry.stages, entry.attachments?.map(file => file.id), entry.images?.map(image => [image.name, image.dataUrl.length]),
+      hasLaterModelActivity(entry.deliveredAt ?? entry.offeredAt ?? entry.createdAt)]);
+    const old = previous.get(entry.id);
+    if (old?.dataset.inputSignature === sig) return old;
+    const row = inputMessageRow(entry, notice(entry)); row.dataset.inputSignature = sig; return row;
+  });
+  // Helper controls have their own owner and are refreshed by the queue read below.
+  reconcileChildren(host, [...next, ...host.querySelectorAll<HTMLElement>(':scope > .queued-input')]);
+}
 async function refreshInputQueue(): Promise<void> {
   const request = ++inputQueueGeneration;
   const selection = selectionGeneration;
@@ -2798,20 +3422,8 @@ async function refreshInputQueue(): Promise<void> {
   pendingComposerInputs = all;
   for (const id of dismissedInputNotices) if (!all.some(entry => entry.id === id)) dismissedInputNotices.delete(id);
   paintDeliveryControls();
-  const pending = pendingNewInput;
-  const delivered = pending && all.find((entry) => entry.id === pending.id && entry.state === 'sent' && entry.deliveredSessionId);
-  if (delivered?.deliveredSessionId && pending && pending.generation === selectionGeneration && newChatSelected && selectedId === null &&
-      !$<HTMLTextAreaElement>('chatInput').value.trim() && !(imageDrafts.get(draftKey())?.length)) {
-    let summary = sessions.find((entry) => entry.id === delivered.deliveredSessionId);
-    if (!summary) summary = (await run(api.getSession(delivered.deliveredSessionId, { limit: 1 })))?.summary ?? undefined;
-    if (summary && pendingNewInput === pending && selection === selectionGeneration &&
-        !$<HTMLTextAreaElement>('chatInput').value.trim() && !(imageDrafts.get(draftKey())?.length)) {
-      pendingNewInput = null;
-      mergeSessionRows([summary]);
-      selectSession(summary.id);
-      return;
-    }
-  }
+  const accepted = pendingNewInput && all.find(entry => entry.id === pendingNewInput!.id);
+  if (accepted && await adoptAcceptedOpening(accepted)) return;
   const belongsToSelection = (entry: { id: string; sessionId: string | null; deliveredSessionId?: string | null }): boolean => selectedId === null
     ? pendingNewInput?.generation === selectionGeneration && entry.id === pendingNewInput.id
     : (entry.sessionId ?? entry.deliveredSessionId) === selectedId;
@@ -2833,7 +3445,7 @@ async function refreshInputQueue(): Promise<void> {
     ids.splice(ids.indexOf(from), 1);
     ids.splice(ids.indexOf(to) + Number(after), 0, from);
     const saved = await run(api.reorderQueuedInputs(queueSession, ids));
-    if (saved === false) toast('이동 중 대기열이 변경됐습니다. 다시 확인하세요.');
+    if (saved === false) toast(t("The queue changed during the move. Try again."));
     void refreshInputQueue();
   };
   const taskList = $('finishQueue'); taskList.hidden = queuedTasks.length === 0;
@@ -2844,18 +3456,19 @@ async function refreshInputQueue(): Promise<void> {
     if (dragging && existing) return existing;
     if (entry.state === 'queued' && existing?.classList.contains('is-editing')) return existing;
     const card = el('div', 'queued-input'); card.dataset.inputId = entry.id;
-    if (projectedIds.has(entry.id)) card.setAttribute('aria-label', '계획 단계 · 첫 메시지 전송 대기');
-    const label = el('span', 'queue-label', entry.text); label.title = `${entry.state === 'queued' ? (entry.mode === 'after-turn' ? '다음 답변 완료 후' : 'Session finish 또는 답변 완료 후') : '수신 확인 대기'} · ${entry.text}`;
+    if (projectedIds.has(entry.id)) ui(card, 'aria-label', () => t("Plan stage · waiting for the first message to be sent"));
+    const label = el('span', 'queue-label', entry.text); ui(label, 'title', () => `${entry.state === 'queued' ? (entry.mode === 'after-turn' ? t("After the next completed answer") : t("At Session finish or after a completed answer")) : t("Awaiting receipt")} · ${entry.text}`);
+    label.dir = 'auto';
     card.append(icon('i-clock'), label);
     if (entry.state === 'queued') {
       const queueSessionSummary = sessions.find(row => row.id === selectedId);
       const modelSelection = queueSessionSummary?.selectedModel;
       if (entry.mode === 'finish' && modelSelection?.conversationId === queueSessionSummary?.conversationId && isAstraModel(modelSelection?.model, modelSelection?.reasoningEffort)) {
-        const delivery = el('button', 'btn queue-delivery', entry.afterTurn === true ? '답변 완료 후에도 전달' : '종료 도구에서만 전달') as HTMLButtonElement;
+        const delivery = el('button', 'btn queue-delivery', () => entry.afterTurn === true ? t("Also after turn") : t("Finish only")) as HTMLButtonElement;
         delivery.type = 'button';
-        delivery.setAttribute('aria-label', 'Astra 답변 완료 후에도 이 작업을 새 메시지로 전달');
+        ui(delivery, 'aria-label', () => t("Also send this task as a new message after Astra finishes its turn"));
         delivery.setAttribute('aria-pressed', String(entry.afterTurn === true));
-        delivery.title = entry.afterTurn === true ? 'Session Finish 또는 답변 완료가 확인된 뒤 새 메시지로 전달' : 'Session Finish 도구 결과 안에서만 전달하며 새 턴을 시작하지 않음';
+        ui(delivery, 'title', () => entry.afterTurn === true ? t("At Session Finish, or as a new message after verified turn completion") : t("Only inside the Session Finish tool result; never start a new turn"));
         delivery.onclick = async () => {
           delivery.disabled = true;
           await run(api.editQueuedInput(entry.id, entry.text, entry.afterTurn !== true));
@@ -2865,7 +3478,7 @@ async function refreshInputQueue(): Promise<void> {
       }
       label.draggable = true;
       label.tabIndex = 0;
-      label.title = '끌어서 순서를 바꾸거나 Alt + 위/아래를 누르세요.';
+      ui(label, 'title', () => t("Drag to reorder. Alt + Up/Down also moves this task."));
       label.ondragstart = event => {
         card.classList.add('is-dragging');
         event.dataTransfer?.setData('application/x-cos-queued-input', `${queueSession}:${entry.id}`);
@@ -2890,15 +3503,15 @@ async function refreshInputQueue(): Promise<void> {
         const next = ids[ids.indexOf(entry.id) + (event.key === 'ArrowDown' ? 1 : -1)];
         if (next) void reorder(entry.id, next, event.key === 'ArrowDown');
       };
-      const edit = dockAction('대기 작업 편집', 'i-pencil', () => {});
+      const edit = dockAction(() => t("Edit queued task"), 'i-pencil', () => {});
       edit.onclick = () => {
-        const field = document.createElement('textarea'); field.value = entry.text; field.maxLength = 16000; field.setAttribute('aria-label', '대기 작업');
+        const field = document.createElement('textarea'); field.dir = 'auto'; field.value = entry.text; ui(field, 'aria-label', () => t("Queued task"));
         const contents = [...card.childNodes];
-        const save = el('button', 'btn', '저장') as HTMLButtonElement; save.type = 'button';
+        const save = el('button', 'btn', () => t("Save")) as HTMLButtonElement; save.type = 'button';
         save.onclick = async () => {
           if (save.disabled) return;
           const value = field.value;
-          save.disabled = true; save.textContent = '저장 중…'; field.readOnly = true;
+          save.disabled = true; ui(save, 'textContent', () => t("Saving…")); field.readOnly = true;
           try {
             const saved = await run(api.editQueuedInput(entry.id, value));
             if (!card.isConnected || selection !== selectionGeneration) return;
@@ -2908,98 +3521,70 @@ async function refreshInputQueue(): Promise<void> {
               entry.text = value.trim(); label.textContent = entry.text;
               card.classList.remove('is-editing'); card.replaceChildren(...contents);
               void refreshInputQueue();
-            } else if (saved === false) toast('이미 대기열에서 처리된 작업이므로 편집하지 못했습니다.');
-          } catch (error) { toast(error instanceof Error ? error.message : '작업을 저장하지 못했습니다.'); }
-          finally { save.disabled = false; save.textContent = '저장'; field.readOnly = false; }
+            } else if (saved === false) toast(t("This task is no longer queued and could not be edited."));
+          } catch (error) { toast(error instanceof Error ? error.message : t("Could not save this task.")); }
+          finally { save.disabled = false; ui(save, 'textContent', () => t("Save")); field.readOnly = false; }
         };
         card.classList.add('is-editing'); card.replaceChildren(field, save); field.focus();
       };
-      const cancel = dockAction('대기 작업 제거', 'i-trash', () => {}); cancel.onclick = async () => { await run(api.cancelInput(entry.id)); void refreshInputQueue(); };
+      const cancel = dockAction(() => t("Remove queued task"), 'i-trash', () => {}); cancel.onclick = async () => { await run(api.cancelInput(entry.id)); void refreshInputQueue(); };
       card.append(edit, cancel);
     }
     return card;
   }));
-  // Active unbound sends still occupy the global admission limit after New Chat or
-  // restart. Show that existing outbox authority, without reviving terminal drafts.
-  const unbound = (entry: InputEntry) => selectedId === null && !entry.sessionId && !entry.deliveredSessionId && entry.purpose !== 'decision' && ['queued', 'browser'].includes(entry.state);
-  const notice = (entry: InputEntry) => (belongsToSelection(entry) || (selectedId === null && !entry.sessionId && !entry.deliveredSessionId)) && entry.purpose !== 'decision' &&
-    ['failed', 'cancelled'].includes(entry.state) && !!entry.error && !dismissedInputNotices.has(entry.id);
-  const rows = all.filter((entry) => !dismissedInputNotices.has(entry.id) && !(entry.state === 'tool' && entry.historyRecorded) && !(queuedFollowup(entry) && ['queued', 'tool', 'browser'].includes(entry.state)) && (belongsToSelection(entry) || unbound(entry) || notice(entry)) &&
-    (notice(entry) || unbound(entry) || selectedId !== null || (entry.projectId ?? null) === selectedProjectId) &&
-    (notice(entry) || !['sent', 'cancelled'].includes(entry.state) || (entry.state === 'sent' && entry.messageId && !entry.historyRecorded)));
-  for (const entry of startingInputs.values()) if (belongsToSelection(entry) && !all.some(row => row.id === entry.id)) rows.push(entry);
-  $('inputQueue').replaceChildren(...rows.map((entry) => {
-    const row = el('div', 'pending-message');
-    row.classList.toggle('is-delivered', !entry.error && ['sent', 'tool'].includes(entry.state));
-    row.classList.toggle('is-delivery-error', !!entry.error || entry.state === 'failed');
-    row.dataset.inputId = entry.id;
-    if (!visibleInputIds.has(entry.id)) row.classList.add('is-entering');
-    visibleInputIds.add(entry.id);
-    if (visibleInputIds.size > 100) visibleInputIds.delete(visibleInputIds.values().next().value!);
-    const status = entry.error || (entry.state === 'failed' ? '전달 미확인' : entry.state === 'decision' ? '후속 지시 준비 중' : entry.state === 'browser' ? '전달 확인 대기 중' : entry.state === 'tool' ? '현재 턴에 전달됨 · 수신 확인 대기' : entry.dueAt > Date.now() ? `예약: ${new Date(entry.dueAt).toLocaleString()}` : 'Queued');
-    const files = el('div', 'message-attachments');
-    if (entry.attachments?.length) files.append(...entry.attachments.map(file => attachmentCard(file)));
-    for (const image of entry.images ?? []) { const preview = document.createElement('img'); preview.src = image.dataUrl; preview.alt = image.name; files.append(preview); }
-    if (files.childElementCount) row.append(files);
-    if (entry.text) row.append(el('div', 'pending-message-text', entry.text));
-    const receipt = el('span', 'pending-message-status');
-    receipt.title = status; receipt.setAttribute('aria-label', status);
-    if (entry.error || entry.state === 'failed') {
-      receipt.textContent = status;
-    }
-    else receipt.append(icon(['sent', 'tool'].includes(entry.state) ? 'i-check' : 'i-clock'));
-    receipt.hidden = !entry.error && ['sent', 'tool'].includes(entry.state) && hasLaterModelActivity(entry.deliveredAt ?? entry.offeredAt ?? entry.createdAt);
-    row.append(receipt);
-    if (notice(entry)) {
-      row.append(dockAction('전달 알림 닫기', 'i-x', () => dismissInputNotice(entry.id)));
-      const retry = dockAction('전달 다시 준비', 'i-retry', () => {});
-      retry.classList.add('delivery-retry');
-      retry.title = '메시지를 입력창으로 복원한 뒤 검토하고 전송';
-      retry.onclick = () => {
-        const input = $<HTMLTextAreaElement>('chatInput');
-        if (input.value.trim() || imageDrafts.get(draftKey())?.length) { toast('현재 작성 중인 메시지를 보내거나 지운 뒤 다시 시도하세요.'); return; }
-        input.value = entry.text;
-        if (entry.images?.length) imageDrafts.set(draftKey(), [...entry.images]);
-        if (entry.attachments?.length) imageDrafts.set(draftKey(), [...(entry.images ?? []), ...entry.attachments]);
-        rememberDraft(); paintComposerImages(); paintDeliveryControls(); input.focus();
-        dismissInputNotice(entry.id);
-      };
-      row.append(retry);
-    }
-    if (['queued', 'browser'].includes(entry.state)) {
-      const cancel = dockAction('전달 취소', 'i-x', () => {});
-      cancel.onclick = async () => {
-        cancel.disabled = true;
-        const result = await run(api.cancelInput(entry.id));
-        if (result) dismissInputNotice(entry.id);
-        void refreshInputQueue();
-      };
-      row.append(cancel);
-    }
-    if (entry.state === 'queued' && entry.error?.startsWith('Message queued. Browser startup failed:')) {
-      const retry = dockAction('브라우저 다시 시도', 'i-retry', () => {});
-      retry.classList.add('delivery-retry');
-      retry.onclick = async () => { retry.setAttribute('disabled', ''); await run(api.retryInputBrowser(entry.id)); void refreshInputQueue(); };
-      row.append(retry);
-    }
-    return row;
-  }));
-  $('timelineEmpty').hidden = events.length > 0 || rows.length > 0;
+  paintDetail(false);
+  for (const node of $('inputQueue').querySelectorAll(':scope > .queued-input')) node.remove();
   for (const helper of pausedHelpers ?? []) {
     if (helper.sourceSessionId !== selectedId) continue;
     const row = el('div', 'queued-input');
-    row.append(el('span', '', '보조 대화의 전달이 확인되지 않았습니다. 기존 대화가 아직 실행 중일 수 있습니다.'));
-    const retry = el('button', 'btn', '새 보조 대화 시작');
+    row.append(el('span', '', () => t("Helper delivery was not confirmed. Its old chat may still be running.")));
+    const retry = el('button', 'btn', () => t("Start a new helper"));
     retry.setAttribute('type', 'button');
     retry.onclick = async () => {
       retry.setAttribute('disabled', '');
       const accepted = await run(api.retryHelper(helper.id, helper.sourceSessionId));
-      if (accepted) toast('이 대화의 새 판단용 보조 대화가 승인되었습니다.');
-      else toast('보조 대화 상태가 바뀌어 다시 확인합니다.');
+      if (accepted) toast(t("New helper authorized for this chat"));
+      else toast(t("This helper has changed. Refreshing its status."));
       void refreshInputQueue();
     };
     row.append(retry);
     $('inputQueue').append(row);
+  }
+}
+async function retryPlannedInput(entry: InputEntry): Promise<void> {
+  if (dismissedInputNotices.has(entry.id) || entry.stagesApplied || !['failed', 'cancelled'].includes(entry.state)) return;
+  // The outbox retains the authored workflow after failure. Retry that payload, not
+  // its stage-one display text, and never revive the old browser claim/receipt.
+  const { sessionId, projectId, text, objective, stages, images, attachments, attachmentDelivery, automation, loopAfterTurn, model, reasoningEffort, afterTurn } = entry;
+  const args: InputArgs = { id: crypto.randomUUID(), sessionId, projectId, text, objective, stages, images, attachments, attachmentDelivery,
+    automation, loopAfterTurn, model, reasoningEffort, afterTurn, mode: entry.requestedMode ?? entry.mode, dueAt: Date.now() };
+  const generation = selectionGeneration;
+  // Hide during the attempt, but persist dismissal only after its replacement is durable.
+  dismissedInputNotices.add(entry.id); void refreshInputQueue();
+  let accepted = false;
+  try {
+    if (entry.error === 'Requested model or reasoning could not be confirmed') {
+      const selection = await ensureComposerModel(true);
+      if (generation !== selectionGeneration || cancelledStarts.has(args.id)) return;
+      if (!selection) { toast(t("Model refresh could not confirm your selection. Choose an available model, then retry the plan.")); return; }
+      Object.assign(args, selection);
+    }
+    startingInputs.set(args.id, { ...args, state: 'queued', owner: null, createdAt: args.dueAt, conversationId: null });
+    if (sessionId === null) pendingNewInput = { id: args.id, generation };
+    paintDeliveryControls(); void refreshInputQueue();
+    const result = await run(api.sendInput(args));
+    if (cancelledStarts.has(args.id)) return;
+    if (!result) return;
+    accepted = true;
+    inputQueueGeneration++;
+    pendingComposerInputs = [...pendingComposerInputs.filter(row => row.id !== result.id), result];
+    await adoptAcceptedOpening(result);
+  } finally {
+    if (accepted) dismissInputNotice(entry.id);
+    if (!accepted && !cancelledStarts.has(args.id)) dismissedInputNotices.delete(entry.id);
+    if (!accepted && pendingNewInput?.id === args.id) pendingNewInput = null;
+    cancelledStarts.delete(args.id); startingInputs.delete(args.id);
+    paintDeliveryControls(); void refreshInputQueue();
   }
 }
 async function stopCurrentTurn(): Promise<void> {
@@ -3010,12 +3595,12 @@ async function stopCurrentTurn(): Promise<void> {
   finally { if (selectedId === id && selectionGeneration === generation) { controlledStopPending = false; void refreshSessionControls(); } }
 }
 let composerDiscoveryGeneration = 0;
-async function sendComposer(delivery?: 'finish', plan?: string[]): Promise<boolean | void> {
+async function sendComposer(delivery?: 'finish', plan?: string[], planObjective?: string): Promise<boolean | void> {
   const input = $<HTMLTextAreaElement>('chatInput');
   const key = draftKey();
   const projectId = selectedId ? sessions.find(row => row.id === selectedId)?.projectId ?? null : selectedProjectId;
   const images = imageDrafts.get(key) ?? [];
-  const text = plan?.[0] ?? (input.value.trim() || (images.length ? '첨부 파일을 확인해 주세요.' : ''));
+  const text = plan?.[0] ?? (input.value.trim() || (images.length ? 'Please look at the attached files.' : ''));
   if ($<HTMLButtonElement>('chatSend').disabled) return;
   if (!text) {
     const target = selectedId, selection = selectionGeneration;
@@ -3053,28 +3638,44 @@ async function sendComposer(delivery?: 'finish', plan?: string[]): Promise<boole
   if (discoveryGeneration !== composerDiscoveryGeneration || discoverySelection !== selectionGeneration || discoverySession !== selectedId ||
       input.value !== discoveryDraft || (imageDrafts.get(key) ?? []).some((image, index) => image !== images[index]) ||
       (imageDrafts.get(key)?.length ?? 0) !== images.length) return false;
-  if (!modelSettings) { toast('선택한 모델을 확인하지 못했습니다. 사용 가능한 모델·추론 강도를 선택한 뒤 다시 전송하세요.'); return false; }
+  if (!modelSettings) { toast(t("Model discovery could not confirm your selection. Choose an available model and thinking effort, then send again.")); return false; }
   const sessionId = selectedId;
   const generation = selectionGeneration;
   const chosenMode = delivery ?? $<HTMLSelectElement>('sendMode').value;
-  const mode = chosenMode === 'after-turn' && controlledSessionId === selectedId && controlledSelection === selectionGeneration && controlledQueueAtFinish ? 'finish' : chosenMode;
+  const mode = chosenMode === 'tool' ? 'auto' : chosenMode === 'after-turn' && controlledSessionId === selectedId && controlledSelection === selectionGeneration && controlledQueueAtFinish ? 'finish' : chosenMode;
   const dueAt = Date.now();
   const id = crypto.randomUUID();
   const authoredDraft = input.value;
-  const attachmentPayload = { images: images.filter((file): file is InputImage => 'dataUrl' in file), attachments: images.filter((file): file is InputAttachment => 'id' in file) };
-  const objective = plan ? authoredDraft.trim() : mode === 'finish' ? undefined : $<HTMLTextAreaElement>('sessionObjective').value.trim() || undefined;
-  startingInputs.set(id, { id, sessionId, projectId, text, ...attachmentPayload, stages: plan?.slice(1), objective, mode: mode === 'finish' ? 'finish' : mode === 'auto' ? 'auto' : 'after-turn',
+  const attachmentPayload = { images: images.filter((file): file is InputImage => 'dataUrl' in file), attachments: images.filter((file): file is InputAttachment => 'id' in file),
+    ...(chosenMode === 'tool' && !plan ? { delivery: 'tool' as const } : {}),
+    ...(mode === 'auto' && !plan && selectedId && controlledSessionId === selectedId && controlledSelection === generation &&
+      controlledCanInject && images.some(file => 'id' in file) && injectableAttachments(images) ? { attachmentDelivery: 'tool' as const } : {}) };
+  const objective = plan ? planObjective : mode === 'finish' ? undefined : $<HTMLTextAreaElement>('sessionObjective').value.trim() || undefined;
+  const authoredSource = plan ? 'objective' as const : 'text' as const;
+  startingInputs.set(id, { id, sessionId, projectId, text, ...attachmentPayload, stages: plan?.slice(1), objective, authoredSource, mode: mode === 'finish' ? 'finish' : mode === 'auto' ? 'auto' : 'after-turn',
     dueAt, ...modelSettings, state: 'queued', owner: null, createdAt: dueAt, conversationId: null });
-  input.value = ''; input.style.height = 'auto'; inputDrafts.delete(key);
+  replaceComposerDraft();
+  input.value = ''; inputDrafts.delete(key);
+  imageDrafts.delete(key); paintComposerImages();
   if (sessionId === null) pendingNewInput = { id, generation };
   void refreshInputQueue();
   paintDeliveryControls();
   try {
-    const result = await run(api.sendInput({ id, sessionId, projectId, text, ...attachmentPayload, stages: plan?.slice(1), objective, automation: mode === 'finish' ? undefined : $<HTMLSelectElement>('chatAutomation').value as InputAutomation, mode: mode === 'finish' ? 'finish' : mode === 'auto' ? 'auto' : 'after-turn', dueAt, ...modelSettings }));
+    const result = await run(api.sendInput({ id, sessionId, projectId, text, ...attachmentPayload, stages: plan?.slice(1), objective, authoredSource, automation: mode === 'finish' ? undefined : $<HTMLSelectElement>('chatAutomation').value as InputAutomation, loopAfterTurn: openingLoopDelivery(), mode: mode === 'finish' ? 'finish' : mode === 'auto' ? 'auto' : 'after-turn', dueAt, ...modelSettings }));
     if (cancelledStarts.has(id)) return;
     if (!result) {
+      // A disk failure after outbox commit still owns this input. Keep its exact
+      // queue/error visible rather than restoring a second copy into the composer.
+      const retained = (await run(api.listInputs()))?.find(row => row.id === id);
+      if (retained) {
+        pendingComposerInputs = [...pendingComposerInputs.filter(row => row.id !== id), retained];
+        await adoptAcceptedOpening(retained);
+        return true;
+      }
       if (selectedId === sessionId && selectionGeneration === generation && !input.value) input.value = authoredDraft;
       else if (!inputDrafts.get(key)) inputDrafts.set(key, authoredDraft);
+      if (images.length) imageDrafts.set(key, [...images, ...(imageDrafts.get(key) ?? [])]);
+      if (draftKey() === key) paintComposerImages();
       if (pendingNewInput?.id === id) pendingNewInput = null;
       return;
     }
@@ -3083,12 +3684,13 @@ async function sendComposer(delivery?: 'finish', plan?: string[]): Promise<boole
     inputQueueGeneration++;
     pendingComposerInputs = [...pendingComposerInputs.filter(row => row.id !== result.id), result];
     if (sessionId === null && selectionGeneration === generation && pendingNewInput?.id === id && result.automation &&
-        $<HTMLSelectElement>('chatAutomation').value !== result.automation)
-      await run(api.setInputAutomation(result.id, $<HTMLSelectElement>('chatAutomation').value as InputAutomation));
-    if (selectedId === sessionId && selectionGeneration === generation && (!input.value.trim())) { input.value = ''; inputDrafts.delete(key); if (imageDrafts.get(key) === images) imageDrafts.delete(key); paintComposerImages(); }
-    if (sessionId === null && selectionGeneration === generation) pendingNewInput = { id: result.id, generation };
+        ($<HTMLSelectElement>('chatAutomation').value !== result.automation || openingLoopDelivery() !== result.loopAfterTurn))
+      await run(api.setInputAutomation(result.id, $<HTMLSelectElement>('chatAutomation').value as InputAutomation, openingLoopDelivery()));
+    if (sessionId === null && selectionGeneration === generation) {
+      pendingNewInput = { id: result.id, generation };
+      await adoptAcceptedOpening(result);
+    }
     $('composerStatus').textContent = '';
-    input.style.height = 'auto';
     void refreshInputQueue();
     return true;
   } finally { cancelledStarts.delete(id); startingInputs.delete(id); paintDeliveryControls(); void refreshInputQueue(); }
@@ -3122,47 +3724,67 @@ function showView(name: string): void {
 }
 
 function selectSession(id: string): void {
+  const ownerChanged = id !== selectedId;
   rememberDraft();
-  selectionGeneration++;
+  selectionGeneration++; replaceComposerDraft();
   newChatSelected = false;
   selectedId = id;
   const selected = sessions.find(row => row.id === id);
-  applyComposerSessionModel(`${id}:${selectionGeneration}`, selected?.selectedModel ?? null);
+  applyComposerSessionModel(`${id}:${selectionGeneration}`, composerSessionSelection(selected) ?? null);
   const parent = selected?.origin?.kind === 'worker' ? selected.origin.fromSessionId : null;
   if (parent) expandedWorkers.add(parent);
-  selectedProjectId = (parent ? sessions.find(row => row.id === parent)?.projectId : selected?.projectId) ?? null;
-  if (selectedProjectId) collapsedProjects.delete(selectedProjectId);
-  $<HTMLTextAreaElement>('chatInput').placeholder = '메시지를 입력하세요…';
+  selectedProjectId = projectGroup(parent ? sessions.find(row => row.id === parent)?.projectId : selected?.projectId);
+  if (selectedProjectId) expandedProjects.add(selectedProjectId);
+  ui($<HTMLTextAreaElement>('chatInput'), 'placeholder', () => t("Ask anything…"));
   restoreDraft();
-  detailFor = null;
-  detailCursor = null;
-  forgetTimelineRows();
-  handoff = null;
-  handoffFor = null;
+  if (ownerChanged) {
+    // Retire the prior owner now; retain only its inert painted transcript until the
+    // selected detail arrives. Existing async image/load generation fences still apply.
+    events = [];
+    totalEvents = 0;
+    historyBefore = null;
+    detailFor = null;
+    detailCursor = null;
+    forgetTimelineRows();
+    $('timeline').setAttribute('inert', '');
+    $('timeline').setAttribute('aria-busy', 'true');
+    handoff = null;
+    handoffFor = null;
+    handoffLoadGeneration++;
+  }
   paintSessions();
+  if (ownerChanged) {
+    paintDetail(false);
+    paintHandoff();
+  }
   void loadDetail();
   void refreshInputQueue();
 }
 
 function selectNewChat(projectId: string | null = null): void {
-  rememberDraft(); selectionGeneration++; pendingNewInput = null;
+  rememberDraft(); selectionGeneration++; replaceComposerDraft(); pendingNewInput = null;
   newChatSelected = true; selectedId = null; selectedProjectId = projectId; detailFor = null; detailCursor = null;
+  if (projectId) expandedProjects.add(projectId);
   applyComposerSessionModel(null, null);
-  inputDrafts.delete(draftKey()); imageDrafts.delete(draftKey());
+  // New Chat selects its existing draft, just like a session. Navigation is not
+  // permission to discard authored text, attachments or a prepared workflow.
   $('inputQueue').replaceChildren();
   restoreDraft(); showView('timeline'); paintSessions(); void loadDetail();
   if (!window.matchMedia?.('(prefers-reduced-motion: reduce)').matches) {
     $('composer').animate?.([{ opacity: 0.45 }, { opacity: 1 }], { duration: 150, easing: 'ease-out' });
   }
-  $<HTMLTextAreaElement>('chatInput').placeholder = projectId ? `${projects.find(project => project.id === projectId)?.name ?? '프로젝트'}에 메시지 보내기…` : '메시지를 입력하세요…';
+  ui($<HTMLTextAreaElement>('chatInput'), 'placeholder', () => projectId ? t("Message in {0}…", [projects.find(project => project.id === projectId)?.name ?? 'project']) : t("Ask anything…"));
   $<HTMLTextAreaElement>('chatInput').focus();
 }
 
 export function initChat(next: Deps): void {
+  sidebarOrder = createSidebarOrder($('sessionList'), () => sessions
+    .filter(entry => (entry.conversationId || entry.origin?.kind === 'desktop') && entry.origin?.kind !== 'worker')
+    .map(entry => ({ id: entry.id, scope: projectGroup(entry.projectId) ?? '' })), paintSessions);
   deps = next;
   const agentToggle = el('button', 'btn btn-icon', '◫') as HTMLButtonElement;
   agentToggle.id = 'agentPanelToggle'; agentToggle.type = 'button'; agentToggle.hidden = true;
-  agentToggle.setAttribute('aria-label', '보조 에이전트 패널 표시 전환'); agentToggle.setAttribute('aria-expanded', 'false');
+  ui(agentToggle, 'aria-label', () => t("Toggle sub-agent side panel")); agentToggle.setAttribute('aria-expanded', 'false');
   $('themeBtn').before(agentToggle);
   const agentToolGroups = new Map<string, HTMLDetailsElement>();
   agentPanel = createAgentPanel({
@@ -3172,15 +3794,17 @@ export function initChat(next: Deps): void {
       let boundary = '';
       const rows = boundedTimeline(source).shown.flatMap(event => {
         if (!['tool_call', 'page_tool', 'agent_message'].includes(event.kind)) boundary = `event:${event.seq}`;
-        if (!['user_message', 'assistant_message', 'tool_call', 'page_tool', 'agent_message', 'chat_error'].includes(event.kind)) return [];
+        if (!['user_message', 'assistant_message', 'native_image', 'tool_call', 'page_tool', 'agent_message', 'chat_error'].includes(event.kind)) return [];
         const row = el('div', `ev ev-${event.kind}`); const body = el('div', 'ev-body');
+        tagImageRow(row, event);
         row.dataset.timelineKey = `event:${event.seq}`; row.dataset.activityBoundary = boundary;
-        body.append(eventBody(event, { id, current })); row.append(body); return [row];
+        body.append(eventBody(event, { id, current, history: source })); row.append(body); return [row];
       });
-      return groupToolRows(rows, `pane:${id}`, agentToolGroups);
+      return groupImageRows(groupToolRows(rows, `pane:${id}`, agentToolGroups));
     }
   });
   initChatModels(() => {
+    paintLoopDelivery();
     const config = deps.state()?.config;
     if (config) paintContextMeter(sessions.find(session => session.id === selectedId) ?? null, config, confirmedComposerModel());
   });
@@ -3212,6 +3836,13 @@ export function initChat(next: Deps): void {
     select.dataset.edited = 'true'; paintAutomationSwitch();
     const id = selectedId, generation = selectionGeneration;
     const mode = select.value as InputAutomation;
+    const opening = id && pendingComposerInputs.find(row => row.sessionId === id && row.opening && !row.deliveredAt && ['queued', 'browser'].includes(row.state));
+    if (opening) {
+      inputQueueGeneration++;
+      opening.automation = mode;
+      await run(api.setInputAutomation(opening.id, mode));
+      void refreshInputQueue(); return;
+    }
     if (!id) {
       const pending = pendingNewInput;
       if (pending?.generation === generation) await run(api.setInputAutomation(pending.id, mode));
@@ -3225,6 +3856,30 @@ export function initChat(next: Deps): void {
       paintAutomationSwitch();
     }
   });
+  $('loopDelivery').addEventListener('change', async () => {
+    const id = selectedId, generation = selectionGeneration;
+    const select = $<HTMLSelectElement>('loopDelivery');
+    const opening = id && pendingComposerInputs.find(row => row.sessionId === id && row.opening && !row.deliveredAt && ['queued', 'browser'].includes(row.state));
+    if (opening) {
+      inputQueueGeneration++;
+      opening.loopAfterTurn = select.value === 'after-turn';
+      opening.automation = $<HTMLSelectElement>('chatAutomation').value as InputAutomation;
+      await run(api.setInputAutomation(opening.id, opening.automation, opening.loopAfterTurn));
+      void refreshInputQueue(); return;
+    }
+    if (!id) {
+      const pending = pendingNewInput;
+      if (pending?.generation === generation)
+        await run(api.setInputAutomation(pending.id, $<HTMLSelectElement>('chatAutomation').value as InputAutomation, select.value === 'after-turn'));
+      return;
+    }
+    select.disabled = true;
+    try { await run(api.setSessionAutomation(id, 'loop', select.value === 'after-turn')); }
+    finally {
+      select.disabled = false;
+      if (id === selectedId && generation === selectionGeneration) void refreshSessionControls();
+    }
+  });
   $('sessionObjective').addEventListener('input', () => { cancelGoalRequest(); goalIntentGeneration++; $('sessionObjective').dataset.edited = 'true'; delete $('sessionObjective').dataset.saved; paintTaskActions(); });
   $('sessionObjectiveMode').addEventListener('change', () => { cancelGoalRequest(); goalIntentGeneration++; $('sessionObjective').dataset.edited = 'true'; delete $('sessionObjective').dataset.saved; paintTaskActions(); });
   for (const buttonId of ['saveSessionObjective'] as const) {
@@ -3235,7 +3890,7 @@ export function initChat(next: Deps): void {
         const draft = objective.value, mode = $<HTMLSelectElement>('sessionObjectiveMode').value as 'goal' | 'loop';
         if (!draft.trim()) return;
         const settings = confirmedComposerModel();
-        if (!settings) { toast('모델 목록을 새로고침하고 사용 가능한 모델·추론 강도를 선택한 뒤 전송하세요.'); return; }
+        if (!settings) { toast('Reload model choices and select an available model and thinking effort before sending.'); return; }
         const selection = selectionGeneration, intent = goalIntentGeneration, requestId = crypto.randomUUID();
         const projectId = selectedProjectId;
         const { model, reasoningEffort } = settings;
@@ -3250,9 +3905,10 @@ export function initChat(next: Deps): void {
           const opening = result.ok ? result.data : null;
           if (!result.ok && current() && goalProgress?.requestId === requestId) goalProgress.error = result.error;
           if (!current()) { if (goalProgress?.requestId === requestId) { goalProgress.phase = 'paused'; paintGoalProgress(); } return; }
-          if (!opening) { if (goalProgress?.requestId === requestId) { goalProgress.phase = 'failed'; goalProgress.error ||= '첫 메시지 생성 실패'; paintGoalProgress(); } return; }
+          if (!opening) { if (goalProgress?.requestId === requestId) { goalProgress.phase = 'failed'; goalProgress.error ||= 'Opening message generation failed'; paintGoalProgress(); } return; }
           const dueAt = Date.now(), inputId = crypto.randomUUID();
-          const entry: InputEntry = { id: inputId, sessionId: null, projectId, text: opening.reply, objective: draft.trim(), automation: mode,
+          const entry: InputEntry = { id: inputId, sessionId: null, projectId, text: opening.reply, objective: draft.trim(), authoredSource: 'objective', automation: mode,
+            loopAfterTurn: openingLoopDelivery(),
             mode: 'auto', dueAt, model, reasoningEffort, state: 'queued', owner: null, createdAt: dueAt, conversationId: null };
           startingInputs.set(inputId, entry); pendingNewInput = { id: inputId, generation: selection };
           goalProgress = { requestId, selection, inputId, phase: 'queued', text: '' }; paintDeliveryControls();
@@ -3261,10 +3917,12 @@ export function initChat(next: Deps): void {
             if (accepted) { inputQueueGeneration++; pendingComposerInputs = [...pendingComposerInputs.filter(row => row.id !== inputId), accepted];
               // Off may arrive while sendInput is still validating/enqueuing, before
               // the outbox row exists. Reconcile that same pending intent after acceptance.
-              if (selectionGeneration === selection && pendingNewInput?.id === inputId && automation.value !== mode)
-                await run(api.setInputAutomation(inputId, automation.value as InputAutomation));
+              if (selectionGeneration === selection && pendingNewInput?.id === inputId &&
+                  (automation.value !== mode || openingLoopDelivery() !== entry.loopAfterTurn))
+                await run(api.setInputAutomation(inputId, automation.value as InputAutomation, openingLoopDelivery()));
+              await adoptAcceptedOpening(accepted);
               if (current()) objective.dataset.saved = draft;
-            } else if (goalProgress?.requestId === requestId) { goalProgress.phase = 'failed'; goalProgress.error = '첫 메시지를 대기열에 추가하지 못했습니다'; }
+            } else if (goalProgress?.requestId === requestId) { goalProgress.phase = 'failed'; goalProgress.error = 'Opening message could not be queued'; }
           } finally { startingInputs.delete(inputId); paintDeliveryControls(); void refreshInputQueue(); }
         } finally { delete button.dataset.busy; paintTaskActions(); }
         return;
@@ -3278,7 +3936,7 @@ export function initChat(next: Deps): void {
       const requestId = crypto.randomUUID(); goalProgress = { requestId, selection, phase: 'saving', text: '' }; paintGoalProgress();
       try {
         const saved = await run(api.setSessionObjective(id, text, mode));
-        if (goalProgress?.requestId === requestId) { goalProgress.phase = saved ? 'saved' : 'failed'; if (!saved) goalProgress.error = '작업을 저장하지 못했습니다'; paintGoalProgress(); }
+        if (goalProgress?.requestId === requestId) { goalProgress.phase = saved ? 'saved' : 'failed'; if (!saved) goalProgress.error = 'Task could not be saved'; paintGoalProgress(); }
         if (saved && selectedId === id && selectionGeneration === selection && objective.value === draft &&
             $<HTMLSelectElement>('sessionObjectiveMode').value === mode) { delete objective.dataset.edited; objective.dataset.saved = objective.value; }
       } finally {
@@ -3295,16 +3953,19 @@ export function initChat(next: Deps): void {
       finally { button.disabled = false; if (selectedId === id) void refreshSessionControls(); }
     });
   }
-  const appendImages = (key: string, chosen: InputAttachment[] | null | undefined): void => {
+  const appendImages = (owner: ComposerDraftOwner, chosen: InputAttachment[] | null | undefined): void => {
     if (!chosen?.length) return;
-    const combined = [...(imageDrafts.get(key) ?? []), ...chosen];
-    if (combined.length > 20 || combined.reduce((sum, file) => sum + ('size' in file ? file.size : 0), 0) > 512 * 1024 * 1024) { toast('메시지당 최대 20개 파일·512MB까지 첨부할 수 있습니다'); return; }
-    imageDrafts.set(key, combined); if (draftKey() === key) paintComposerImages();
+    if (!ownsComposerDraft(owner)) { toast(t("Files were not added because the draft changed.")); return; }
+    const combined = [...(imageDrafts.get(owner.key) ?? []), ...chosen];
+    if (combined.length > 20 || combined.reduce((sum, file) => sum + ('size' in file ? file.size : 0), 0) > 512 * 1024 * 1024) { toast(t("Attach up to 20 files and 512 MB per message")); return; }
+    imageDrafts.set(owner.key, combined); paintComposerImages();
   };
   $('attachImages').addEventListener('click', async () => {
-    const key = draftKey();
-    appendImages(key, await run(api.chooseFiles()));
+    const owner = composerDraftOwner();
+    appendImages(owner, await run(api.chooseFiles()));
   });
+  skillPicker = initSkills({ input: $<HTMLTextAreaElement>('chatInput'), button: $('composerSkills'), host: $('skillPicker'),
+    owner: () => `${draftKey()}:${composerDraftGeneration}`, list: () => api.listSkills(), importFile: () => api.importSkill() });
   $('generateFinishGoal').addEventListener('click', async () => {
     const button = $<HTMLButtonElement>('generateFinishGoal'), id = selectedId, turnId = controlledTurnId;
     if (!id || !turnId || button.hidden || button.disabled || controlledSessionId !== id || controlledSelection !== selectionGeneration) return;
@@ -3318,24 +3979,34 @@ export function initChat(next: Deps): void {
     }
   });
   $('composer').addEventListener('dragover', event => {
-    if (!event.dataTransfer?.types.some(type => type === 'Files' || type === 'text/plain')) return;
+    if (!event.dataTransfer?.types.some(type => type === 'text/plain') || event.dataTransfer.types.includes('Files')) return;
     event.preventDefault(); event.dataTransfer.dropEffect = 'copy';
   });
   $('composer').addEventListener('drop', async event => {
-    if (!event.dataTransfer?.types.some(type => type === 'Files' || type === 'text/plain')) return;
+    if (!event.dataTransfer?.types.some(type => type === 'text/plain') || event.dataTransfer.types.includes('Files')) return;
     event.preventDefault();
-    const files = Array.from(event.dataTransfer.files), key = draftKey();
-    if (!files.length) { const text = event.dataTransfer.getData('text/plain'); if (text) { const file = await run(api.attachText(text)); if (file) appendImages(key, [file]); } return; }
-    if (files.length + (imageDrafts.get(key)?.length ?? 0) > 20) { toast('메시지당 최대 20개 파일까지 첨부할 수 있습니다'); return; }
-    appendImages(key, await run(api.dropFiles(files)));
+    const text = event.dataTransfer.getData('text/plain'), owner = composerDraftOwner();
+    if (text) { const file = await run(api.attachText(text)); if (file) appendImages(owner, [file]); }
   });
-  $('chatInput').addEventListener('paste', async event => {
+  window.addEventListener('paste', async event => {
     const files = Array.from(event.clipboardData?.files ?? []).filter(file => file.type.startsWith('image/'));
     if (!files.length) return;
     event.preventDefault();
-    const key = draftKey();
-    if (files.length + (imageDrafts.get(key)?.length ?? 0) > 20) { toast('메시지당 최대 20개 파일까지 첨부할 수 있습니다'); return; }
-    appendImages(key, await run(api.dropFiles(files)));
+    const owner = composerDraftOwner();
+    if (files.length + (imageDrafts.get(owner.key)?.length ?? 0) > 20) { toast('Attach up to 20 files per message'); return; }
+    appendImages(owner, await run(api.dropFiles(files)));
+  });
+  window.addEventListener('dragover', event => {
+    if ((event.target as Element | null)?.closest?.('#foldersCard') || !event.dataTransfer?.types?.includes?.('Files')) return;
+    event.preventDefault(); event.dataTransfer.dropEffect = 'copy';
+  });
+  window.addEventListener('drop', async event => {
+    if ((event.target as Element | null)?.closest?.('#foldersCard') || !event.dataTransfer?.types?.includes?.('Files')) return;
+    event.preventDefault();
+    const files = Array.from(event.dataTransfer.files), owner = composerDraftOwner();
+    if (!files.length) return;
+    if (files.length + (imageDrafts.get(owner.key)?.length ?? 0) > 20) { toast('Attach up to 20 files per message'); return; }
+    appendImages(owner, await run(api.dropFiles(files)));
   });
   api.onWriteSession?.(id => { selectSession(id); $<HTMLTextAreaElement>('chatInput').focus(); });
   $('newChat').addEventListener('click', () => {
@@ -3351,7 +4022,7 @@ export function initChat(next: Deps): void {
       // may still return an empty catalog and otherwise erase this sidebar group.
       ++sessionsLoadGeneration;
       projects = [...projects.filter(row => row.id !== project.id), project];
-      collapsedProjects.delete(project.id);
+      expandedProjects.add(project.id);
       if (generation === selectionGeneration) selectNewChat(project.id); else paintSessions();
     } finally { button.disabled = false; }
   });
@@ -3365,17 +4036,21 @@ export function initChat(next: Deps): void {
   document.addEventListener('keydown', (event) => { if (event.key === 'Escape') for (const menu of composerMenus) menu.open = false; });
   $('chatInput').addEventListener('input', () => {
     const hasText = !!$<HTMLTextAreaElement>('chatInput').value.trim();
-    if (planRequestId || preparedPlan || (planMode && !hasText)) { cancelTaskPlan(); planMode = hasText; }
-    const input = $<HTMLTextAreaElement>('chatInput'); input.style.height = 'auto'; input.style.height = `${Math.min(220, input.scrollHeight)}px`;
+    const plan = taskPlans.get(draftKey());
+    if (plan && !plan.stages && (plan.requestId || !hasText)) {
+      cancelTaskPlan();
+      if (hasText) taskPlans.set(draftKey(), { text: '', requestId: null, stages: null, sending: false, progress: null, error: null });
+    }
     paintDeliveryControls(); paintTaskActions();
   });
   $('chatInput').addEventListener('keydown', (event) => {
-    if (event.key === 'Enter' && !event.shiftKey && !event.isComposing) { event.preventDefault(); if ($<HTMLTextAreaElement>('chatInput').value.trim() || imageDrafts.get(draftKey())?.length) $<HTMLFormElement>('composer').requestSubmit(); }
+    if (skillPicker?.keydown(event)) return;
+    if (event.key === 'Enter' && !event.shiftKey && !event.isComposing) { event.preventDefault(); if (currentPreparedPlan() || $<HTMLTextAreaElement>('chatInput').value.trim() || imageDrafts.get(draftKey())?.length) $<HTMLFormElement>('composer').requestSubmit(); }
   });
   $('composerSettings').addEventListener('toggle', paintTaskActions);
   initContextMeter();
-  $('createPlan').addEventListener('click', () => { if (planMode) cancelTaskPlan(); else void createTaskPlan(deps.state()?.config.ui.planBackend ?? 'chatgpt'); });
-  $('composer').addEventListener('submit', (event) => { event.preventDefault(); if (preparedPlan) void sendPreparedPlan(); else if (planMode) { if (!$('createPlan').dataset.busy) void createTaskPlan(deps.state()?.config.ui.planBackend ?? 'chatgpt'); } else void sendComposer(); });
+  $('createPlan').addEventListener('click', () => { if (taskPlans.has(draftKey())) cancelTaskPlan(); else void createTaskPlan(deps.state()?.config.ui.planBackend ?? 'chatgpt'); });
+  $('composer').addEventListener('submit', (event) => { event.preventDefault(); if (currentPreparedPlan()) void sendPreparedPlan(); else if (taskPlans.has(draftKey())) { if (!$('createPlan').dataset.busy) void createTaskPlan(deps.state()?.config.ui.planBackend ?? 'chatgpt'); } else void sendComposer(); });
 
   $('sessionList').addEventListener('click', (event) => {
     const row = (event.target as HTMLElement).closest<HTMLElement>('[data-id]');
@@ -3398,7 +4073,7 @@ export function initChat(next: Deps): void {
     if (newer) {
       const from = events.reduce((cursor, event) => Math.max(cursor, event.seq + 1), 0);
       historyLoading = true;
-      void loadDetail(true, false, from).finally(() => { historyLoading = false; });
+      void loadDetail(true, undefined, from).finally(() => { historyLoading = false; });
       return;
     }
     const windowed = boundedTimeline(visibleEvents());
@@ -3406,7 +4081,7 @@ export function initChat(next: Deps): void {
     const before = boundaryRows.length ? Math.min(...boundaryRows.map(event => event.seq)) : 1;
     if (before <= 1) return;
     historyLoading = true;
-    void navigateHistory(before, true).finally(() => { historyLoading = false; });
+    void loadDetail(true, before).finally(() => { historyLoading = false; });
   };
   historyPane.addEventListener('wheel', event => { historyIntent = selectedId; historyDirection = Math.sign(event.deltaY); loadAtEdge(); }, { passive: true });
   let pointerScrollTop: number | null = null;
@@ -3445,14 +4120,14 @@ export function initChat(next: Deps): void {
   $('copyHandoff').addEventListener('click', async () => {
     if (!handoff) return;
     const copied = await run(api.writeClipboard(handoff.text));
-    if (copied) toast('이어가기 요약을 복사했습니다.');
+    if (copied) toast('Handoff copied');
   });
 
   $('swarmReset').addEventListener('click', async () => {
     const state = await run(api.resetSwarm());
     if (state) {
       paintSwarm(state);
-      toast('에이전트 그룹을 초기화했습니다.');
+      toast('Swarm cleared');
     }
   });
 
@@ -3468,9 +4143,9 @@ export function initChat(next: Deps): void {
     paintSwarm(outcome.swarm);
     toast(
       outcome.cleared === 'run'
-        ? '실행을 초기화하고 모든 작업자를 종료했습니다.'
+        ? 'Run cleared — every worker ended'
         : outcome.cleared === 'worker'
-          ? `${id} 초기화됨 — 실행 슬롯 반환`
+          ? `${id} cleared — its slot is free`
           : outcome.reason
     );
   });
@@ -3480,7 +4155,7 @@ export function initChat(next: Deps): void {
       if (id === 'goalProvider' && $<HTMLSelectElement>('goalProvider').value === 'opencodex') {
         $<HTMLInputElement>('goalBaseUrl').value = OPENCODEX_BASE_URL;
         $<HTMLInputElement>('goalCustomModel').value = 'gpt-6-astra';
-        $<HTMLSelectElement>('goalReasoning').value = 'high';
+        paintGoalReasoning('high');
       }
       void deps.save();
     });
@@ -3490,11 +4165,11 @@ export function initChat(next: Deps): void {
 
   $('bridgeUnpair').addEventListener('click', async () => {
     const state = await run(api.unpairExtension());
-    if (state) toast('브라우저 연결을 해제했습니다.');
+    if (state) toast('Browser disconnected');
   });
   $('bridgeFolder').addEventListener('click', async () => {
     const dir = await run(api.openExtensionFolder());
-    if (dir) toast('확장 폴더를 열었습니다.');
+    if (dir) toast('Extension folder opened');
   });
 
   api.onSessionChanged(scheduleReload);

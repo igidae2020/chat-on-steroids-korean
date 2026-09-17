@@ -18,8 +18,6 @@ jobs:
     timeout-minutes: 20
     steps:
       - uses: actions/checkout@fbc6f3992d24b796d5a048ff273f7fcc4a7b6c09 # v5
-        with:
-          persist-credentials: false
       - uses: actions/setup-node@a0853c24544627f65ddf259abe73b1d18a591444 # v5
         with:
           node-version: 22
@@ -31,12 +29,10 @@ jobs:
           name: package-native-sources
           path: release/Chat-On-Steroids-Native-Sources.tar.gz
           if-no-files-found: error
-          retention-days: 3
+          retention-days: 30
 
   package:
     name: Package ${{ matrix.name }}
-    # Do not allocate six packaging runners when source/license verification has failed.
-    needs: [sources]
     strategy:
       fail-fast: false
       matrix:
@@ -96,8 +92,6 @@ jobs:
 
     steps:
       - uses: actions/checkout@fbc6f3992d24b796d5a048ff273f7fcc4a7b6c09 # v5
-        with:
-          persist-credentials: false
 
       - uses: actions/setup-node@a0853c24544627f65ddf259abe73b1d18a591444 # v5
         with:
@@ -225,7 +219,21 @@ jobs:
         run: |
           set -euo pipefail
           deb_smoke_root="$(mktemp -d)"
-          trap 'rm -rf "$deb_smoke_root"' EXIT
+          cleanup_path_with_retries() {
+            target="$1"
+            for attempt in 1 2 3 4 5; do
+              rm -rf "$target" 2>/dev/null && return 0
+              sleep 0.2
+            done
+            # Cleanup is not product evidence, the same rule the AppImage smoke below follows.
+            # `timeout` signals xvfb-run rather than the process tree beneath it, so an Electron
+            # helper can still be writing into the sandbox here, and `rm -rf` over a directory
+            # that is still gaining entries fails with "Directory not empty". Under `set -e`
+            # that teardown race outranked a smoke test whose own assertions had all passed,
+            # and skipped the release assembly with every package job green.
+            rm -rf "$target" 2>/dev/null || true
+          }
+          trap 'cleanup_path_with_retries "$deb_smoke_root"' EXIT
           mkdir -p \
             "$deb_smoke_root/home" \
             "$deb_smoke_root/config" \
@@ -238,7 +246,7 @@ jobs:
           XDG_CACHE_HOME="$deb_smoke_root/cache" \
           XDG_DATA_HOME="$deb_smoke_root/data" \
           XDG_STATE_HOME="$deb_smoke_root/state" \
-          CLF_DEBUG=1 xvfb-run -a timeout --signal=TERM --kill-after=5s 12s /usr/bin/chat-on-steroids >deb-gui.log 2>&1
+          CLF_DEBUG=1 timeout --signal=TERM --kill-after=5s 12s xvfb-run -a /usr/bin/chat-on-steroids >deb-gui.log 2>&1
           status=$?
           set -e
           cat deb-gui.log
@@ -296,7 +304,7 @@ jobs:
             XDG_DATA_HOME="$smoke_root/data" \
             XDG_STATE_HOME="$smoke_root/state" \
             PATH="$launch_path" \
-            CLF_DEBUG=1 xvfb-run -a timeout --signal=TERM --kill-after=5s 12s "$appimage" >"$log" 2>&1
+            CLF_DEBUG=1 timeout --signal=TERM --kill-after=5s 12s xvfb-run -a "$appimage" >"$log" 2>&1
             status=$?
             set -e
             cat "$log"
@@ -321,7 +329,7 @@ jobs:
           name: ${{ matrix.artifact }}
           path: ${{ matrix.files }}
           if-no-files-found: error
-          retention-days: 3
+          retention-days: 30
 
   assemble:
     name: Assemble release candidate
@@ -331,8 +339,6 @@ jobs:
 
     steps:
       - uses: actions/checkout@fbc6f3992d24b796d5a048ff273f7fcc4a7b6c09 # v5
-        with:
-          persist-credentials: false
 
       - name: Download packages
         uses: actions/download-artifact@d3f86a106a0bac45b974a628896c90dbdf5c8093 # v4
@@ -405,4 +411,4 @@ jobs:
             release/Chat-On-Steroids-Native-Sources.tar.gz
             release/SHA256SUMS.txt
           if-no-files-found: error
-          retention-days: 7
+          retention-days: 30

@@ -6,6 +6,7 @@ import { TaskRequestError } from '../src/main/task-request.js';
 const hooks = vi.hoisted(() => ({ caller: { sessionId: '', conversationId: '' }, startedAt: 2000, followup: vi.fn(), enqueue: vi.fn(), hasInput: true, delivered: [] as Array<{ id: string; sessionId: string; text: string; state: string }>, inputListeners: new Set<() => void>() }));
 vi.mock('../src/main/session/input.js', () => ({
   hasEligibleToolInput: async () => hooks.hasInput,
+  finishNeedsBrowserInput: async () => false,
   listInputs: async () => hooks.delivered,
   enqueueInput: hooks.enqueue,
   onInputChange: (listener: () => void) => { hooks.inputListeners.add(listener); return () => hooks.inputListeners.delete(listener); }
@@ -16,10 +17,10 @@ vi.mock('../src/main/mcp/call-context.js', async (importOriginal) => ({
 }));
 const { defaultConfig, initConfigPath, saveConfig } = await import('../src/main/config.js');
 const { initSessionStore, createSession, getSession, rebindSession, appendEvent, readRecentEvents, flushSessions, resetSessionStoreForTests, observeSessionModel } = await import('../src/main/session/store.js');
-const recorder = await import('../src/main/session/recorder.js');
-const { resetRecorderForTests } = recorder;
-const { announceSessionFinish: announceTransport, settleSessionFinishForTests, requestSessionFinishGoal, sessionFinishWaiting, setFinishNotifier, releaseSessionFinish, sessionFinishHeld } = await import('../src/main/session/finish.js');
-const { faultGate, makeTempDir, removeTempDir } = await import('./helpers.js');
+const { resetRecorderForTests } = await import('../src/main/session/recorder.js');
+const { announceSessionFinish: announceTransport, sessionFinishDeadline, settleSessionFinishForTests, requestSessionFinishGoal, sessionFinishWaiting, setFinishNotifier, releaseSessionFinish, sessionFinishHeld, getSessionFinishDraft } = await import('../src/main/session/finish.js');
+const { setGoalSwitchNow, automaticFinishEnabled, snapshotGoalSwitches, restoreGoalSwitches, registerGoalDecisionChat } = await import('../src/main/goal.js');
+const { makeTempDir, removeTempDir } = await import('./helpers.js');
 async function announceSessionFinish(sessionId: string, summary: string): Promise<string> {
   const result = await announceTransport(sessionId, summary);
   await settleSessionFinishForTests();
@@ -38,7 +39,7 @@ beforeEach(async () => {
   hooks.enqueue.mockReset().mockImplementation(async (input, owner) => ({ ...input, finishOwner: owner, state: 'queued' }));
   notify.mockReset(); setFinishNotifier(notify);
   await saveConfig({ ...defaultConfig(), ui: { ...defaultConfig().ui, finishTool: true, finishAction: 'goal' },
-    goal: { ...defaultConfig().goal, includeToolCalls: true } });
+    goal: { ...defaultConfig().goal, enabled: true, includeToolCalls: true } });
   const conversationId = randomUUID();
   const session = await createSession({ conversationId, title: 'Finish test' });
   sessionId = session.id;
@@ -53,26 +54,106 @@ afterEach(() => {
 });
 afterAll(async () => { setFinishNotifier(null); resetSessionStoreForTests(); await removeTempDir(directory); });
 describe('session finish turn identity', () => {
-  it('keeps one Goal operation through transient retries and queues its eventual result once', async () => {
-    const provider = faultGate();
-    hooks.followup.mockImplementationOnce(async () => {
-      await provider.hold();
-      throw new TaskRequestError('rate_limited: busy', true);
+  it.each(['goal', 'loop'] as const)('honours explicit chat %s Off over the global automatic finish default, including restore', async mode => {
+    await setGoalSwitchNow(hooks.caller.conversationId, mode, true);
+    await setGoalSwitchNow(hooks.caller.conversationId, mode, false);
+    restoreGoalSwitches(snapshotGoalSwitches());
+    const visibleDrafts: unknown[] = [];
+    notify.mockImplementation(() => { visibleDrafts.push(getSessionFinishDraft(sessionId, 'turn-one')); });
+    const result = await announceSessionFinish(sessionId, 'Wrapping up with automation off');
+    await announceSessionFinish(sessionId, 'Still waiting for the user');
+    expect(automaticFinishEnabled(hooks.caller.conversationId)).toBe(false);
+    expect(result).not.toContain('Automatic Goal generation');
+    expect(hooks.followup).not.toHaveBeenCalled();
+    expect(hooks.enqueue).not.toHaveBeenCalled();
+    expect(notify).toHaveBeenCalledTimes(1);
+    expect(visibleDrafts).toEqual([null]);
+  });
+  it('does not let the global automatic finish default arm a decision helper', async () => {
+    await registerGoalDecisionChat(hooks.caller.conversationId);
+    expect(automaticFinishEnabled(hooks.caller.conversationId)).toBe(false);
+    await announceSessionFinish(sessionId, 'Helper is not an executor');
+    expect(hooks.followup).not.toHaveBeenCalled();
+    expect(hooks.enqueue).not.toHaveBeenCalled();
+  });
+  it('aborts an in-flight finish decision only when its own chat switches Off, even if re-enabled before a late reply', async () => {
+    let complete!: (text: string) => void;
+    let signal!: AbortSignal;
+    hooks.followup.mockImplementationOnce((_id, currentSignal) => {
+      signal = currentSignal;
+      return new Promise<string>(resolve => { complete = resolve; });
     });
-    await announceTransport(sessionId, 'Ready');
-    // Draft admission first writes a real durable reservation. Its completion, not a
-    // one-second polling budget, owns when this test may start advancing the retry clock.
-    await provider.entered;
+    await announceTransport(sessionId, 'Wrapping up');
+    await vi.waitFor(() => expect(complete).toBeTypeOf('function'));
+    try {
+      expect(getSessionFinishDraft(sessionId, 'turn-one')?.stage).toBe('sending');
+      expect(getSessionFinishDraft('another-session', 'turn-one')).toBeNull();
+      await setGoalSwitchNow(randomUUID(), 'goal', false);
+      expect(signal.aborted).toBe(false);
+      await setGoalSwitchNow(hooks.caller.conversationId, 'goal', false);
+      const abortedWhileOff = signal.aborted;
+      await setGoalSwitchNow(hooks.caller.conversationId, 'goal', true);
+      complete('A late reply from the revoked request');
+      await settleSessionFinishForTests();
+      expect(abortedWhileOff).toBe(true);
+      expect(hooks.enqueue).not.toHaveBeenCalled();
+      expect(getSessionFinishDraft(sessionId, 'turn-one')).toBeNull();
+    } finally {
+      complete('Release the test provider');
+      await settleSessionFinishForTests();
+    }
+  });
+  it('cancels a pending finish retry when its chat switches Off despite the global automatic default', async () => {
+    let fail!: (error: Error) => void;
+    hooks.followup.mockImplementationOnce(() => new Promise((_resolve, reject) => { fail = reject; }));
+    await announceTransport(sessionId, 'Wrapping up');
+    await vi.waitFor(() => expect(fail).toBeTypeOf('function'));
     vi.useFakeTimers({ toFake: ['setTimeout', 'clearTimeout'] });
-    provider.release();
+    try {
+      fail(new TaskRequestError('http_503: busy', true));
+      await vi.advanceTimersByTimeAsync(0);
+      await setGoalSwitchNow(hooks.caller.conversationId, 'goal', false);
+      await vi.advanceTimersByTimeAsync(15_000);
+    } finally { vi.useRealTimers(); }
+    await settleSessionFinishForTests();
+    expect(hooks.followup).toHaveBeenCalledTimes(1);
+    expect(hooks.enqueue).not.toHaveBeenCalled();
+    expect(getSessionFinishDraft(sessionId, 'turn-one')).toBeNull();
+  });
+  it('spends only the remaining ingress budget after late identity resolution', async () => {
+    hooks.hasInput = false;
+    let complete!: (text: string) => void;
+    hooks.followup.mockImplementationOnce(() => new Promise<string>(resolve => { complete = resolve; }));
+    vi.useFakeTimers({ toFake: ['setTimeout', 'clearTimeout', 'Date'] });
+    const ingress = Date.now() - 24_000;
+    let settled = false;
+    const call = announceTransport(sessionId, 'Ready', sessionFinishDeadline(ingress)).then(value => { settled = true; return value; });
+    try {
+      await vi.waitFor(() => expect(hooks.followup).toHaveBeenCalledTimes(1));
+      await vi.advanceTimersByTimeAsync(1_000);
+      expect(settled).toBe(true);
+      expect(await call).toContain('HELD:');
+    } finally {
+      complete('Continue verification');
+      await settleSessionFinishForTests();
+      vi.useRealTimers();
+    }
+  });
+  it('keeps one Goal operation through transient retries and queues its eventual result once', async () => {
+    let fail!: (error: Error) => void;
+    hooks.followup.mockImplementationOnce(() => new Promise((_resolve, reject) => { fail = reject; }));
+    await announceTransport(sessionId, 'Ready');
+    await vi.waitFor(() => expect(fail).toBeTypeOf('function'));
+    vi.useFakeTimers();
+    fail(new TaskRequestError('rate_limited: busy', true));
     await vi.advanceTimersByTimeAsync(0);
     await announceTransport(sessionId, 'Still waiting');
     await vi.advanceTimersByTimeAsync(14999);
     expect(hooks.followup).toHaveBeenCalledTimes(1);
     expect(hooks.enqueue).not.toHaveBeenCalled();
     await vi.advanceTimersByTimeAsync(1);
-    await settleSessionFinishForTests();
     vi.useRealTimers();
+    await settleSessionFinishForTests();
     expect(hooks.followup).toHaveBeenCalledTimes(2);
     expect(hooks.enqueue).toHaveBeenCalledTimes(1);
     expect(hooks.enqueue).toHaveBeenCalledWith(expect.objectContaining({ sessionId, mode: 'auto', text: 'Check the remaining requirement' }),
@@ -81,30 +162,18 @@ describe('session finish turn identity', () => {
     expect(hooks.followup).toHaveBeenCalledTimes(2);
   });
   it.each(['new input', 'turn release'])('cancels a pending Goal retry on %s', async reason => {
-    const provider = faultGate();
-    let retryPublished!: () => void;
-    const retryReady = new Promise<void>(resolve => { retryPublished = resolve; });
-    const record = recorder.recordProgress;
-    vi.spyOn(recorder, 'recordProgress').mockImplementation(async (...args) => {
-      const result = await record(...args);
-      if (args[0] === sessionId && args[2].startsWith('Goal temporarily unavailable')) retryPublished();
-      return result;
-    });
-    hooks.followup.mockImplementationOnce(async () => {
-      await provider.hold();
-      throw new TaskRequestError('http_503: busy', true);
-    });
+    let fail!: (error: Error) => void;
+    hooks.followup.mockImplementationOnce(() => new Promise((_resolve, reject) => { fail = reject; }));
     await announceTransport(sessionId, 'Ready');
-    await provider.entered;
-    provider.release();
-    await retryReady;
-    // Cancellation is event-driven, not a retry-deadline test. Keep real timers until
-    // the durable release's recorder notification has aborted and settled this owner;
-    // useRealTimers previously deleted that queued notification before it could run.
+    await vi.waitFor(() => expect(fail).toBeTypeOf('function'));
+    vi.useFakeTimers();
+    fail(new TaskRequestError('http_503: busy', true));
+    await vi.advanceTimersByTimeAsync(0);
     if (reason === 'new input') {
       hooks.delivered.push({ id: 'new-user-work', sessionId, text: 'Changed instructions', state: 'sent' });
       for (const listener of hooks.inputListeners) listener();
     } else await releaseSessionFinish(sessionId, 'turn-one');
+    vi.useRealTimers();
     await settleSessionFinishForTests();
     expect(hooks.followup).toHaveBeenCalledTimes(1);
     expect(hooks.enqueue).not.toHaveBeenCalled();
@@ -129,6 +198,7 @@ describe('session finish turn identity', () => {
   });
   it('notifies once with exact turn identity and supports a user-requested Goal in notify mode', async () => {
     await saveConfig({ ...defaultConfig(), ui: { ...defaultConfig().ui, finishTool: true, finishAction: 'notify' } });
+    await setGoalSwitchNow(hooks.caller.conversationId, 'goal', false);
     await announceSessionFinish(sessionId, 'Ready');
     await announceSessionFinish(sessionId, 'Again');
     expect(notify).toHaveBeenCalledTimes(1);
@@ -192,7 +262,7 @@ describe('session finish turn identity', () => {
   });
   it('does not bill another decision for tool output excluded from the actual provider context', async () => {
     await saveConfig({ ...defaultConfig(), ui: { ...defaultConfig().ui, finishTool: true, finishAction: 'goal' },
-      goal: { ...defaultConfig().goal, includeToolCalls: false } });
+      goal: { ...defaultConfig().goal, enabled: true, includeToolCalls: false } });
     await announceSessionFinish(sessionId, 'First check');
     await appendEvent(sessionId, { source: 'mcp', kind: 'tool_call', turnId: 'turn-one', time: 3000,
       call: { callId: randomUUID(), tool: 'read', attribution: 'request_id', requestId: 'tool-context', conversationId: hooks.caller.conversationId, attributionMethod: 'request_id', args: { text: '{}', chars: 2, truncated: false },
@@ -334,7 +404,7 @@ describe('session finish turn identity', () => {
     expect(identities.has('finish:turn-one')).toBe(false);
     expect([...identities].filter(id => id?.startsWith('finish-goal:turn-one:'))).toHaveLength(1);
   });
-  it('ignores its own empty wait output but reconsiders real tool results and delivered app input', async () => {
+  it('does not repeat for tool-only work even with legacy opt-in, but reconsiders delivered app input', async () => {
     const recordTool = (tool: string, result: string) => appendEvent(sessionId, {
       source: 'mcp', kind: 'tool_call', turnId: 'turn-one', time: 2200,
       call: { callId: randomUUID(), tool, attribution: 'request_id', requestId: 'same-server-turn', conversationId: hooks.caller.conversationId,
@@ -348,13 +418,13 @@ describe('session finish turn identity', () => {
     expect(hooks.followup).toHaveBeenCalledTimes(1);
     await recordTool('exec_command', 'The validation exposed a missing requirement');
     await announceSessionFinish(sessionId, 'Real tool output');
-    expect(hooks.followup).toHaveBeenCalledTimes(2);
+    expect(hooks.followup).toHaveBeenCalledTimes(1);
     hooks.delivered.push({ id: 'new-instruction', sessionId, text: 'Also cover the image workflow', state: 'tool' });
     await announceSessionFinish(sessionId, 'New app instruction');
-    expect(hooks.followup).toHaveBeenCalledTimes(2); // Undelivered user input goes first.
+    expect(hooks.followup).toHaveBeenCalledTimes(1); // Undelivered user input goes first.
     hooks.delivered[0]!.state = 'sent';
     await announceSessionFinish(sessionId, 'ACK alone');
-    expect(hooks.followup).toHaveBeenCalledTimes(3);
+    expect(hooks.followup).toHaveBeenCalledTimes(2);
     expect(notify).not.toHaveBeenCalled();
   });
   it('reconsiders new authored progress once while preserving the notification receipt', async () => {

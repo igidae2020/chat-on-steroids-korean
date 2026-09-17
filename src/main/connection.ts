@@ -13,8 +13,9 @@ import { effectiveCapabilities, getConfig } from './config.js';
 import { logError, logInfo, logWarn } from './logger.js';
 import { lastRequestAt, startMcpServer, tunnelProbeHeaders, type McpEndpoint } from './mcp/server.js';
 import { lastToolCallAt } from './mcp/tools.js';
-import { SURFACE_LIST, surfaceIsUseful, type SurfaceId } from './mcp/surfaces.js';
+import { SURFACE_LIST, surfaceIsUseful, desktopToolNames, type SurfaceId } from './mcp/surfaces.js';
 import { getSecret } from './secrets.js';
+import { setupApiKeySlot } from '../shared/setup-profile.js';
 import { startTunnel, TunnelError, type TunnelHandle } from './tunnel/index.js';
 import { desktopAutomationSupported } from './platform.js';
 import { publishPluginSurface, unpublishPluginSurface, pluginRefreshPublications } from './plugin-refresh.js';
@@ -30,7 +31,7 @@ const optionalSurfaces: OptionalSurface[] = ['desktop', 'plugins'];
 const optionalTunnelId = (settings: TunnelSettings, id: OptionalSurface): string =>
   (id === 'desktop' ? settings.desktopTunnelId : settings.pluginsTunnelId) ?? '';
 /** Core-affecting transport settings the current run actually started with. */
-let activeCoreTransport: Pick<TunnelSettings, 'kind' | 'tunnelId' | 'binaryPath'> | null = null;
+let activeCoreTransport: Pick<TunnelSettings, 'kind' | 'tunnelId' | 'binaryPath' | 'profileEpoch'> | null = null;
 let status: ConnectionStatus = {
   state: 'disconnected',
   detail: '',
@@ -133,7 +134,7 @@ function describeSurfaces(): SurfaceStatus[] {
 
 function desktopUnavailableDetail(id: SurfaceId): string {
   if (id === 'desktop' && !desktopAutomationSupported()) {
-    return 'Desktop automation requires Windows or macOS; Linux is not yet supported. Core files, terminal, sessions and sub-agents remain available.';
+    return 'Enable screen or input access for browser control through the companion extension. Native desktop input requires Windows or supported macOS.';
   }
   return id === 'desktop'
     ? 'Turn on "See the screen", "Control mouse and keyboard" or a clipboard permission to use this connector.'
@@ -146,8 +147,7 @@ function toolsFor(id: SurfaceId): string[] {
   const config = getConfig();
   const caps = effectiveCapabilities(config);
   if (id === 'desktop') {
-    const computer = caps.control || caps.clipboardRead || caps.clipboardWrite;
-    return [...(caps.screen ? ['observe'] : []), ...(computer ? ['computer'] : [])];
+    return desktopToolNames(caps);
   }
   const tools: string[] = [];
   if (caps.read || caps.browse || caps.metadata) tools.push('read');
@@ -155,8 +155,7 @@ function toolsFor(id: SurfaceId): string[] {
   if (!caps.command && caps.search) tools.push('find');
   if (caps.create || caps.edit || caps.move || caps.deleteFile) tools.push('apply_patch');
   if (caps.command) tools.push('exec_command', 'write_stdin');
-  if (caps.saveArtifact) tools.push('download_artifact');
-  if (config.sessions.record) tools.push('session');
+  if (config.sessions.record) tools.push('update_plan');
   if (config.multiAgent.enabled) tools.push('agents');
   return tools;
 }
@@ -192,19 +191,20 @@ function surfaceStateForConnection(state: ConnectionStatus['state']): SurfaceSta
  * Irrelevant fields are normalised out too, so editing a hidden OpenAI id while Cloudflare is
  * active does not bounce a perfectly good connection.
  */
-function coreTransport(settings: TunnelSettings): Pick<TunnelSettings, 'kind' | 'tunnelId' | 'binaryPath'> {
+function coreTransport(settings: TunnelSettings): Pick<TunnelSettings, 'kind' | 'tunnelId' | 'binaryPath' | 'profileEpoch'> {
   return {
     kind: settings.kind,
+    profileEpoch: settings.kind === 'openai' ? settings.profileEpoch ?? 0 : 0,
     tunnelId: settings.kind === 'openai' ? settings.tunnelId : '',
     binaryPath: settings.kind === 'manual' ? '' : settings.binaryPath
   };
 }
 
 function sameCoreTransport(
-  left: Pick<TunnelSettings, 'kind' | 'tunnelId' | 'binaryPath'>,
-  right: Pick<TunnelSettings, 'kind' | 'tunnelId' | 'binaryPath'>
+  left: Pick<TunnelSettings, 'kind' | 'tunnelId' | 'binaryPath' | 'profileEpoch'>,
+  right: Pick<TunnelSettings, 'kind' | 'tunnelId' | 'binaryPath' | 'profileEpoch'>
 ): boolean {
-  return left.kind === right.kind && left.tunnelId === right.tunnelId && left.binaryPath === right.binaryPath;
+  return left.profileEpoch === right.profileEpoch && left.kind === right.kind && left.tunnelId === right.tunnelId && left.binaryPath === right.binaryPath;
 }
 
 /**
@@ -274,7 +274,7 @@ async function connectImpl(): Promise<void> {
     if (desktopAutomationSupported() && (caps.screen || caps.control)) void prewarmComputerHelper();
     updateSurface('core', { state: 'starting', detail: 'Connecting…' });
 
-    const apiKey = await getSecret('openaiApiKey');
+    const apiKey = await getSecret(setupApiKeySlot(config.tunnel.profileId));
     if (shutdownRequested || generation !== connectionGeneration) {
       await disconnectImpl(30_000);
       return;
@@ -451,7 +451,7 @@ async function applySettingsImpl(): Promise<void> {
     }
     if (optionalTunnels.get(id)?.tunnelId === optionalTunnelId(config.tunnel, id)) continue;
     await stopOptionalTunnel(id, 'Reconnecting with the new tunnel…');
-    await startOptionalTunnel(id, connectionGeneration, config.tunnel, await getSecret('openaiApiKey'));
+    await startOptionalTunnel(id, connectionGeneration, config.tunnel, await getSecret(setupApiKeySlot(config.tunnel.profileId)));
   }
 }
 

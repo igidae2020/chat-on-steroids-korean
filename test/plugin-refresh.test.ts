@@ -13,6 +13,7 @@ let directory = '';
 beforeEach(async () => { vi.useFakeTimers({ toFake: ['Date', 'setTimeout', 'clearTimeout'] }); wake.mockClear(); resetPluginRefreshForTests(); resetDurableForTests(); directory = await makeTempDir(); initDurableStore(directory); });
 afterEach(async () => { resetPluginRefreshForTests(); resetDurableForTests(); await removeTempDir(directory); vi.useRealTimers(); });
 const publish = (version = '1', declarations = tools) => { publishPluginSurface('core', 'Chat On Steroids Core', version, 'Instructions', declarations); vi.advanceTimersByTime(20_000); };
+const publishPlugins = (declarations: PluginToolSchema[]) => { publishPluginSurface('plugins', 'Chat On Steroids Plugins', '1', 'Instructions', declarations); vi.advanceTimersByTime(20_000); };
 const claim = (request: { id: string }, declarations = [{ ...tools[0]!, description: 'Older declaration' }]) => claimPluginRefresh({ ...request, appId, connectorName: 'Chat On Steroids Core', tools: declarations });
 it('debounces only changed declarations for twenty seconds and fences stale claims', async () => {
   publish(); const old = (await pendingPluginRefreshes())[0]!;
@@ -75,6 +76,32 @@ it('requires a recognizable exact tool set for enrollment and refreshes stale de
   expect(await completePluginRefresh({ ...next, appId, tools })).toBe(false);
   expect(await completePluginRefresh({ ...next, appId, tools: changed })).toBe(true);
 });
+it.each([{ count: 118, codeMode: false }, { count: 118, codeMode: true }, { count: 256, codeMode: true }])('enrolls legacy Plugins into $count tools with code mode $codeMode and requires the complete expanded catalog', async ({ count, codeMode }) => {
+  const catalog: PluginToolSchema[] = Array.from({ length: count }, (_, i) => ({
+    name: `plugin_tool_${i}`, description: `Plugin tool ${i}`, inputSchema: { type: 'object', properties: { value: { type: 'string' } } },
+  }));
+  const legacy = catalog.slice(0, 64);
+  if (codeMode) {
+    const exec = { name: 'exec', description: 'Compose tools', inputSchema: { type: 'object', properties: { code: { type: 'string' } } } };
+    legacy.push(exec); catalog.push(exec);
+  }
+  publishPlugins(catalog);
+  const request = (await pendingPluginRefreshes())[0]!;
+  expect(request.surface).toBe('plugins');
+  expect(await claimPluginRefresh({ ...request, appId, connectorName: 'Chat On Steroids Plugins', tools: legacy })).toBe(true);
+  expect(await completePluginRefresh({ ...request, appId, tools: legacy })).toBe(false);
+  expect(await completePluginRefresh({ ...request, appId, tools: catalog })).toBe(true);
+});
+it('rejects a foreign declaration inside a legacy Plugins subset', async () => {
+  const catalog: PluginToolSchema[] = Array.from({ length: 118 }, (_, i) => ({
+    name: `plugin_tool_${i}`, description: `Plugin tool ${i}`, inputSchema: { type: 'object', properties: {} },
+  }));
+  const legacy = catalog.slice(0, 64).map(tool => ({ ...tool }));
+  legacy[63] = { ...legacy[63]!, description: 'Changed foreign declaration' };
+  publishPlugins(catalog);
+  const request = (await pendingPluginRefreshes())[0]!;
+  expect(await claimPluginRefresh({ ...request, appId, connectorName: 'Chat On Steroids Plugins', tools: legacy })).toBe(false);
+});
 it('enrolls already-current tools without granting a refresh click, including after restart', async () => {
   publish(); const request = (await pendingPluginRefreshes())[0]!;
   expect(await claim(request, tools)).toBe(false);
@@ -111,17 +138,31 @@ it('keeps an exact app mapping and refuses another installed same-name plugin', 
   expect(await claimPluginRefresh({ ...b, appId: 'asdk_app_other', connectorName: 'Chat On Steroids Core', tools })).toBe(false);
 });
 it('enrolls an older Core subset only with two unchanged full declarations, then requires the enabled tool at completion', async () => {
-  const session = { name: 'session', description: 'Read recorded history.', inputSchema: { type: 'object', properties: { action: { enum: ['search', 'read'] } } } };
-  const finish = { name: 'finish', description: 'Finish the turn.', inputSchema: { type: 'object' } };
-  const installed = [...tools, session];
+  const plan = { name: 'update_plan', description: 'Update the displayed plan.', inputSchema: { type: 'object', properties: { plan: { type: 'array', items: { type: 'object' } } } } };
+  const finish = { name: 'session_finish', description: 'Finish the turn.', inputSchema: { type: 'object' } };
+  const installed = [...tools, plan];
   publish('2', [...installed, finish]);
   const request = (await pendingPluginRefreshes())[0]!;
   expect(await claim(request, tools)).toBe(false);
-  expect(await claim(request, [tools[0]!, { ...session, description: 'Unrelated session tool' }])).toBe(false);
+  expect(await claim(request, [tools[0]!, { ...plan, description: 'Unrelated plan tool' }])).toBe(false);
   expect(await claim(request, [...installed, { ...finish, name: 'foreign_tool' }])).toBe(false);
   expect(await claim(request, installed)).toBe(true);
   expect(await completePluginRefresh({ ...request, appId, tools: installed })).toBe(false);
   expect(await completePluginRefresh({ ...request, appId, tools: [...installed, finish] })).toBe(true);
+});
+it('recognizes retired session only for old Core enrollment with two unchanged current declarations', async () => {
+  const plan = { name: 'update_plan', description: 'Update the displayed plan.', inputSchema: { type: 'object' } };
+  const session = { name: 'session', description: 'Read recorded history.', inputSchema: { type: 'object' } };
+  const current = [...tools, plan];
+  publish('2', current);
+  const request = (await pendingPluginRefreshes())[0]!;
+  expect(request.tools.map(tool => tool.name)).not.toContain('session');
+  expect(await claim(request, [...tools, session])).toBe(false);
+  expect(await claim(request, [...tools, { ...plan, description: 'Changed declaration' }, session])).toBe(false);
+  expect(await claim(request, [...current, session, { ...session, name: 'foreign_tool' }])).toBe(false);
+  expect(await claim(request, [...current, session])).toBe(true);
+  expect(await completePluginRefresh({ ...request, appId, tools: [...current, session] })).toBe(false);
+  expect(await completePluginRefresh({ ...request, appId, tools: current })).toBe(true);
 });
 it('keeps pre-claim errors observable and retries the same obligation after restart', async () => {
   publish(); const request = (await pendingPluginRefreshes())[0]!;
@@ -144,8 +185,8 @@ it('requires readable declarations before claiming even an enrolled exact app', 
   expect(await claim(next)).toBe(true);
 });
 it('enrolls an older known Core superset when a user disabled a tool, never a foreign tool', async () => {
-  const session = { name: 'session', description: 'Read recorded history.', inputSchema: { type: 'object' } };
-  const remaining = [...tools, session];
+  const plan = { name: 'update_plan', description: 'Update the displayed plan.', inputSchema: { type: 'object' } };
+  const remaining = [...tools, plan];
   const removed = { name: 'keep_astra_on_forever', description: 'Previously enabled finish hold.', inputSchema: { type: 'object' } };
   publish('2', remaining);
   const request = (await pendingPluginRefreshes())[0]!;

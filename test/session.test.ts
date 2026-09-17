@@ -10,6 +10,7 @@
 import { promises as fs } from 'node:fs';
 import path from 'node:path';
 import { createHash } from 'node:crypto';
+import sharp from 'sharp';
 import { afterAll, afterEach, beforeAll, beforeEach, describe, expect, it, vi } from 'vitest';
 import { defaultConfig, initConfigPath, saveConfig } from '../src/main/config.js';
 import { lineDelta, formatDelta } from '../src/main/diffstat.js';
@@ -45,6 +46,9 @@ import {
   readAsset,
   readEvents,
   readRecentEvents,
+  readLatestUserMessage,
+  turnHasMcpCall,
+  conversationHasMcpCallSince,
   readHandoff,
   rebindSession,
   renameSession,
@@ -100,6 +104,71 @@ const evidence = (patch: Partial<ReturnType<typeof emptyEvidence>> = {}) => ({ .
 // ------------------------------------------------------------------- store
 
 describe('session store', () => {
+  it('uses original call time and exact conversation for late attribution health proof', async () => {
+    const conversationId = 'health-current';
+    const session = await createSession({ title: 'attribution health', conversationId });
+    let index = 0;
+    const append = (time: number, owner: string, turnId?: string, exact = true, source: 'mcp' | 'extension' = 'mcp') =>
+      appendEvent(session.id, { time, source, kind: 'tool_call', turnId,
+        call: { callId: `health-${++index}`, tool: 'read', requestId: `health-request-${index}`,
+          conversationId: owner, attribution: exact ? 'request_id' : 'unattributed',
+          attributionMethod: exact ? 'request_id' : 'unattributed',
+          args: { text: '{}', truncated: false, chars: 2 }, result: { text: 'ok', truncated: false, chars: 2 },
+          outcome: 'ok', durationMs: 1, summary: { title: 'read', tone: 'neutral', kind: 'read' } } });
+    await append(999, conversationId); // Stored now, but started before the incident.
+    await append(1_100, 'health-retired-source');
+    await append(1_100, conversationId, 'older-turn');
+    await append(1_100, conversationId, 'current-turn', false);
+    await append(1_100, conversationId, 'current-turn', true, 'extension');
+    expect(await conversationHasMcpCallSince(session.id, conversationId, 1_000, 'current-turn')).toBe(false);
+    // Exact repaired work can have no local turn id, and need not be the newest append.
+    await append(1_001, conversationId);
+    await append(1_200, 'health-retired-source');
+    expect(await conversationHasMcpCallSince(session.id, conversationId, 1_000, 'current-turn')).toBe(true);
+    expect(await conversationHasMcpCallSince(session.id, conversationId, 1_002, 'current-turn')).toBe(false);
+  });
+
+  it('retains exact turn execution proof behind paginated historical attribution repairs', async () => {
+    const conversationId = 'mcp-proof-conversation';
+    const session = await createSession({ title: 'turn execution proof', conversationId });
+    let callIndex = 0;
+    const appendCall = (turnId: string | undefined, owner = conversationId, exact = true, source: 'mcp' | 'extension' = 'mcp') =>
+      appendEvent(session.id, {
+        time: 1_000, source, kind: 'tool_call', turnId,
+        call: {
+          callId: `proof-${++callIndex}`, tool: 'read', requestId: 'request-proof',
+          conversationId: owner, attribution: exact ? 'request_id' : 'unattributed',
+          attributionMethod: exact ? 'request_id' : 'unattributed',
+          args: { text: '{}', truncated: false, chars: 2 },
+          result: { text: 'ok', truncated: false, chars: 2 },
+          outcome: 'ok', durationMs: 1,
+          summary: { title: 'read', tone: 'neutral', kind: 'read' }
+        }
+      });
+    await appendCall('older-turn');
+    expect(await turnHasMcpCall(session.id, conversationId, 'source-turn')).toBe(false);
+    await appendCall('source-turn', 'foreign-conversation');
+    await appendCall('source-turn', conversationId, false);
+    await appendCall('source-turn', conversationId, true, 'extension');
+    expect(await turnHasMcpCall(session.id, conversationId, 'source-turn')).toBe(false);
+    await appendCall('source-turn');
+    // More than one presentation page of repairs must neither hide proof nor restart scans.
+    for (let index = 0; index < 105; index++) await appendCall(undefined);
+    expect(await turnHasMcpCall(session.id, conversationId, 'source-turn')).toBe(true);
+    await appendCall('newer-turn', 'foreign-conversation');
+    expect(await turnHasMcpCall(session.id, conversationId, 'source-turn')).toBe(true);
+    const openFile = vi.spyOn(fs, 'open');
+    try {
+      expect(await turnHasMcpCall(session.id, conversationId, 'newer-turn')).toBe(false);
+      expect(openFile.mock.calls.filter(([file]) => String(file).endsWith('events.jsonl'))).toHaveLength(1);
+    } finally {
+      openFile.mockRestore();
+    }
+    await fs.appendFile(path.join(sessionsRoot(), session.id, 'events.jsonl'),
+      JSON.stringify({ seq: 9999, time: 1000, kind: 'tool_call', source: 'mcp', turnId: 'source-turn' }) + '\n');
+    expect(await turnHasMcpCall(session.id, conversationId, 'source-turn')).toBe(true);
+  });
+
   it('preserves tool calls appended after an unattributed repair snapshot', async () => {
     const summary = await createSession({ title: 'Unattributed activity', conversationId: null });
     const call = (callId: string, time: number) => ({
@@ -442,6 +511,17 @@ describe('session store', () => {
     expect(await readEvents(summary.id, { limit: 2 })).toHaveLength(2);
   });
 
+  it('preserves app-staged attachment identity and preview when native metadata observes the same user send', async () => {
+    const summary = await createSession({ title: 'attachment custody' });
+    const original = { id: 'app-staged-id', name: 'example.png', size: 123, mimeType: 'image/png', preview: 'data:image/webp;base64,YQ==' };
+    const base = { kind: 'user_message' as const, source: 'extension' as const, time: 100, messageId: 'native-user',
+      message: { text: '', chars: 0, truncated: false } };
+    await upsertMessageEvent(summary.id, { ...base, inputId: 'app-input', attachments: [original] });
+    await upsertMessageEvent(summary.id, { ...base, attachments: [{ ...original, id: 'provider-file-id', preview: undefined }] });
+    const [recorded] = await readEvents(summary.id, { kinds: ['user_message'] });
+    expect(recorded).toMatchObject({ inputId: 'app-input', attachments: [original] });
+  });
+
   it('keeps the original anchor when provider creation time changes on reload, without merging sibling messages', async () => {
     const summary = await createSession({ title: 'provider timestamp revision' });
     const row = (messageId: string, providerMessageId: string) => ({
@@ -560,7 +640,7 @@ describe('session store', () => {
   it('keeps rich HTML when the same canonical prose is reobserved without rendered HTML', async () => {
     const summary = await createSession({ title: 'sparse rich final' });
     const messageId = 'msg-sparse-rich';
-    const providerMessageId = 'bdc7b4c3-5f89-4e1d-a9ca-6c0f6a5ffb4a';
+    const providerMessageId = 'f0f00016-1111-4111-8111-111111111111';
     const message = { text: 'Bold answer', truncated: false, chars: 11 };
     await upsertMessageEvent(summary.id, {
       time: 200,
@@ -921,6 +1001,38 @@ describe('session store', () => {
     expect(reopened.sessionId).toBe(sessionId);
     const ends = await readEvents(sessionId, { kinds: ['turn_end'] });
     expect(ends.map((event) => event.kind === 'turn_end' && event.outcome)).toEqual(['completed']);
+  });
+
+  it.each(['completed', 'stopped'] as const)('does not restore an abandoned older turn after the latest turn %s', async (outcome) => {
+    const conversationId = 'c-restore-latest-terminal';
+    const opened = await recordChatObservations(conversationId, [
+      { kind: 'turn_start', time: 10, turnId: 'g-abandoned' },
+      { kind: 'turn_start', time: 20, turnId: 'g-latest' },
+      { kind: 'turn_end', time: 30, turnId: 'g-latest', outcome }
+    ]);
+    for (let attempt = 0; attempt < 4; attempt++) {
+      await closeConversation(conversationId);
+      await sessionForConversation(conversationId);
+      expect(liveConversations().find(entry => entry.conversationId === conversationId)).toMatchObject({
+        generating: false, activeTurnId: null
+      });
+    }
+    // The older incomplete history is preserved without inventing a terminal for it.
+    expect((await readEvents(opened.sessionId!, { kinds: ['turn_end'] })).map(event => event.turnId)).toEqual(['g-latest']);
+  });
+
+  it('restores the latest committed start without promoting an older orphan by timestamp', async () => {
+    const conversationId = 'c-restore-latest-start';
+    await recordChatObservations(conversationId, [
+      { kind: 'turn_start', time: 100, turnId: 'g-orphan-clock-ahead' },
+      { kind: 'turn_start', time: 20, turnId: 'g-current' },
+      { kind: 'turn_end', time: 110, turnId: 'g-orphan-clock-ahead', outcome: 'completed' }
+    ]);
+    await closeConversation(conversationId);
+    await sessionForConversation(conversationId);
+    expect(liveConversations().find(entry => entry.conversationId === conversationId)).toMatchObject({
+      generating: true, activeTurnId: 'g-current'
+    });
   });
 
   it('offers a stable final reply to Goal after reload lost an uncertain turn identity', async () => {
@@ -1386,6 +1498,39 @@ describe('session store', () => {
     expect(listed?.contextTokens).toBe(eventTokens(revised.event));
   });
 
+  it.each([false, true])('migrates legacy return estimates once while preserving frontend resets (rebound=%s)', async rebound => {
+    const summary = await createSession({ title: 'return estimate migration', conversationId: 'estimate-source' });
+    const call = (conversationId: string, chars: number) => ({ time: Date.now(), source: 'mcp' as const,
+      kind: 'tool_call' as const, call: {
+        callId: conversationId, conversationId, tool: 'read', attribution: 'request_id' as const,
+        requestId: `request-${conversationId}`, attributionMethod: 'request_id' as const,
+        args: { text: '{}', chars: 2, truncated: false },
+        result: { text: 'preview', chars, truncated: true },
+        outcome: 'ok' as const, durationMs: 1, summary: { title: 'Read', tone: 'neutral' as const, kind: 'read' as const }
+      } });
+    await appendEvent(summary.id, call('estimate-source', 524582));
+    if (rebound) {
+      expect(await rebindSession(summary.id, 'estimate-source', 'estimate-destination')).toBe(true);
+      await appendEvent(summary.id, call('estimate-destination', 80000));
+    }
+    await flushSessions();
+    const metaPath = path.join(sessionsRoot(), summary.id, 'meta.json');
+    const meta = JSON.parse(await fs.readFile(metaPath, 'utf8'));
+    const expected = { estimatedTokens: meta.estimatedTokens, contextTokens: meta.contextTokens };
+    delete meta.__tokenEstimate;
+    meta.estimatedTokens += 121146 + (rebound ? 10000 : 0);
+    meta.contextTokens += rebound ? 10000 : 121146;
+    await fs.writeFile(metaPath, JSON.stringify(meta));
+    resetSessionStoreForTests();
+    expect((await listSessions()).find(entry => entry.id === summary.id)).toMatchObject(expected);
+    expect(JSON.parse(await fs.readFile(metaPath, 'utf8')).__tokenEstimate).toBe(1);
+    resetSessionStoreForTests();
+    expect(await getSession(summary.id)).toMatchObject(expected);
+    const events = await readEvents(summary.id);
+    expect(events.find(event => event.kind === 'tool_call' && event.call.conversationId === 'estimate-source'))
+      .toMatchObject({ call: { result: { chars: 524582, text: 'preview' } } });
+  });
+
   it('stores assets once per content and refuses a malformed asset id', async () => {
     const summary = await createSession({ title: 'assets' });
     const png = Buffer.from('89504e470d0a1a0a0000000d49484452', 'hex');
@@ -1622,7 +1767,7 @@ describe('handoff storage', () => {
     }
   }, 90_000);
 
-  it('never prunes the session holding the newest handoff', async () => {
+  it('never age-prunes closed recordings, including sessions without a handoff', async () => {
     const stale = await createSession({ title: 'stale' });
     const kept = await createSession({ title: 'kept' });
     await saveHandoff(handoff(kept.id, '2026-01-03-cccccccc', Date.now()));
@@ -1647,16 +1792,14 @@ describe('handoff storage', () => {
     }
 
     const removed = await pruneSessions(30);
-    expect(removed).toBeGreaterThanOrEqual(1);
-    // Retention is not the UI's first 200 rows. Check durable existence directly so this
-    // invariant stays valid even when the retained handoff is intentionally old in a large
-    // test history.
+    expect(removed).toBe(0);
     expect(await getSession(kept.id)).not.toBeNull();
-    expect(await getSession(stale.id)).toBeNull();
+    expect(await getSession(stale.id)).not.toBeNull();
+    await deleteSession(stale.id);
     await deleteSession(kept.id);
   }, 90_000);
 
-  it('prunes an expired session beyond the old 5,000-folder maintenance prefix', async () => {
+  it('does not scan or remove even an expired recording when asked through the legacy prune seam', async () => {
     const seed = await createSession({ title: 'retention catalog seed' });
     const seedSummary = await getSession(seed.id);
     expect(seedSummary).not.toBeNull();
@@ -1725,8 +1868,8 @@ describe('handoff storage', () => {
     );
 
     try {
-      expect(await pruneSessions(30)).toBe(1);
-      expect(removed).toEqual([targetId]);
+      expect(await pruneSessions(30)).toBe(0);
+      expect(removed).toEqual([]);
     } finally {
       rmSpy.mockRestore();
       statSpy.mockRestore();
@@ -1735,8 +1878,8 @@ describe('handoff storage', () => {
       resetSessionStoreForTests();
       await deleteSession(seed.id);
     }
-  // Match the adjacent full-catalog tests: Windows metadata I/O under the parallel
-  // suite can exceed the ordinary 30-second budget. Keep all 5,001 entries exercised.
+  // Keep the former pathological catalogue shape: the invariant is that no reader or remover
+  // is touched at all, regardless of how much expired history exists.
   }, 90_000);
 
   it('splits a long brief on blank lines and keeps every character', () => {
@@ -1784,7 +1927,7 @@ describe('handoff storage', () => {
 // ---------------------------------------------------------------- recorder
 
 describe('canonical recorder 1.8', () => {
-  it('counts a full tool result after rebind while keeping its recorder preview bounded', async () => {
+  it('caps the estimated tool return after rebind while retaining its full recorded result', async () => {
     const config = defaultConfig();
     await saveConfig({ ...config, compaction: { ...config.compaction, auto: true, autoTokens: 10000 } });
     try {
@@ -1809,7 +1952,7 @@ describe('canonical recorder 1.8', () => {
       expect(call?.result).toMatchObject({ truncated: true, chars: result.length });
       expect(call!.result.text.length).toBeLessThan(8200);
       expect((await readAsset(sessionId, call!.result.assetId!))?.toString('utf8')).toBe(result);
-      const expected = estimateTokens(JSON.stringify(args)) + estimateTokens(result) + estimateTokens(call!.summary.title);
+      const expected = estimateTokens(JSON.stringify(args)) + 10000 + estimateTokens(call!.summary.title);
       const after = (await getSession(sessionId))!;
       expect(after.estimatedTokens - before.estimatedTokens).toBe(expected);
       expect(after.contextTokens).toBe(estimateTokens('h'.repeat(13237)) + expected);
@@ -1826,6 +1969,44 @@ describe('canonical recorder 1.8', () => {
     await upsertMessageEvent(opened.id, revision(60000));
     await upsertMessageEvent(opened.id, revision(60000));
     expect(await getSession(opened.id)).toMatchObject({ estimatedTokens: 15000, contextTokens: 15000 });
+  });
+
+  it('refuses rejected native-image owners before writing preview assets', async () => {
+    const conversationId = `conv-native-image-owner-${Date.now()}`;
+    const messageId = '5150f756-bf2d-45fa-ac0f-45010b2239fb';
+    const providerAssetId = 'file_00000000000000000000000000000071';
+    const preview = async (color: string) => {
+      const bytes = await sharp({ create: { width: 12, height: 8, channels: 3, background: color } }).webp().toBuffer();
+      return `data:image/webp;base64,${bytes.toString('base64')}`;
+    };
+    const first = await recordChatObservations(conversationId, [{
+      kind: 'native_image', time: 100, messageId, providerAssetId, providerRole: 'tool',
+      providerChannel: 'final', providerStatus: 'in_progress', width: 1254, height: 1254,
+      previewStatus: 'pending'
+    }], 'worker-a');
+    const sessionId = first.sessionId!;
+
+    const roleConflict = await recordChatObservations(conversationId, [{
+      kind: 'native_image', time: 200, messageId, providerAssetId, providerRole: 'assistant',
+      providerChannel: 'final', providerStatus: 'finished_successfully', width: 1254, height: 1254,
+      previewStatus: 'available', previewWidth: 12, previewHeight: 8, previewDataUrl: await preview('#0044ff')
+    }], 'worker-a');
+    const agentConflict = await recordChatObservations(conversationId, [{
+      kind: 'native_image', time: 300, messageId, providerAssetId, providerRole: 'tool',
+      providerChannel: 'final', providerStatus: 'finished_successfully', width: 1254, height: 1254,
+      previewStatus: 'available', previewWidth: 12, previewHeight: 8, previewDataUrl: await preview('#ff6600')
+    }], 'worker-b');
+
+    expect(roleConflict.stored).toBe(0);
+    expect(agentConflict.stored).toBe(0);
+    const rows = await readEvents(sessionId, { kinds: ['native_image'] });
+    expect(rows).toHaveLength(1);
+    expect(rows[0]).toMatchObject({ providerRole: 'tool', agent: 'worker-a', providerStatus: 'in_progress', previewStatus: 'pending' });
+    const assets = await fs.readdir(path.join(sessionsRoot(), sessionId, 'assets')).catch((error: NodeJS.ErrnoException) => {
+      if (error.code === 'ENOENT') return [];
+      throw error;
+    });
+    expect(assets).toEqual([]);
   });
 
   it('lets the store deduplicate repeated recorder assets instead of shadow-counting the same bytes toward quota', async () => {
@@ -1870,6 +2051,89 @@ describe('canonical recorder 1.8', () => {
     expect(assetIds.every(Boolean)).toBe(true);
     expect(new Set(assetIds).size).toBe(1);
     expect((await readEvents(sessionId!, { kinds: ['tool_call'] }))).toHaveLength(25);
+  });
+
+  it('records one provider-limit notice for concurrent tab reports and journal replay after restart', async () => {
+    const conversationId = 'conv-error-burst';
+    const error = { kind: 'chat_error' as const, time: 100_000,
+      text: 'Too many requests. Please wait a few minutes.', blocking: true, recoverable: false };
+    const reports = await Promise.all(Array.from({ length: 10 }, (_, index) =>
+      recordChatObservations(conversationId, [{ ...error, time: error.time + index * 50, turnId: `tab-${index}` }])));
+    expect(reports.reduce((count, report) => count + report.stored, 0)).toBe(1);
+    expect(reports.slice(1).every(report => !report.activity.meaningful)).toBe(true);
+    const sessionId = reports[0]!.sessionId!;
+    await flushSessions();
+    resetRecorderForTests();
+    resetSessionStoreForTests();
+    await recordChatObservations(conversationId, [{ ...error, time: error.time + 1_000 }]);
+    expect(await readEvents(sessionId, { kinds: ['chat_error'] })).toEqual([
+      expect.objectContaining({ blocking: true, recoverable: false })
+    ]);
+
+    await recordChatObservations(conversationId, [{ ...error, time: error.time + 30_001 }]);
+    expect(await readEvents(sessionId, { kinds: ['chat_error'] })).toHaveLength(2);
+    const other = await recordChatObservations('conv-error-burst-other', [error]);
+    expect(other.stored).toBe(1);
+  });
+
+  it('coalesces same-turn error bursts but preserves different errors and genuine turn failures', async () => {
+    const error = { kind: 'chat_error' as const, time: 100_000, text: 'Message delivery timed out.', turnId: 'first' };
+    const first = await recordChatObservations('conv-error-turns', [error,
+      { ...error, time: 100_100, text: 'Message  delivery\n timed out.' },
+      { ...error, time: 100_200, text: 'Something went wrong.' },
+      { ...error, time: 100_300, turnId: 'second' }]);
+    const errors = await readEvents(first.sessionId!, { kinds: ['chat_error'] });
+    expect(errors).toHaveLength(3);
+    expect(errors.map(event => event.turnId)).toEqual(['first', 'first', 'second']);
+  });
+
+  it('owns reload errors by the canonical question across missing and reminted document turns', async () => {
+    const conversationId = 'conv-reload-error-owner';
+    const error = { kind: 'chat_error' as const, time: 100_000, text: 'Connection interrupted', recoverable: true, turnId: 'original' };
+    const first = await recordChatObservations(conversationId, [
+      { kind: 'user_message', time: 90_000, messageId: 'question-one', text: 'Build it', authoredNow: true }, error]);
+    await flushSessions(); resetRecorderForTests(); resetSessionStoreForTests();
+    for (const [turnId, time] of [[undefined, 110_000], ['replacement', 121_000], ['replacement-again', 200_000]] as const) {
+      const replay = await recordChatObservations(conversationId, [{ ...error, turnId, time }]);
+      expect(replay.activity.meaningful).not.toBe(true);
+    }
+    expect(await readEvents(first.sessionId!, { kinds: ['chat_error'] })).toHaveLength(1);
+    await recordChatObservations(conversationId, [
+      { kind: 'user_message', time: 210_000, messageId: 'question-two', text: 'Build it', authoredNow: true },
+      { kind: 'user_message', time: 90_000, messageId: 'question-one', text: 'Build it with corrected rendering' },
+      { ...error, time: 211_000 }]);
+    expect((await readLatestUserMessage(first.sessionId!))?.messageId).toBe('question-two');
+    expect(await readEvents(first.sessionId!, { kinds: ['chat_error'] })).toHaveLength(2);
+  });
+
+  it('keeps a failed error append eligible for retry', async () => {
+    const conversationId = 'conv-error-append-retry';
+    await sessionForConversation(conversationId);
+    const error = { kind: 'chat_error' as const, time: 100, text: 'Something went wrong.' };
+    const append = vi.spyOn(fs, 'appendFile').mockRejectedValueOnce(new Error('disk full'));
+    try {
+      await expect(recordChatObservations(conversationId, [error])).rejects.toThrow('disk full');
+    } finally {
+      append.mockRestore();
+    }
+    const retry = await recordChatObservations(conversationId, [error]);
+    expect(retry.stored).toBe(1);
+    expect(await readEvents(retry.sessionId!, { kinds: ['chat_error'] })).toHaveLength(1);
+  });
+
+  it('keeps one exact Thinking failed notice across reload/restart beyond the burst window', async () => {
+    const conversationId = 'conv-failed-header-reload';
+    const error = { kind: 'chat_error' as const, time: 100_000, text: 'Thinking failed',
+      reason: 'thinking_failed' as const, turnId: 'failed-turn', recoverable: false };
+    const first = await recordChatObservations(conversationId, [error]);
+    await flushSessions(); resetRecorderForTests(); resetSessionStoreForTests();
+    await recordChatObservations(conversationId, [{ ...error, time: 500_000 }]);
+    await recordChatObservations(conversationId, [{ ...error, time: 600_000, turnId: undefined }]);
+    expect(await readEvents(first.sessionId!, { kinds: ['chat_error'] })).toEqual([
+      expect.objectContaining({ reason: 'thinking_failed', turnId: 'failed-turn' })
+    ]);
+    await recordChatObservations(conversationId, [{ ...error, time: 700_000, turnId: 'another-turn' }]);
+    expect(await readEvents(first.sessionId!, { kinds: ['chat_error'] })).toHaveLength(2);
   });
 
   it('deduplicates replayed turn lifecycle boundaries from the at-least-once browser journal', async () => {
@@ -2407,6 +2671,72 @@ describe('naming the chats this app opened', () => {
     expect((await getSession(opened.sessionId!))?.title).toBe('My manual title');
   });
 
+  it('keeps rendered instruction frames out of titles and repairs only their exact recorded fallback', async () => {
+    const conversationId = 'conv-rendered-prompt-title';
+    const rendered = '[[COS_CONTEXT:100]]\nGuidance whose Markdown whitespace changed.\n[[/COS_CONTEXT]]\n\nReal request';
+    const opened = await recordChatObservations(conversationId, [
+      { kind: 'user_message', time: Date.now(), text: rendered, messageId: 'framed-title-user' }
+    ]);
+    expect((await getSession(opened.sessionId!))?.title).toBe('ChatGPT session');
+    await upsertMessageEvent(opened.sessionId!, {
+      time: Date.now(), source: 'app', kind: 'user_message', messageId: 'framed-title-user',
+      authoredText: 'Real request', message: { text: rendered, chars: rendered.length, truncated: false }
+    });
+    expect((await getSession(opened.sessionId!))?.title).toBe('Real request');
+    await recordChatObservations(conversationId, [
+      { kind: 'conversation_title', time: Date.now(), text: 'Readable generated title' }
+    ]);
+    expect((await getSession(opened.sessionId!))?.title).toBe('Readable generated title');
+    await renameSession(opened.sessionId!, 'My title');
+    await recordChatObservations(conversationId, [
+      { kind: 'conversation_title', time: Date.now(), text: 'Later generated title' }
+    ]);
+    expect((await getSession(opened.sessionId!))?.title).toBe('My title');
+  });
+
+  it.each([80, 120])('promotes a legacy %i-character preview even when title precedes its first message', async length => {
+    const text = '  A long authored request '.repeat(12);
+    const conversationId = `legacy-preview-${length}`;
+    const session = await createSession({ conversationId, title: text.slice(0, length) });
+    await recordChatObservations(conversationId, [
+      { kind: 'conversation_title', time: Date.now(), text: 'Generated title' },
+      { kind: 'user_message', time: Date.now(), text, messageId: 'legacy-opening' }
+    ]);
+    expect((await getSession(session.id))?.title).toBe('Generated title');
+  });
+
+  it('keeps provider naming authority across receipts, later provider renames and restart', async () => {
+    const conversationId = 'provider-title-restart';
+    const opened = await recordChatObservations(conversationId, [
+      { kind: 'conversation_title', time: Date.now(), text: 'Initial provider title' }
+    ]);
+    await upsertMessageEvent(opened.sessionId!, { kind: 'user_message', source: 'app', time: Date.now(),
+      messageId: 'provider-opening', authoredText: 'Actual request', message: { text: 'wire', chars: 4, truncated: false } });
+    expect((await getSession(opened.sessionId!))?.title).toBe('Initial provider title');
+    await flushSessions(); resetRecorderForTests(); resetSessionStoreForTests();
+    await recordChatObservations(conversationId, [{ kind: 'conversation_title', time: Date.now(), text: 'Updated provider title' }]);
+    expect((await getSession(opened.sessionId!))?.title).toBe('Updated provider title');
+    // Even a manual name identical to the preview must stay manual.
+    await renameSession(opened.sessionId!, 'Actual request');
+    await recordChatObservations(conversationId, [{ kind: 'conversation_title', time: Date.now(), text: 'Must not win' }]);
+    expect((await getSession(opened.sessionId!))?.title).toBe('Actual request');
+  });
+
+  it('repairs a legacy context preview on cold read using durable authored text', async () => {
+    const raw = '[[COS_CONTEXT:19268]]\nInternal instructions and AGENTS.md '.repeat(3);
+    const session = await createSession({ conversationId: 'legacy-context-preview', title: 'Temporary' });
+    await upsertMessageEvent(session.id, { kind: 'user_message', source: 'app', time: Date.now(),
+      messageId: 'context-opening', authoredText: 'Only my request', message: { text: raw, chars: raw.length, truncated: false } });
+    await flushSessions(); resetSessionStoreForTests();
+    const metaPath = path.join(sessionsRoot(), session.id, 'meta.json');
+    const meta = JSON.parse(await fs.readFile(metaPath, 'utf8'));
+    meta.title = raw.slice(0, 80).trim(); delete meta.titleSource;
+    await fs.writeFile(metaPath, JSON.stringify(meta));
+    expect((await listSessions()).find(row => row.id === session.id)?.title).toBe('Only my request');
+    expect((await getSession(session.id))?.title).toBe('Only my request');
+    expect(JSON.parse(await fs.readFile(metaPath, 'utf8')).titleSource).toBe('fallback');
+  });
+
   it('does not persist native file credentials in recorded artifact arguments', async () => {
     const conversationId = 'conv-artifact-privacy';
     const requestId = 'wfr_artifact_privacy';
@@ -2709,7 +3039,7 @@ describe('tool summaries', () => {
     );
     expect(
       summarize('exec_command', { cmd: 'npm run verify' }, { exitCode: null, durationMs: 10_000 })
-    ).toMatchObject({ title: 'Started npm run verify', metric: 'running', tone: 'neutral' });
+    ).toMatchObject({ title: 'Started npm run verify', metric: 'started', tone: 'neutral' });
   });
 
   it('says which way a session was interrupted', () => {
@@ -2912,7 +3242,7 @@ describe('token estimation', () => {
     expect(eventTokens(event)).toBe(100 + 200 + Math.ceil('Read a.ts'.length / 4));
   });
 
-  it('counts full truncated tool text once, independently of its preview and asset reference', () => {
+  it('caps a truncated tool return independently of its preview and asset reference', () => {
     const event = { seq: 1, time: 1, source: 'mcp', kind: 'tool_call', call: {
       callId: 'full-result', tool: 'read', attribution: 'turn',
       args: { text: 'short preview with a recorder annotation', truncated: true, chars: 20001, assetId: 'args.txt' },
@@ -2920,11 +3250,19 @@ describe('token estimation', () => {
       outcome: 'ok', durationMs: 1, summary: { title: 'Read 3 paths', tone: 'neutral', kind: 'read' },
       assets: [{ id: 'result.txt', mimeType: 'text/plain', bytes: 60306 }]
     } } as SessionEvent;
-    expect(eventTokens(event)).toBe(Math.ceil(20001 / 4) + Math.ceil(60306 / 4) + estimateTokens('Read 3 paths'));
+    expect(eventTokens(event)).toBe(Math.ceil(20001 / 4) + 10000 + estimateTokens('Read 3 paths'));
     if (event.kind !== 'tool_call') throw new Error('fixture');
     delete event.call.result.assetId;
     event.call.result.text = 'Another bounded preview; overflow asset unavailable';
-    expect(eventTokens(event)).toBe(Math.ceil(20001 / 4) + Math.ceil(60306 / 4) + estimateTokens('Read 3 paths'));
+    expect(eventTokens(event)).toBe(Math.ceil(20001 / 4) + 10000 + estimateTokens('Read 3 paths'));
+  });
+
+  it.each([0, 39996, 40000, 40004, 524582])('caps inline MCP returns at the boundary (%i characters)', chars => {
+    const event = { seq: 1, time: 1, source: 'mcp', kind: 'tool_call', call: {
+      args: { text: 'a'.repeat(80000), truncated: false, chars: 80000 },
+      result: { text: 'r'.repeat(chars), truncated: false, chars }, summary: { title: '' }
+    } } as SessionEvent;
+    expect(eventTokens(event)).toBe(20000 + Math.min(10000, Math.ceil(chars / 4)));
   });
 
   it.each([undefined, -1, NaN, Infinity, 2.5])('keeps legacy or malformed original lengths bounded by actual inline text (%s)', chars => {

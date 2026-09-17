@@ -1,11 +1,9 @@
 /**
  * Status UI, and the one place that answers "where did the stream stop?".
  *
- * Everything this browser observes has to survive three hand-offs before the desktop app
- * has it: this extension reads it off the page, the service worker delivers it, and the
- * app records it into a session for this chat. All three used to fail the same way from
- * here — nothing happens — so "Reaching the app" opens onto those three stages stated
- * separately, and names the one that did not complete.
+ * Current-turn request evidence is distinct from whole-chat recording counters.
+ * "Reaching the app" separates finding the ID, app receipt and exact owner confirmation;
+ * only the activity feed can additionally prove a matching tool invocation was recorded.
  *
  * It opens itself when something is wrong and stays shut when nothing is, because a panel
  * that is always expanded is a panel nobody reads.
@@ -33,9 +31,9 @@ function shorten(value, keep = 6) {
 function ago(at) {
   if (!at) return '';
   const seconds = Math.max(0, Math.round((Date.now() - at) / 1000));
-  if (seconds < 60) return `${seconds}초`;
-  if (seconds < 3600) return `${Math.round(seconds / 60)}분`;
-  return `${Math.round(seconds / 3600)}시간`;
+  if (seconds < 60) return `${seconds}s`;
+  if (seconds < 3600) return `${Math.round(seconds / 60)}m`;
+  return `${Math.round(seconds / 3600)}h`;
 }
 
 /** One capture row: ok, no, wait or off, plus whatever it wants to say on the right. */
@@ -61,51 +59,51 @@ function stage(name, state, meta) {
 
 /** How the app describes what it placed a call on, in its own words. */
 const ATTRIBUTION = {
-  request_id: '정확한 요청 ID',
-  unattributed: '요청 ID 미확인',
-  agent: '에이전트 키',
-  turn: '페이지의 도구 블록',
-  generation: '응답 중인 유일한 대화',
-  inferred: '대화 미확인'
+  request_id: 'exact request id',
+  unattributed: 'request id not resolved',
+  agent: 'agent key',
+  turn: 'tool block on the page',
+  generation: 'the only chat generating',
+  inferred: 'not placed in a chat'
 };
 
 /**
  * The three stages, from evidence each layer produced independently.
  *
- * Deliberately not one flag set by whoever ran last: "picked up" is the page's own count,
- * "sent to app" is the service worker's delivery log, and "app processed" is the app
- * naming a session for this chat on the feed the page polls. A stage is only green when
- * the layer that owns it said so.
+ * Global transport failures explain a blocked path. Success needs this chat's session
+ * receipt and exact evidence projected from its newest native turn. Queue custody and
+ * owner acknowledgement do not claim a matching MCP invocation has run.
  */
 function pipeline(info, ready) {
   const page = info && info.page;
   const sent = info && info.delivery;
   const pending = info ? info.pending : 0;
   const read = page ? page.events : 0;
+  const calls = page && Array.isArray(page.trace) ? page.trace : [];
 
   if (!info || !info.isChat) return { read: ['off'], sent: ['off'], proc: ['off'], why: ['', ''] };
   if (!info.recorder) {
-    return { read: ['failed'], sent: ['off'], proc: ['off'], why: ['bad', '이 탭에 기록기가 없습니다. 페이지를 새로고침하세요.'] };
+    return { read: ['failed'], sent: ['off'], proc: ['off'], why: ['bad', 'No recorder in this tab. Reload the page.'] };
   }
   if (read === 0) {
-    return { read: ['running'], sent: ['off'], proc: ['off'], why: ['', '첫 메시지를 기다리는 중입니다.'] };
+    return { read: ['running'], sent: ['off'], proc: ['off'], why: ['', 'Waiting for the first message.'] };
   }
 
-  const readStage = ['done', String(read)];
+  const readStage = calls.length ? ['done', String(calls.length)] : ['running'];
   if (!ready) {
     return {
       read: readStage,
-      sent: ['failed', pending ? `${pending}개 보관 중` : ''],
+      sent: ['failed', pending ? `${pending} held` : ''],
       proc: ['off'],
-      why: ['bad', '앱 연결과 프로토콜 호환성이 확인될 때까지 전달이 차단됩니다.']
+      why: ['bad', 'Delivery is blocked until the app is connected and protocol compatibility is confirmed.']
     };
   }
   if (sent && sent.ok === false) {
     return {
       read: readStage,
-      sent: ['failed', String(sent.error || '실패')],
+      sent: ['failed', String(sent.error || 'failed')],
       proc: ['off'],
-      why: ['bad', `앱이 마지막 전달을 거부했습니다 (${sent.error || '실패'}).`]
+      why: ['bad', `The app rejected the last delivery (${sent.error || 'failed'}).`]
     };
   }
   // Refused by the extension itself, before anything could be queued for the app. `pending`
@@ -116,22 +114,22 @@ function pipeline(info, ready) {
   if (page.blocked) {
     return {
       read: readStage,
-      sent: ['failed', page.queued ? `${page.queued}개 페이지에 보관 중` : String(page.blocked)],
+      sent: ['failed', page.queued ? `${page.queued} held in page` : String(page.blocked)],
       proc: ['off'],
       why: [
         'bad',
-        '확장이 이 탭의 기록 수집을 거부했습니다 (' +
+        'The extension is not accepting this tab’s observations (' +
           String(page.blocked) +
-          '). ChatGPT 탭을 새로고침하세요.'
+          '). Reload the ChatGPT tab.'
       ]
     };
   }
   if (pending > 0) {
     return {
       read: readStage,
-      sent: ['running', `${pending}개 대기 중`],
+      sent: ['running', `${pending} queued`],
       proc: ['off'],
-      why: ['', '대기열에 보관 중입니다. 앱 전달을 다시 시도합니다.']
+      why: ['', 'Queued here. Retrying delivery to the app.']
     };
   }
 
@@ -142,12 +140,16 @@ function pipeline(info, ready) {
       proc: ['running'],
       // The worker's delivery counters cover every tab. Only the page's session
       // receipt proves that this particular chat reached the app.
-      why: ['', '앱에 연결할 수 있습니다. 이 대화의 세션 수신 확인을 기다립니다.']
+      why: ['', 'App reachable. Waiting for this chat’s session receipt.']
     };
   }
-  const sentStage = ['done', sent && sent.total ? String(sent.total) : ''];
-
-  const calls = Array.isArray(page.trace) ? page.trace : [];
+  if (!calls.length) return {
+    read: ['running'], sent: ['off'], proc: ['off'],
+    why: ['', 'Chat recorded. Waiting for a request ID from the latest turn.']
+  };
+  const received = calls.filter(call => call.sent || call.app === 'request_id').length;
+  const confirmed = calls.filter(call => call.confirmed || call.app === 'request_id').length;
+  const sentStage = [received === calls.length ? 'done' : 'running', `${received}/${calls.length}`];
   const placed = calls.filter((call) => call.app === 'request_id').length;
   const missed = calls.filter((call) => call.app && call.app !== 'request_id');
   if (missed.length > 0) {
@@ -157,15 +159,18 @@ function pipeline(info, ready) {
       proc: ['failed', `${placed}/${calls.length}`],
       why: [
         'bad',
-        `앱이 요청 ID로 ${missed.length === 1 ? '호출 1개' : `호출 ${missed.length}개`}의 대화를 확인하지 못했습니다. 대신 ${ATTRIBUTION[missed[0].app] || missed[0].app} 상태로 기록했습니다.`
+        `The app could not place ${missed.length === 1 ? 'a call' : `${missed.length} calls`} by request id — it fell back to ${ATTRIBUTION[missed[0].app] || missed[0].app}.`
       ]
     };
   }
   return {
-    read: readStage,
+    read: ['done', String(calls.length)],
     sent: sentStage,
-    proc: ['done', calls.length ? `${placed}/${calls.length}` : ''],
-    why: ['', calls.length ? '모든 도구 호출의 대화 귀속을 확인했습니다.' : '앱에 기록 중입니다.']
+    proc: [confirmed === calls.length ? 'done' : 'running', `${confirmed}/${calls.length}`],
+    why: ['', placed > 0 ? `${placed} request ID${placed === 1 ? '' : 's'} matched to recorded tool activity.`
+      : confirmed > 0 ? 'Request owner confirmed. No matching tool activity recorded yet.'
+        : received > 0 ? 'App received the ID. Waiting for owner confirmation.'
+          : 'ID found in the latest turn. Waiting for the app to confirm receipt.']
   };
 }
 
@@ -181,8 +186,8 @@ function paintCalls(page) {
     pips.className = 'pips';
     for (const state of [
       entry.read ? 'on' : '',
-      entry.sent ? 'on' : '',
-      entry.app ? (entry.app === 'request_id' ? 'on' : 'bad') : ''
+      entry.sent || entry.app === 'request_id' ? 'on' : '',
+      entry.confirmed || entry.app === 'request_id' ? 'on' : entry.app ? 'bad' : ''
     ]) {
       const pip = document.createElement('span');
       pip.className = `pip ${state}`;
@@ -190,11 +195,11 @@ function paintCalls(page) {
     }
     const tool = document.createElement('span');
     tool.className = 'tool';
-    tool.textContent = entry.tool || '도구 호출';
+    tool.textContent = entry.tool || 'request ID';
     const id = document.createElement('span');
     id.className = 'id';
     id.textContent = shorten(entry.requestId, 5);
-    line.title = `${entry.requestId} — 수집 ${entry.read ? '완료' : '미완료'} · 전달 ${entry.sent ? '완료' : '미완료'} · 앱 ${ATTRIBUTION[entry.app] || '기록 없음'}`;
+    line.title = `${entry.requestId} — found ${entry.read ? 'yes' : 'no'} · app receipt ${entry.sent || entry.app === 'request_id' ? 'confirmed' : 'pending'} · owner ${entry.confirmed ? 'confirmed' : 'pending'} · tool activity ${ATTRIBUTION[entry.app] || 'no record'}`;
     line.append(pips, tool, id);
     box.append(line);
   }
@@ -221,7 +226,7 @@ function paintHeader(status) {
         ? '앱에 연결할 수 없음'
         : ready
           // Health + pairing prove reachability, not the recorder/command flow.
-          ? `앱 접근 가능 · 포트 ${status.port}`
+          ? `앱 응답 확인 · 포트 ${status.port}`
           : `포트 ${status.port} · 연결 중`;
 
   $('retryBtn').hidden = ready || incompatible;
@@ -236,11 +241,11 @@ function paintAlert(status, info) {
   const pairError = status && status.pairError;
   const error = page && page.lastError;
   const text = incompatible
-    ? `앱 v${status.appVersion || '?'} (프로토콜 ${status.appProtocol ?? '?'}), 확장 v${status.extensionVersion || '?'} (프로토콜 ${status.extensionProtocol ?? '?'}). 브라우저 확장 관리에서 개발자 모드를 켜고 확장을 업데이트 또는 새로고침하세요. 계속 불일치하면 COS의 확장 폴더 열기로 확인한 폴더를 로드하세요. 진행 중인 작업이 끝난 뒤 ChatGPT 탭을 새로고침하세요.`
+    ? `App v${status.appVersion || '?'} (protocol ${status.appProtocol ?? '?'}); companion v${status.extensionVersion || '?'} (protocol ${status.extensionProtocol ?? '?'}). Open your browser's Extensions page, enable Developer mode, then Update / Reload this companion. If the mismatch remains, use Open extension folder in Chat On Steroids and load that folder. Reload ChatGPT tabs when their active work is finished.`
     : pairError && pairError.message
       ? pairError.message
       : pairError && pairError.error === 'secure_storage_unavailable'
-        ? '보안 저장소를 사용할 수 없습니다. Chat On Steroids 앱에서 상태를 확인하세요.'
+        ? 'Secure credential storage is unavailable. Open Chat On Steroids for setup instructions.'
     : error && Date.now() - error.at < 10 * 60 * 1000
       ? error.text
       : '';
@@ -271,39 +276,39 @@ function paintDetails(status, info) {
   const page = info && info.page;
   const sent = info && info.delivery;
 
-  detail(grid, '앱', status ? `v${status.appVersion || '?'} · 포트 ${status.port || '—'}` : null);
+  detail(grid, 'app', status ? `v${status.appVersion || '?'} · port ${status.port || '—'}` : null);
   detail(
     grid,
-    '확장',
-    status ? `v${status.extensionVersion} · 프로토콜 ${status.extensionProtocol}` : null,
+    'extension',
+    status ? `v${status.extensionVersion} · protocol ${status.extensionProtocol}` : null,
     status && status.compatible === false
   );
-  detail(grid, '대화 ID', (info && info.conversationId) || null);
-  detail(grid, '앱 세션', (page && page.session) || null, Boolean(page && !page.session));
-  detail(grid, '탭', info ? `${info.tab} · 탐색 세대 ${info.epoch ?? '—'}` : null);
+  detail(grid, 'chat id', (info && info.conversationId) || null);
+  detail(grid, 'app session', (page && page.session) || null, Boolean(page && !page.session));
+  detail(grid, 'tab', info ? `${info.tab} · epoch ${info.epoch ?? '—'}` : null);
   detail(
     grid,
-    '귀속',
-    info ? (info.terminal ? '종료됨' : info.bound ? '연결됨' : '미연결') : null,
+    'ownership',
+    info ? (info.terminal ? 'retired' : info.bound ? 'bound' : 'unbound') : null,
     Boolean(info && info.terminal)
   );
-  detail(grid, '기록기', page ? `fiber v${page.recorderVersion} · 실행 ${page.runId}` : '미연결', !page);
-  detail(grid, '응답', page ? (page.generating ? `${shorten(page.turnId, 8)} · 진행 중` : '대기') : null);
-  detail(grid, '수집', page ? `이벤트 ${page.events}개 · 호출 ${page.calls}개` : null);
+  detail(grid, 'recorder', page ? `fiber v${page.recorderVersion} · run ${page.runId}` : 'not attached', !page);
+  detail(grid, 'turn', page ? (page.generating ? `${shorten(page.turnId, 8)} · live` : 'idle') : null);
+  detail(grid, 'observed', page ? `${page.events} events · ${page.calls} calls` : null);
   detail(
     grid,
-    '이 브라우저',
-    info ? `${info.pending}개 보관 · 총 ${info.pendingAll}개` : null,
+    'in this browser',
+    info ? `${info.pending} held · ${info.pendingAll} total` : null,
     Boolean(info && info.pendingAll)
   );
   detail(
     grid,
-    '마지막 전달',
-    sent && sent.at ? `${sent.ok ? '성공' : sent.error || '실패'} · ${sent.events} · ${ago(sent.at)} 전` : null,
+    'last delivery',
+    sent && sent.at ? `${sent.ok ? 'ok' : sent.error || 'failed'} · ${sent.events} · ${ago(sent.at)} ago` : null,
     Boolean(sent && sent.ok === false)
   );
-  detail(grid, '전달 완료', sent ? sent.total : null);
-  detail(grid, '페이지 전송', page ? `${page.sends} · ${page.failures}회 실패` : null, Boolean(page && page.failures));
+  detail(grid, 'delivered', sent ? sent.total : null);
+  detail(grid, 'page sends', page ? `${page.sends} · ${page.failures} failed` : null, Boolean(page && page.failures));
 }
 
 async function refresh() {
@@ -317,14 +322,14 @@ async function refresh() {
   const isChat = Boolean(info && info.isChat);
   const page = info && info.page;
 
-  row('tab', isChat ? 'ok' : 'off', isChat ? '' : '열린 탭 없음');
-  row('rec', !isChat ? 'off' : info.recorder ? 'ok' : 'no', !isChat ? '' : info.recorder ? (page.generating ? '응답 중' : '') : '새로고침 필요');
+  row('tab', isChat ? 'ok' : 'off', isChat ? '' : 'none open');
+  row('rec', !isChat ? 'off' : info.recorder ? 'ok' : 'no', !isChat ? '' : info.recorder ? (page.generating ? 'answering' : '') : 'reload');
 
   const chatId = info && info.conversationId;
-  idRow('chat', !isChat ? 'off' : chatId ? 'ok' : 'wait', !isChat ? '' : chatId ? shorten(chatId, 8) : '새 대화', chatId);
+  idRow('chat', !isChat ? 'off' : chatId ? 'ok' : 'wait', !isChat ? '' : chatId ? shorten(chatId, 8) : 'new chat', chatId);
 
   const requestId = page && page.requestId;
-  idRow('req', !isChat ? 'off' : requestId ? 'ok' : 'wait', !isChat ? '' : requestId ? shorten(requestId, 9) : '아직 없음', requestId);
+  idRow('req', !isChat ? 'off' : requestId ? 'ok' : 'wait', !isChat ? '' : requestId ? shorten(requestId, 9) : 'none yet', requestId);
 
   const state = pipeline(info, ready);
   stage('read', ...state.read);
@@ -335,11 +340,11 @@ async function refresh() {
   paintCalls(page);
 
   const broken = state.why[0] === 'bad';
-  const flowing = state.proc[0] === 'done';
+  const flowing = Array.isArray(page?.trace) && page.trace.some(call => call.app === 'request_id');
   row(
     'app',
     !isChat ? 'off' : broken ? 'no' : flowing ? 'ok' : 'wait',
-    !isChat ? '' : broken ? '차단됨' : flowing ? ago(info.delivery && info.delivery.at) || '진행 중' : '대기 중'
+    !isChat ? '' : broken ? 'blocked' : flowing ? 'tool matched' : state.proc[0] === 'done' ? 'ID confirmed' : 'waiting'
   );
   // Opens itself the first time something is actually wrong, so the panel that explains
   // the failure is already open when the popup is opened to look at one.
@@ -372,12 +377,12 @@ async function copyInto(button, text) {
   const was = button.textContent;
   try {
     await navigator.clipboard.writeText(text);
-    button.textContent = '복사됨';
+    button.textContent = 'copied';
   } catch {
-    button.textContent = '복사 실패';
+    button.textContent = 'copy failed';
   }
   setTimeout(() => {
-    if (button.textContent === '복사됨' || button.textContent === '복사 실패') button.textContent = was;
+    if (button.textContent === 'copied' || button.textContent === 'copy failed') button.textContent = was;
   }, 900);
 }
 

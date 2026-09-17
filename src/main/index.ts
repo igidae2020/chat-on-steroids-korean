@@ -1,3 +1,5 @@
+import { stopInputStartup } from './session/start-input.js';
+import { browserExtensionRequired } from '../shared/types.js';
 import { requestSessionFinishGoal, setFinishNotifier } from './session/finish.js';
 /**
  * Main process entry: window, tray, and the security posture for the renderer.
@@ -9,12 +11,14 @@ import { getConfig, initConfigPath, loadConfig } from './config.js';
 import { connect, disconnect, getStatus, onStatusChange, shutdownConnection } from './connection.js';
 import { registerIpc } from './ipc.js';
 import { getChatModels, restoreChatModels, startChatModelDiscovery } from './chat-models.js';
-import { initLogFile, logError, logInfo, logWarn } from './logger.js';
+import { flushLogBeforeExit, initLogFile, logError, logInfo, logWarn, snapshotLogOnCrash } from './logger.js';
 import { unifiedExecManager } from './codex/manager.js';
 import { initSecretsPath } from './secrets.js';
 import { pluginManager } from './plugins/manager.js';
 import { setBrowserOpener, setBrowserWorkArea, shutdownBridge, startBridge } from './bridge.js';
-import { flushSessions, initSessionStore, pruneSessions } from './session/store.js';
+import { flushSessions, initSessionStore } from './session/store.js';
+import { initSkillsPath } from './skills.js';
+import { usageOverview } from './session/usage.js';
 import {
   flushRecorder,
   queueDeterministicAttributionRepair,
@@ -58,7 +62,6 @@ import {
   setContinuationRecoveryHooks,
   type ContinuationSnapshot
 } from './session/continuation.js';
-import { startSessionRetentionMaintenance } from './session/retention.js';
 import { runShutdownSequence } from './shutdown.js';
 import { applyStagedUpdate, startUpdateChecks } from './update.js';
 import { UI_BASE_ZOOM, windowLayoutForWorkArea, titleBarOverlayForTheme } from './window-layout.js';
@@ -74,7 +77,7 @@ import {
 } from './window-lifecycle.js';
 import { trayGuidArgsForPlatform, trayImageSpec } from './tray-image.js';
 import { browserWindowIconPath } from './window-icon.js';
-import { editContextMenuTemplate, localizeNativeMenu } from './edit-context-menu.js';
+import { editContextMenuTemplate } from './edit-context-menu.js';
 
 /** Durable state file holding the multi-agent run. Hashes only, never credentials. */
 const SWARM_STATE = 'swarm';
@@ -85,7 +88,7 @@ let tray: Tray | null = null;
 let quitting = false;
 let shutdownStarted = false;
 let shutdownComplete = false;
-let stopSessionRetention: (() => void) | null = null;
+const usageWarmup = new AbortController();
 
 // One instance only: two copies would fight over the tunnel and the config file.
 const hasSingleInstanceLock = app.requestSingleInstanceLock();
@@ -103,7 +106,8 @@ function createWindow(): void {
   window = new BrowserWindow({
     ...layout,
     ...(icon ? { icon } : {}),
-    fullscreenable: false,
+    // Preserve the native macOS green-button fullscreen action.
+    fullscreenable: process.platform === 'darwin',
     show: false,
     autoHideMenuBar: true,
     ...(process.platform === 'win32' ? {
@@ -136,7 +140,13 @@ function createWindow(): void {
   window.once('ready-to-show', () => {
     // A renderer can finish loading after Cmd+Q has already entered bounded teardown. Never let
     // that late native event make the app visible again while `will-quit` is draining.
-    if (!quitting) showWindow();
+    if (!quitting) {
+      // Newly created windows intentionally start maximized. Keep that startup-only presentation
+      // here so later tray/Dock/native activation can show an existing user-sized window without
+      // overwriting its geometry.
+      if (!window?.isFullScreen()) window?.maximize();
+      showWindow();
+    }
   });
 
   // A renderer that fails to load leaves a blank window with no other clue, so
@@ -200,9 +210,6 @@ function showWindow(): void {
     return;
   }
   if (window.isMinimized()) window.restore();
-  // Apply maximization before showing the window so startup has the native maximized
-  // frame from its first visible paint. Preserve a user's explicit F11 fullscreen choice.
-  if (!window.isFullScreen()) window.maximize();
   window.show();
   window.focus();
 }
@@ -217,7 +224,7 @@ setFinishNotifier((title, body, sessionId, turnId) => {
     if (target.isLoadingMainFrame()) target.once('did-finish-load', open); else open();
   };
   const notice = new Notification({ title, body, actions: [
-    { type: 'button', text: '자동 Goal 보내기' }, { type: 'button', text: '직접 입력' }
+    { type: 'button', text: 'Send Automatic Goal' }, { type: 'button', text: 'Write Directly' }
   ] });
   notice.on('click', write);
   notice.on('action', (details) => {
@@ -256,21 +263,21 @@ function refreshTray(): void {
   const offline = state === 'offline';
   // Offline keeps the running icon: the bridge is up, the internet is not.
   const running = connected || offline;
-  const label = connected ? '연결됨' : offline ? '인터넷 연결 없음' : '연결 안 됨';
+  const label = connected ? 'Connected' : offline ? 'No internet' : 'Not connected';
   tray.setImage(trayIcon(running));
   tray.setToolTip(`Chat On Steroids — ${label.toLowerCase()}`);
   tray.setContextMenu(
     Menu.buildFromTemplate([
       { label, enabled: false },
       { type: 'separator' },
-      { label: '열기', click: windowActivation.request },
+      { label: 'Open', click: windowActivation.request },
       {
-        label: running ? '연결 해제' : '연결',
+        label: running ? 'Disconnect' : 'Connect',
         click: () => void (running ? disconnect() : connect())
       },
       { type: 'separator' },
       {
-        label: '종료',
+        label: 'Quit',
         click: () => {
           quitting = true;
           app.quit();
@@ -290,9 +297,14 @@ void app.whenReady().then(async () => {
   if (!shouldBeginAppBootstrap(hasSingleInstanceLock, quitting)) return;
   const userData = app.getPath('userData');
   initLogFile(path.join(userData, 'app.log'));
+  process.on('uncaughtExceptionMonitor', (error, origin) => {
+    snapshotLogOnCrash(`${origin}: ${error.stack ?? error.message}`);
+  });
   initConfigPath(userData);
   initSecretsPath(userData);
   initSessionStore(userData);
+  try { await initSkillsPath(userData); }
+  catch (error) { logWarn(`Skills library unavailable: ${error instanceof Error ? error.message : String(error)}`); }
   initDurableStore(userData);
   await restoreChatModels();
   if (windowActivation.isDisabled()) return;
@@ -305,11 +317,6 @@ void app.whenReady().then(async () => {
   // user choice instead of Electron's default `system` theme. On macOS this controls the window
   // frame, application menus and OS dialogs; on Linux/Windows it covers Electron-native UI.
   nativeTheme.themeSource = getConfig().ui.theme;
-  const applicationMenu = Menu.getApplicationMenu();
-  if (applicationMenu) {
-    localizeNativeMenu(applicationMenu);
-    Menu.setApplicationMenu(applicationMenu);
-  }
   const savedGoalObjectives = await readDurable<GoalObjectivesSnapshot>(GOAL_OBJECTIVES_STATE);
   if (windowActivation.isDisabled()) return;
   restoreGoalObjectives(savedGoalObjectives);
@@ -433,22 +440,11 @@ void app.whenReady().then(async () => {
   // traffic, so never make startup/reload wait behind years of old session history.
   queueDeterministicAttributionRepair();
 
-  // The bridge serves recording and multi-agent mode both: recording needs the
-  // extension to observe the chat, and multi-agent mode needs it to open worker tabs.
-  // Either switch being on starts it. ipc.ts applies the same rule on a settings save.
-  if (getConfig().sessions.record || getConfig().multiAgent.enabled) {
+  // Recording, workers and direct browser tools share one extension transport.
+  // ipc.ts uses the same eligibility rule when settings change.
+  if (browserExtensionRequired(getConfig())) {
     void startBridge();
   }
-  // Retention governs recordings already stored on disk, independent of whether recording is
-  // currently enabled. The tray app can stay alive for days, so run once now and keep a coarse
-  // maintenance timer rather than making expiry depend on the next process restart.
-  stopSessionRetention = startSessionRetentionMaintenance({
-    retainDays: () => getConfig().sessions.retainDays,
-    prune: pruneSessions,
-    onRemoved: (removed) => logInfo(`removed ${removed} session(s) past the retention window`),
-    onError: (err) => logError(`session pruning failed: ${err.message}`)
-  });
-
   if (getConfig().ui.autoConnect) void connect();
 
   // Never awaited: an unreachable GitHub, a slow download or a broken release must not delay a
@@ -456,6 +452,11 @@ void app.whenReady().then(async () => {
   // push, every failure ends inside it, and its own timer keeps it running for a tray app that
   // is never restarted.
   startUpdateChecks();
+  // Warm the existing derived cache once, after startup, without delaying the UI.
+  // A visit to Usage joins this same calculation; unchanged recordings cost no reads.
+  void usageOverview(usageWarmup.signal).catch((error: Error) => {
+    if (!usageWarmup.signal.aborted) logWarn(`usage background refresh failed: ${error.message}`);
+  });
 });
 
 app.on('before-quit', () => {
@@ -464,6 +465,7 @@ app.on('before-quit', () => {
   // From this point `will-quit` owns a bounded teardown. A Dock click/relaunch arriving while
   // that sequence drains must not recreate or reveal a window after the tray has disappeared.
   windowActivation.disable();
+  usageWarmup.abort();
 });
 
 app.on('window-all-closed', () => {
@@ -483,8 +485,7 @@ app.on('will-quit', (event) => {
   event.preventDefault();
   if (shutdownStarted) return;
   shutdownStarted = true;
-  stopSessionRetention?.();
-  stopSessionRetention = null;
+  stopInputStartup();
   tray?.destroy();
   tray = null;
 
@@ -519,8 +520,11 @@ app.on('will-quit', (event) => {
       // continuation that ends this sequence is dropped by Electron, and the app is left
       // running with nothing to click and the single-instance lock still held.
       exit: () => {
-        shutdownComplete = true;
-        app.exit(0);
+        // The sequence has just logged its completion; a phase inside it would flush too early.
+        void flushLogBeforeExit().finally(() => {
+          shutdownComplete = true;
+          app.exit(0);
+        });
       }
     }
   );

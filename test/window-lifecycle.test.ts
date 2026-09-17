@@ -13,35 +13,60 @@ import {
 } from '../src/main/window-lifecycle.js';
 
 describe('native window activation', () => {
-  it('maximizes before showing on launch and native reopen, preserving explicit fullscreen', () => {
+  it.each(['darwin', 'win32', 'linux'])('keeps native fullscreen available on macOS (%s)', (platform) => {
+    const source = readFileSync(new URL('../src/main/index.ts', import.meta.url), 'utf8');
+    const constructor = source.slice(source.indexOf('  window = new BrowserWindow({'), source.indexOf("  if (process.platform === 'win32') window.removeMenu();"))
+      .replace(' as const', '');
+    let options: Record<string, unknown> | undefined;
+    vm.runInNewContext(constructor, {
+      BrowserWindow: function (value: Record<string, unknown>) { options = value; },
+      layout: {}, icon: null, process: { platform },
+      titleBarOverlayForTheme: () => ({}), getConfig: () => ({ ui: { theme: 'dark' } }),
+      UI_BASE_ZOOM: 1, path: { join: () => 'preload.js' }, __dirname: '/app'
+    });
+    expect(options?.fullscreenable).toBe(platform === 'darwin');
+    expect(options?.webPreferences).toMatchObject({ sandbox: true, contextIsolation: true, nodeIntegration: false });
+  });
+
+  it('maximizes only on initial presentation and preserves user-sized geometry on reopen', () => {
     const source = readFileSync(new URL('../src/main/index.ts', import.meta.url), 'utf8');
     const present = source.slice(source.indexOf('function showWindow()'), source.indexOf('\nsetFinishNotifier(', source.indexOf('function showWindow()'))).replace('function showWindow(): void', 'function showWindow()');
     const operations: string[] = [];
-    const state = { minimized: false, fullscreen: false };
-    const native = { isMinimized: () => state.minimized, isFullScreen: () => state.fullscreen,
-      restore: () => operations.push('restore'), maximize: () => operations.push('maximize'),
+    const state = { minimized: false };
+    const native = { isMinimized: () => state.minimized, isFullScreen: () => false,
+      maximize: () => operations.push('maximize'),
+      restore: () => operations.push('restore'),
       show: () => operations.push('show'), focus: () => operations.push('focus') };
     const createWindow = vi.fn();
     const context = vm.createContext({ window: native, quitting: false, createWindow });
     vm.runInContext(present + '\nshowWindow();', context);
-    expect(operations.splice(0)).toEqual(['maximize', 'show', 'focus']);
+    expect(operations.splice(0)).toEqual(['show', 'focus']);
     state.minimized = true;
     vm.runInContext('showWindow()', context);
-    expect(operations.splice(0)).toEqual(['restore', 'maximize', 'show', 'focus']);
-    state.minimized = false; state.fullscreen = true;
-    vm.runInContext('showWindow()', context);
-    expect(operations.splice(0)).toEqual(['show', 'focus']);
+    expect(operations.splice(0)).toEqual(['restore', 'show', 'focus']);
     context.quitting = true;
     vm.runInContext('showWindow()', context);
     expect(operations).toEqual([]);
 
     let ready!: () => void;
     const startup = source.slice(source.indexOf("  window.once('ready-to-show'"), source.indexOf('  // A renderer that fails', source.indexOf("  window.once('ready-to-show'")));
-    const showWindow = vi.fn();
-    const launch = vm.createContext({ window: { once: (_event: string, listener: () => void) => { ready = listener; } }, quitting: false, showWindow });
+    const startupOperations: string[] = [];
+    const startupState = { fullscreen: false };
+    const showWindow = vi.fn(() => startupOperations.push('showWindow'));
+    const launch = vm.createContext({ window: {
+      once: (_event: string, listener: () => void) => { ready = listener; },
+      isFullScreen: () => startupState.fullscreen,
+      maximize: () => startupOperations.push('maximize')
+    }, quitting: false, showWindow });
     vm.runInContext(startup, launch);
-    ready(); expect(showWindow).toHaveBeenCalledTimes(1);
-    launch.quitting = true; ready(); expect(showWindow).toHaveBeenCalledTimes(1);
+    ready();
+    expect(startupOperations.splice(0)).toEqual(['maximize', 'showWindow']);
+    startupState.fullscreen = true;
+    ready();
+    expect(startupOperations.splice(0)).toEqual(['showWindow']);
+    launch.quitting = true;
+    ready();
+    expect(showWindow).toHaveBeenCalledTimes(2);
   });
   it('discovers on first visible use only when there is no saved catalog, never on repeat show or quit', async () => {
     const source = readFileSync(new URL('../src/main/index.ts', import.meta.url), 'utf8');

@@ -17,6 +17,9 @@ import fs from 'node:fs/promises';
 import nodePath from 'node:path';
 import { afterAll, beforeAll, beforeEach, describe, expect, it, vi } from 'vitest';
 import type { ContinuationSnapshot } from '../src/main/session/continuation.js';
+import { MAX_CHATGPT_MESSAGE_CHARS } from '../src/shared/user-prompt.js';
+import { nativeHandoffPrompt } from '../src/main/session/handoff-prompt.js';
+import { handoffPlanNotice, resumeBootstrapText } from '../src/main/session/handoff.js';
 
 vi.mock('electron', () => ({
   safeStorage: {
@@ -46,8 +49,8 @@ const { makeTempDir, removeTempDir, SAMPLE_BRIEF } = await import('./helpers.js'
 const { BRIDGE_PROTOCOL } = await import('../src/main/version.js');
 
 const EXTENSION_ORIGIN = 'chrome-extension://abcdefghijklmnopabcdefghijklmnop';
-const CHAT_A = '6a805197-b090-83eb-bbd8-a32b482941da';
-const CHAT_B = '7b916208-c1a1-94fc-cce9-b43c593a52eb';
+const CHAT_A = 'f0f00003-1111-4111-8111-111111111111';
+const CHAT_B = 'f0f00015-1111-4111-8111-111111111111';
 const BRIEF = SAMPLE_BRIEF;
 
 let dir: string;
@@ -330,6 +333,9 @@ describe('one press, one transaction', () => {
     expect(again.body.token).toBe(first.token);
     expect(again.body.started).toBe(false);
     expect(again.body.prompt).toContain(`[[CLF-HANDOFF:${first.token}]]`);
+    expect(first.prompt).toBe(nativeHandoffPrompt(first.token, false));
+    expect(again.body.prompt).toBe(first.prompt);
+    expect(first.prompt).not.toContain('[[COS_CONTEXT:');
 
     const claimed = await request('POST', '/compact', {
       body: { conversationId: CHAT_A, token: first.token, sourceAttempt: true }
@@ -459,26 +465,58 @@ describe('a brief longer than the app can type', () => {
     // And the cut is in the brief where the model reading it will see it, not silent.
     expect(text).toMatch(/left out/);
     expect(text.length).toBeLessThan(huge.length);
+    expect(text.length).toBeLessThanOrEqual(MAX_CHATGPT_MESSAGE_CHARS);
   });
 
   it('carries a large near-budget handoff without a hidden character-budget truncation', async () => {
     await connect();
     await record();
     const { token: continuation } = await press();
-    const brief = `TASK — keep all of this.\n${'dense operational detail '.repeat(6500)}\nNEXT — continue exactly here.`;
-    expect(brief.length).toBeGreaterThan(150_000);
-    expect(brief.length).toBeLessThan(256_000);
+    const head = 'TASK — keep all of this.\n', tail = '\nNEXT — continue exactly here.';
+    const noticeBudget = handoffPlanNotice('x'.repeat(64)).length;
+    const overhead = resumeBootstrapText('', continuation).length + noticeBudget;
+    const brief = head + 'dense operational detail '.repeat(6500).slice(0,
+      MAX_CHATGPT_MESSAGE_CHARS - overhead - head.length - tail.length - 8) + tail;
 
     const stored = await capture(continuation, brief);
     const commandId = stored.body.commandId as string;
     const text = (await redeem(commandId, 'page-long')).body.command.text as string;
 
     expect(text).toContain(brief);
+    expect(text).not.toContain('[[COS_CONTEXT:');
     expect(text).not.toMatch(/middle of this brief.*left out/);
+    expect(text.length).toBeLessThanOrEqual(MAX_CHATGPT_MESSAGE_CHARS);
+    expect(text.length).toBeGreaterThan(MAX_CHATGPT_MESSAGE_CHARS - noticeBudget - 100);
   });
 });
 
 describe('the replacement chat', () => {
+  it('carries frozen source selection to placement and redemption, then records fresh destination evidence', async () => {
+    await connect();
+    const sessionId = await record();
+    const observedAt = Date.now();
+    const select = (conversationId: string, model: string, time: number) => request('POST', '/events', {
+      body: { conversationId, events: [{ kind: 'model_selection', time, model, reasoningEffort: 'high' }] }
+    });
+    await select(CHAT_A, 'gpt-5.6-sol', observedAt);
+    const { token: continuation } = await press();
+    await select(CHAT_A, 'gpt-6-astra', observedAt + 1);
+    const captured = await capture(continuation);
+    expect(captured.body.placement).toMatchObject({ model: 'gpt-5.6-sol', reasoningEffort: 'high' });
+    const commandId = captured.body.commandId;
+    const redeemed = await redeem(commandId, 'model-page');
+    expect(redeemed.body.command).toMatchObject({ model: 'gpt-5.6-sol', reasoningEffort: 'high' });
+    const ack = await request('POST', '/commands/ack', {
+      body: { id: commandId, status: 'sent', conversationId: CHAT_B, client: 'model-page' }
+    });
+    expect(ack.body.committed).toBe(true);
+    // Carrying intent and rebinding are not a new model observation.
+    expect((await getSession(sessionId))?.selectedModel?.conversationId).not.toBe(CHAT_B);
+    await select(CHAT_B, 'gpt-5.6-sol', observedAt + 2);
+    expect((await getSession(sessionId))?.selectedModel).toEqual({ conversationId: CHAT_B,
+      model: 'gpt-5.6-sol', reasoningEffort: 'high', observedAt: observedAt + 2 });
+  });
+
   // Two pages on one marker is the shape every duplicate-tab failure takes: a reload
   // restored into a new document, "reopen closed tab", a link opened twice.
   it('can move documents until a page arms the click, and never after it', async () => {
@@ -497,7 +535,7 @@ describe('the replacement chat', () => {
     // Claimed, then gone before the click — the same crash point as the source half, and the
     // same answer: nothing was typed under this state, so the next document may have it.
     const claimed = await request('POST', '/compact', {
-      body: { token: continuation, destinationAttempt: true }
+      body: { token: continuation, commandId, client: 'page-2', destinationAttempt: true }
     });
     expect(claimed.body.allowed).toBe(true);
     const afterClaim = await redeem(commandId, 'page-3');
@@ -507,13 +545,13 @@ describe('the replacement chat', () => {
     // Armed. This bootstrap may exist in a chat this app cannot yet name, so it is never
     // handed to another document; only the marked message can resolve it.
     const armed = await request('POST', '/compact', {
-      body: { token: continuation, destinationDispatch: true }
+      body: { token: continuation, commandId, client: 'page-3', destinationDispatch: true }
     });
     expect(armed.body.armed).toBe(true);
     expect((await redeem(commandId, 'page-3')).status).toBe(409);
     expect((await redeem(commandId, 'page-4')).status).toBe(409);
     expect(
-      (await request('POST', '/compact', { body: { token: continuation, destinationAttempt: true } })).body.allowed
+      (await request('POST', '/compact', { body: { token: continuation, commandId, client: 'page-3', destinationAttempt: true } })).body.allowed
     ).toBe(false);
   });
 

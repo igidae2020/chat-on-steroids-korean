@@ -1,16 +1,15 @@
+import { toolDeclaration } from './tool-declarations.js';
+import { registerPlanTool } from './plan-tool.js';
 import { goalWorkerChat } from '../bridge.js';
-import { announceSessionFinish } from '../session/finish.js';
+import { announceSessionFinish, sessionFinishDeadline } from '../session/finish.js';
 import { getConfig } from '../config.js';
 /**
  * The Core connector: reading, changing and running code on this PC.
  *
- * Nine tools at the absolute maximum, and usually seven. That number is the design (see
- * `docs/tool-surface.md` §3): a no-query discovery pull against this connector returns
- * every schema here at once, so the surface is sized for the worst case rather than for
- * the case where the harness happens to ask a narrow question.
+ * A no-query discovery returns every exposed schema here at once. Keep the surface
+ * bounded and derive its count from the live declarations in surfaces.ts.
  *
- * What used to be forty-five tools did not become nine by dropping capability. It became
- * eight by separating *primitives* from *procedures*: `exec_command` can run git, so `git`
+ * The surface separates primitives from procedures: `exec_command` can run git, so `git`
  * is a skill rather than a tool; `read` can open a directory, a text file or an image,
  * because those are three shapes of one question. Anything that reads as "and also, for
  * this special case…" belongs in a skill over these primitives, not in a schema every
@@ -53,7 +52,7 @@ import { formatExecOutputForModel, newStreamOutput } from '../codex/exec-output.
 import { DEFAULT_TRUNCATION_POLICY, EXEC_OUTPUT_CEILING_POLICY, unifiedExecManager } from '../codex/manager.js';
 import {
   backgroundExecObligations,
-  execOwnershipDenied,
+  execOwnershipFailure,
   forgetExecOwner,
   MAX_UNREAD_EXEC_RESULTS_PER_CONVERSATION,
   noteExecAttended,
@@ -86,7 +85,6 @@ import {
   EXEC_COMMAND_WORKDIR_DESCRIPTION,
   EXEC_COMMAND_YIELD_TIME_DESCRIPTION,
   MAX_OUTPUT_TOKENS_DESCRIPTION,
-  MAX_OUTPUT_TOKENS_RETIRED_NOTE,
   WRITE_STDIN_CHARS_DESCRIPTION,
   WRITE_STDIN_DESCRIPTION,
   WRITE_STDIN_SESSION_ID_DESCRIPTION,
@@ -126,7 +124,6 @@ import { repairPrimeFromResumeShadow } from '../session/continuation.js';
 import {
   currentCall,
   currentCaller,
-  noteChange,
   noteChanges,
   noteCount,
   noteDetail,
@@ -140,6 +137,7 @@ import { findSessionByConversation } from '../session/store.js';
 import {
   adoptAgent,
   fail,
+  failIdentity,
   formatFileInfo,
   friendlyError,
   guard,
@@ -154,10 +152,6 @@ import {
   type SurfaceRegistrar,
   type ToolResult
 } from './kernel.js';
-import { registerSessionTool as registerSessionSearchReadTool } from './session-tool.js';
-import { ArtifactFetchError } from './artifact-fetch.js';
-import { ArtifactTargetError } from './artifact-target.js';
-import { downloadArtifactFile } from './artifact-download.js';
 
 /** Entries one `read` of a directory returns before it says it stopped. */
 const MAX_DIR_ENTRIES = 200;
@@ -165,6 +159,8 @@ const MAX_DIR_ENTRIES = 200;
 const MAX_GLOB_MATCHES = 20;
 /** Files a single `read` call may touch after every path and glob is expanded. */
 const MAX_READ_TARGETS = 40;
+const MAX_READ_IMAGES = 4;
+const MAX_READ_IMAGE_BYTES = 12 * 1024 * 1024;
 /** Entries a glob walk will look at before giving up on the pattern. */
 const GLOB_SCAN_LIMIT = 5_000;
 
@@ -190,15 +186,16 @@ const excludeFolderPattern = z
 
 const unifiedExecOutputSchema = z
   .object({
-    chunk_id: z.string().optional().describe('Chunk identifier included when the response reports one.'),
-    wall_time_seconds: z.number().describe('Elapsed wall time spent waiting for output in seconds.'),
+    chunk_id: z.string().optional().describe('Output chunk identifier.'),
+    wall_time_seconds: z.number().describe('Seconds spent waiting for output.'),
     exit_code: z.number().optional().describe('Process exit code when the command finished during this call.'),
     session_id: z
       .number()
       .optional()
       .describe('Session identifier to pass to write_stdin when the process is still running.'),
     original_token_count: z.number().optional().describe('Approximate token count before output truncation.'),
-    output: z.string().describe('Command output text, possibly truncated.')
+    output: z.string().describe('Command output text, possibly truncated.'),
+    supplemental_context: z.string().optional().describe('App context, not process output.')
   })
   .strict();
 
@@ -273,7 +270,7 @@ export function registerCoreTools(reg: SurfaceRegistrar): void {
   if (exposedCaps.read || exposedCaps.browse || exposedCaps.metadata) {
     reg.register(
       'read',
-      {
+      toolDeclaration('read', () => ({
         title: 'Read files and folders',
         description:
           'Read what is at one or more paths. A folder is listed one level deep, a text file comes back as numbered lines, ' +
@@ -281,7 +278,7 @@ export function registerCoreTools(reg: SurfaceRegistrar): void {
           'Paths may contain * ? and ** and are expanded here. Every result starts with a header giving size, timestamps and line count. ' +
           `The line-number prefix is display metadata, not file content — strip it before quoting text into apply_patch. ` +
           `start_line/end_line apply to every file the call resolves to; a path may instead carry its own range as path:12-40 or path:12, so several ranges of one file fit in one call. A typical 1,500-line source file fits in the default read: do not pre-paginate it. ` +
-          `Batch related paths in one call; only continue from a line when the returned header says more lines follow. The aggregate payload remains bounded at about ${formatBytes(MAX_READ_BYTES)}.`,
+          `Batch related paths in one call; only continue from a line when the returned header says more lines follow. Text is bounded at about ${formatBytes(MAX_READ_BYTES)}; images have a separate ${MAX_READ_IMAGES}-image, ${formatBytes(MAX_READ_IMAGE_BYTES)} base64 budget and view_image's per-file validation.`,
         inputSchema: z
           .object({
             paths: z
@@ -307,7 +304,7 @@ export function registerCoreTools(reg: SurfaceRegistrar): void {
           })
           .strict(),
         annotations: { readOnlyHint: true, destructiveHint: false, idempotentHint: true, openWorldHint: false }
-      },
+      }), readPathDescription),
       async ({ paths, start_line, end_line, max_bytes }) =>
         guard('read', async () => {
           if (!caps.read && !caps.browse && !caps.metadata) {
@@ -371,6 +368,7 @@ export function registerCoreTools(reg: SurfaceRegistrar): void {
           const sections: string[] = [];
           const images: Array<{ data: string; mimeType: string }> = [];
           let remaining = MAX_READ_BYTES;
+          let imageBytes = 0;
           let failures = 0;
           let successes = 0;
 
@@ -387,12 +385,15 @@ export function registerCoreTools(reg: SurfaceRegistrar): void {
                 startLine: target.range ? target.range.start : start_line,
                 endLine: target.range ? target.range.end : end_line,
                 maxBytes: Math.min(max_bytes ?? DEFAULT_READ_BYTES, remaining),
-                aggregateBytes: remaining
+                imageBytes: images.length < MAX_READ_IMAGES ? MAX_READ_IMAGE_BYTES - imageBytes : 0
               });
               remaining -= section.bytes;
               successes++;
               sections.push(section.text);
-              if (section.image) images.push(section.image);
+              if (section.image) {
+                images.push(section.image);
+                imageBytes += section.image.data.length;
+              }
             } catch (err) {
               failures++;
               // One stale or missing path must not destroy the useful reads. The requested
@@ -433,14 +434,14 @@ export function registerCoreTools(reg: SurfaceRegistrar): void {
   if (exposedCaps.read) {
     reg.register(
       'view_image',
-      {
+      toolDeclaration('view_image', () => ({
         description: VIEW_IMAGE_DESCRIPTION,
         inputSchema: z
           .object({
             path: z.string().describe(VIEW_IMAGE_PATH_DESCRIPTION)
           })
           .strict()
-      },
+      })),
       async ({ path }) =>
         guard('view_image', async () => {
           if (!caps.read) {
@@ -477,7 +478,7 @@ export function registerCoreTools(reg: SurfaceRegistrar): void {
   if (reg.findExposed) {
     reg.register(
       'find',
-      {
+      toolDeclaration('find', () => ({
         title: 'Find files or text',
         description:
           'Find files by name, or find text inside files, without running a command. ' +
@@ -515,7 +516,7 @@ export function registerCoreTools(reg: SurfaceRegistrar): void {
           })
           .strict(),
         annotations: { readOnlyHint: true, destructiveHint: false, idempotentHint: true, openWorldHint: false }
-      },
+      })),
       async ({ query, path: p, mode, include, exclude, case_sensitive, regex, max_results }) =>
         reg.guarded('search', 'find', async () => {
           const limit = Math.min(500, Math.max(1, Math.floor(max_results ?? 50)));
@@ -600,14 +601,14 @@ export function registerCoreTools(reg: SurfaceRegistrar): void {
   if (exposedCaps.create || exposedCaps.edit || exposedCaps.move || exposedCaps.deleteFile) {
     reg.register(
       'apply_patch',
-      {
+      toolDeclaration('apply_patch', () => ({
         description: APPLY_PATCH_DESCRIPTION,
         inputSchema: z
           .object({
             patch: z.string().describe(APPLY_PATCH_ARGUMENT_DESCRIPTION)
           })
           .strict()
-      },
+      })),
       async ({ patch }) =>
         guard('apply_patch', async () => {
           if (!caps.create && !caps.edit && !caps.move && !caps.deleteFile) {
@@ -635,7 +636,8 @@ export function registerCoreTools(reg: SurfaceRegistrar): void {
               'WORKSPACE_REQUIRED: this multi-agent chat has no proven workspace. Use an absolute path in another tool first so the approved project can be learned.'
             );
           }
-          const baseVirtual = workspace?.virtual ?? (ctx.roots[0] ? `/${ctx.roots[0].name}` : null);
+          const fallback = firstTaskRoot(ctx.roots);
+          const baseVirtual = workspace?.virtual ?? (fallback ? `/${fallback.name}` : null);
           if (baseVirtual === null) {
             return fail('No folder is approved, so there is nowhere to apply the patch.');
           }
@@ -650,7 +652,7 @@ export function registerCoreTools(reg: SurfaceRegistrar): void {
   if (exposedCaps.command) {
     reg.register(
       'exec_command',
-      {
+      toolDeclaration('exec_command', () => ({
         description: EXEC_COMMAND_DESCRIPTION,
         inputSchema: z
           .object({
@@ -675,7 +677,7 @@ export function registerCoreTools(reg: SurfaceRegistrar): void {
             }
           }),
         outputSchema: unifiedExecOutputSchema
-      },
+      })),
       async (input) =>
         reg.guarded('command', 'exec_command', async () => {
           const dir = await resolveCwd(ctx, input.workdir);
@@ -740,7 +742,8 @@ export function registerCoreTools(reg: SurfaceRegistrar): void {
           // PATH, so a shadowing `rg` is not a harmless customization: it breaks the normalizer's
           // assumptions and makes exit-code attribution unknowable. Bind ordinary bare rg/ripgrep
           // invocations to the shipped executable on PowerShell and POSIX shells.
-          const boundCommand = isBatch ? composeCommandBatch(boundCommands, shell.shellType) : boundCommands[0]!;
+          const batch = isBatch ? composeCommandBatch(boundCommands, shell.shellType) : undefined;
+          const boundCommand = batch?.command ?? boundCommands[0]!;
           const commandDetail = isBatch
             ? `[batch ${rawCommands.length}] ${rawCommands.join(' ; ')}`
             : rawCommands[0]!;
@@ -791,7 +794,7 @@ export function registerCoreTools(reg: SurfaceRegistrar): void {
               const sessionIds = unread.map((session) => session.processId).join(', ');
               return fail(
                   `EXEC_RESULTS_UNREAD: ${unread.length} completed background results are still waiting for this session. ` +
-                  `Drain session IDs ${sessionIds} with write_stdin before starting another command. No child was spawned.`
+                  `Their output follows in tool responses; read it before retrying. Explicit write_stdin is also available for IDs ${sessionIds}. No child was spawned.`
               );
             }
 
@@ -802,6 +805,7 @@ export function registerCoreTools(reg: SurfaceRegistrar): void {
             forgetExecOwner(processId);
 
             const output = await unifiedExecManager.execCommand({
+              batchMarker: batch?.marker,
               command,
               shellType: shell.shellType,
               hookCommand: commandDetail,
@@ -833,7 +837,7 @@ export function registerCoreTools(reg: SurfaceRegistrar): void {
             // "no matches" is exit 1 and reporting the batch as failed is what makes a model run
             // the whole thing again. Require a complete set of sections, so a truncated tail
             // cannot let an unseen real failure pass as benign.
-            const batchSections = isBatch ? parseCommandBatchSections(responseText) : [];
+            const batchSections = batch ? parseCommandBatchSections(output.rawOutput.toString('utf8'), batch.marker) : [];
             const nonZeroSections = batchSections.filter((section) => section.exitCode !== 0);
             const benign = isBatch
               ? batchSections.length === rawCommands.length &&
@@ -843,6 +847,7 @@ export function registerCoreTools(reg: SurfaceRegistrar): void {
                 )
               : nonZeroExitIsBenign(boundCommand, output.exitCode, responseText);
             noteExec({
+              completion: output.completion,
               ...(output.processId === null ? {} : { id: String(output.processId) }),
               running: output.processId !== null,
               exitCode: output.exitCode,
@@ -871,7 +876,6 @@ export function registerCoreTools(reg: SurfaceRegistrar): void {
                   ]
                 : [];
             const notes = [
-              ...(input.max_output_tokens === undefined ? [] : [MAX_OUTPUT_TOKENS_RETIRED_NOTE]),
               ...commandNotes,
               ...mixedBatch,
               ...(benign
@@ -914,7 +918,7 @@ export function registerCoreTools(reg: SurfaceRegistrar): void {
 
     reg.register(
       'write_stdin',
-      {
+      toolDeclaration('write_stdin', () => ({
         description: WRITE_STDIN_DESCRIPTION,
         inputSchema: z
           .object({
@@ -925,17 +929,22 @@ export function registerCoreTools(reg: SurfaceRegistrar): void {
           })
           .strict(),
         outputSchema: unifiedExecOutputSchema
-      },
+      })),
       async (input) =>
         reg.guarded('command', 'write_stdin', async () => {
-          // A session id is a small integer that means nothing outside the chat that was given
-          // it, and every chat reaches the same manager here. Refuse only what is proven to
-          // belong elsewhere; an unproven caller keeps working exactly as before.
+          // The ownership registry decides both admission and the reason for refusal.
+          // Missing caller proof is retryable; anonymous custody and a different owner are not.
           const asking = await execSession('write_stdin');
-          if (execOwnershipDenied(input.session_id, asking)) {
-            return fail(
-              `write_stdin failed: session ${input.session_id} is not proven to belong to this durable Chat On Steroids session. Start your own with exec_command or retry after the extension reconnects.`
-            );
+          const denied = execOwnershipFailure(input.session_id, asking);
+          if (denied) {
+            const reason = {
+              unavailable: 'EXEC_SESSION_UNAVAILABLE: This process id is not available to this call in the running app. Check the original exec_command response and earlier results for its exit/output before deciding what remains; do not rerun the command solely because its id is unavailable.',
+              anonymous: 'EXEC_SESSION_ANONYMOUS: This process was launched without proven chat identity. An identified chat cannot adopt it. Check the original command and its saved output; retrying from this identified chat cannot change its ownership.',
+              unidentified: 'EXEC_CALLER_UNIDENTIFIED: The current call has no proven chat identity, so it cannot access this owned process. After exact identity recovers, retry this same session_id once; do not launch a replacement command.',
+              'different-owner': 'EXEC_SESSION_OWNER_MISMATCH: This process belongs to a different local session. Only its owning session can poll it or send input; use a process id returned to this session.'
+            }[denied];
+            const message = `write_stdin failed for session ${input.session_id}: ${reason} No input was sent and no output was read. This refusal concerns this process id, not Read-only mode or permission to edit files or launch other authorized work.`;
+            return denied === 'unidentified' ? failIdentity(message) : fail(message);
           }
           // Both sides of the wait. An empty poll blocks for seconds by design, and a caller
           // sitting in one is attending its session rather than neglecting it.
@@ -977,91 +986,23 @@ export function registerCoreTools(reg: SurfaceRegistrar): void {
     );
   }
 
-  // ------------------------------------------------------- download_artifact
+  // ------------------------------------------------------- plan and finish
 
-  // Requests ChatGPT native-file injection. The gateway still validates the reference,
-  // exact host and sandbox destination; metadata alone is not provenance proof.
-  if (exposedCaps.saveArtifact) {
-    reg.register(
-      'download_artifact',
-      {
-        title: 'Save ChatGPT file',
-        description:
-          'Save one file ChatGPT generated or attached to a path inside an approved folder. ' +
-          'The file value is supplied by ChatGPT itself — never invent download_url or file_id values. ' +
-          'The destination must not already exist and its parent folder must already exist. ' +
-          'Use for images, PDFs, archives and other files ChatGPT produces; never recreate such files with apply_patch or exec_command.',
-        inputSchema: z
-          .object({
-            file: z
-              .strictObject({
-                download_url: z.string(),
-                file_id: z.string(),
-                mime_type: z.string().nullable().optional(),
-                file_name: z.string().nullable().optional(),
-                name: z.string().nullable().optional(),
-                size: z.number().int().nonnegative().nullable().optional()
-              })
-              .describe('Native file value injected by ChatGPT.'),
-            path: pathArg.describe(
-              'Destination inside an approved folder: a virtual /<root>/... path or an absolute native path. ' +
-                'Relative paths resolve against this chat\'s folder. The destination must name a file that does not already exist.'
-            )
-          })
-          .strict(),
-        annotations: { readOnlyHint: false, destructiveHint: false, idempotentHint: false, openWorldHint: true },
-        _meta: { 'openai/fileParams': ['file'] }
-      },
-      async ({ file, path: requestedPath }) =>
-        guard('download_artifact', async () => {
-          if (!caps.saveArtifact) {
-            return fail(
-              'TOOL_DISABLED: download_artifact is disabled by the current Chat On Steroids permissions. Ask the user to enable saving ChatGPT files in the app.'
-            );
-          }
-          try {
-            const saved = await downloadArtifactFile(ctx.roots, requestedPath, file, {
-              maxFileBytes: getConfig().artifacts.maxFileBytes
-            });
-            noteChange({ path: saved.virtual, added: 0, removed: 0, approximate: true });
-            logInfo(`tool download_artifact ${saved.virtual} (${formatBytes(saved.size)}, ${saved.sha256})`);
-            return {
-              content: [
-                {
-                  type: 'text' as const,
-                  text: `Saved ${saved.virtual} (${formatBytes(saved.size)}, ${saved.sha256}).`
-                }
-              ],
-              structuredContent: { path: saved.virtual, size: saved.size, sha256: saved.sha256 }
-            };
-          } catch (error) {
-            if (
-              error instanceof ArtifactFetchError ||
-              error instanceof ArtifactTargetError ||
-              error instanceof SandboxError
-            ) {
-              return fail(`download_artifact failed: ${error.message}`);
-            }
-            throw error;
-          }
-        })
-    );
+  if (reg.sessionToolsExposed) {
+    registerPlanTool(reg);
   }
-
-  // ---------------------------------------------------------------- session
-
-  if (reg.sessionToolsExposed) registerSessionSearchReadTool(reg);
   if (reg.ctx.exposedFinishTool ?? getConfig().ui.finishTool === true) {
-    reg.register('session_finish', {
-      description: 'For Astra only. Use this tool only when a user prompt explicitly requests it. Signal that you are approaching task completion; receive queued user instructions before any finish action. While HELD, follow attached instructions and call again before finishing. Each call waits at most 25 seconds.',
+    reg.register('session_finish', toolDeclaration('session_finish', () => ({
+      description: 'For Astra only, when explicitly requested by a user prompt. Call near actual completion, after implementing the requested work. Receives queued instructions; complete and verify them before calling again. Do not use for progress updates or queue collection. While HELD with no work remaining, call to wait. Each call waits at most 25 seconds.',
       inputSchema: z.object({ summary: z.string().min(1).max(1000) }),
       annotations: { readOnlyHint: false, destructiveHint: false, idempotentHint: false, openWorldHint: true }
-    }, async ({ summary }) => {
+    })), async ({ summary }) => {
       if (!getConfig().ui.finishTool) return { content: [{ type: 'text' as const, text: 'RELEASED: The user disabled finish hold. You may write your final answer.' }] };
       const caller = currentCaller();
-      if (!caller.sessionId || !caller.conversationId) return fail('Exact session identity is required');
+      if (!caller.sessionId || !caller.conversationId) return failIdentity('Exact session identity is required');
       if (goalWorkerChat(caller.conversationId)) return fail('Session finish hold is not applicable to workers or decision helpers. Workers report with agents action=finish; decision helpers answer normally.');
-      return guard('session_finish', async () => ({ content: [{ type: 'text', text: await announceSessionFinish(caller.sessionId!, summary) }] }));
+      const deadline = sessionFinishDeadline(currentCall()?.startedAt ?? Date.now());
+      return guard('session_finish', async () => ({ content: [{ type: 'text', text: await announceSessionFinish(caller.sessionId!, summary, deadline) }] }));
     });
   }
 
@@ -1109,7 +1050,9 @@ export function registerCoreTools(reg: SurfaceRegistrar): void {
  * handing back a worker the prime was already told was finished.
  */
 async function measureSleepingWorkers(caller: Caller): Promise<void> {
-  for (const info of swarmStateForCaller(caller).agents) {
+  const state = swarmStateForCaller(caller);
+  if (state.agents.length === 0) return;
+  for (const info of state.agents) {
     if (info.role !== 'worker' || info.state !== 'sleeping' || !info.conversationId) continue;
     const summary = await findSessionByConversation(info.conversationId, { requireUnique: true }).catch(() => null);
     if (summary) noteAgentContextTokens(info.conversationId, summary.contextTokens);
@@ -1132,10 +1075,10 @@ async function measureSleepingWorkers(caller: Caller): Promise<void> {
 function registerAgentsTool(reg: SurfaceRegistrar): void {
   reg.register(
     'agents',
-    {
+    toolDeclaration('agents', () => ({
       title: 'Multi-agent run',
       description:
-        'Run ChatGPT workers. Reuse a suitable sleeping worker with message before spawn; spawn creates fresh worker chats for new parallel work. Sleeping/terminal workers stay in this prime conversation’s durable history. ' +
+        'Run ChatGPT workers. Omit model and reasoning_effort unless the user explicitly requests an override; app settings supply their defaults automatically. Do not ask the user to choose these settings before spawning. Reuse a suitable sleeping worker with message before spawn; spawn creates fresh worker chats for new parallel work. Sleeping/terminal workers stay in this prime conversation’s durable history. ' +
         'message: prime→worker or worker→prime; messaging a sleeping worker revives that exact existing chat when a slot is free. Replies arrive on later tool results, so never poll. ' +
         'status shows this prime’s full worker history, including sleeping/revivable and terminal/non-revivable workers, even while no run is active. finish reports a worker result and normally puts it to sleep.',
       inputSchema: z.object({
@@ -1163,13 +1106,13 @@ function registerAgentsTool(reg: SurfaceRegistrar): void {
                 .max(80)
                 .optional()
                 .describe(
-                  'ChatGPT model slug for this worker only, e.g. to keep an expensive model for yourself. Omit for the default set in app settings.'
+                  'Omit unless the user explicitly requests a model override; app settings supply their default. Overrides require an exact account-observed model id or provider alias; never guess spellings. Invalid choices return observed ids before workers open; the browser confirms availability before sending.'
                 ),
               reasoning_effort: z
                 .enum(REASONING_EFFORTS)
                 .optional()
                 .describe(
-                  'How much reasoning this worker uses. Independent of model: it never selects or changes one. Omit for the default set in app settings.'
+                  'Omit unless the user explicitly requests a reasoning override; app settings supply their default automatically. Do not ask for a reasoning level just to spawn a worker. Independent of model: it never selects or changes one.'
                 )
             }).strict()
           )
@@ -1225,7 +1168,7 @@ function registerAgentsTool(reg: SurfaceRegistrar): void {
       })
       .strict(),
       annotations: { readOnlyHint: false, destructiveHint: false, idempotentHint: false, openWorldHint: true }
-    },
+    })),
     async (input) => {
       // One clock for one MCP call. The dispatcher owns startedAt and the recorder later uses
       // that exact value to consume any page request reserved while proving caller identity.
@@ -1357,18 +1300,15 @@ function registerAgentsTool(reg: SurfaceRegistrar): void {
               {
                 type: 'text' as const,
                 text:
-                  `Queued for ${sent.map((message) => message.to).join(', ')}. ` +
+                  `Queued for ${[...new Set(sent.map((message) => message.to))].join(', ')}.` +
                   (woken.length > 0
-                    ? `${woken.join(', ')} ${woken.length === 1 ? 'was' : 'were'} asleep and ${woken.length === 1 ? 'is' : 'are'} ` +
-                      'being woken in the same chat, with everything already known there still in it; your message is ' +
-                      'the next thing it reads. '
-                    : '') +
-                  'Carry on with the work — a reply, if there is one, arrives at the end of a later tool result.'
+                    ? ` Waking ${woken.join(', ')} in ${woken.length === 1 ? 'the same chat' : 'their existing chats'}.`
+                    : '')
               }
             ],
             structuredContent: {
               action: 'message',
-              queued: sent.map((message) => ({ id: message.id, to: message.to })),
+              queued: sent.map((message) => ({ to: message.to })),
               waking: woken
             }
           };
@@ -1428,15 +1368,17 @@ function registerAgentsTool(reg: SurfaceRegistrar): void {
           };
         }
 
-        // status. Read-only, and deliberately small: it is the run as its own members see it,
-        // and `identify` is what decides whether this caller is one of them. An unrelated
-        // chat is told AGENTS_BUSY and nothing else — not who the prime is, not how many
-        // workers there are, not what any of them are doing.
+        // Status describes only this exact caller's family. No family is a normal empty
+        // result, independent of whether another prime has workers; discovery grants no role.
         const caller = await callerNow(startedAt);
         await measureSleepingWorkers(caller);
         const status = statusForCaller(caller);
         const me = status.self;
         const state = status.state;
+        if (!me) return {
+          content: [{ type: 'text' as const, text: 'No workers or retained worker history belong to this conversation. Use agents action=spawn if the task needs workers.' }],
+          structuredContent: { action: 'status', run_id: null, self: null, agents: [], free_worker_slots: status.freeWorkerSlots }
+        };
         const failed = state.agents.filter((info) => info.state === 'failed');
         // The word the model reads here is the whole answer to "may I use this worker again".
         // A sleeping worker is not a spent one, and calling it finished in this table is what
@@ -1454,15 +1396,6 @@ function registerAgentsTool(reg: SurfaceRegistrar): void {
               : info.state;
         const asleep = state.agents.filter((info) => info.state === 'sleeping' && info.revivable);
         const slots = status.freeWorkerSlots;
-        // The recording id is what `session action=read` wants, and a prime that lacks it
-        // searches recordings by the task text instead — a hundred such searches in the 50
-        // most recent recorded sessions, each answering with the prime's own chat as well.
-        const recordings = new Map<string, string>();
-        for (const info of state.agents) {
-          if (info.id === me.id || !info.conversationId) continue;
-          const summary = await findSessionByConversation(info.conversationId, { requireUnique: true }).catch(() => null);
-          if (summary) recordings.set(info.id, summary.id);
-        }
         return {
           content: [
             {
@@ -1475,15 +1408,11 @@ function registerAgentsTool(reg: SurfaceRegistrar): void {
                       `${info.id}  ${info.role}  ${shown(info)}  waiting ${info.pending}  ${info.label}` +
                       (info.model ? `  model ${info.model}` : '') +
                       (info.reasoningEffort ? `  reasoning ${info.reasoningEffort}` : '') +
-                      (recordings.has(info.id) ? `\n    recording: ${recordings.get(info.id)}` : '') +
                       (info.result
                         ? `\n    ${info.state === 'failed' ? 'failure' : info.state === 'finished' ? 'result' : 'latest result'}: ${info.result.slice(0, 300)}`
                         : '')
                   )
                   .join('\n') +
-                (recordings.size > 0
-                  ? '\n\nTo see what a worker is doing, session action=read with its recording id; pass the update_cursor from that read next time to get only what is new.'
-                  : '') +
                 (me.id === PRIME_ID
                   ? `\n\n${slots} of your worker slots ${slots === 1 ? 'is' : 'are'} free.` +
                     (asleep.length > 0
@@ -2099,7 +2028,7 @@ interface ReadOneOptions {
   startLine?: number;
   endLine?: number;
   maxBytes: number;
-  aggregateBytes: number;
+  imageBytes: number;
 }
 
 interface ReadTarget {
@@ -2222,21 +2151,21 @@ async function readOne(
     // decoded identically. `view_image` still exists in its own right: it is Codex's tool, with
     // Codex's name, schema and errors, and this branch is only `read` continuing to answer "what
     // is at this path" for a path that happens to be a picture.
-    // Do not inherit the 64 KiB text-section default: ordinary screenshots are not text.
-    // The enclosing read call still has a 512 KiB aggregate wire budget, and the base64
-    // representation—not merely the smaller compressed file—is what consumes it.
+    // Text and image representations have separate aggregate bounds. An ordinary screenshot
+    // must not fail solely because it is larger than the text budget. Still charge base64,
+    // not just compressed file bytes, and refuse an exhausted image batch before decoding.
+    if (options.imageBytes <= 0) throw new Error('Read image output cap reached; read remaining images in another call or use view_image.');
     const image = await viewImage(resolved.real, null, undefined, resolved.virtual);
     logInfo(`tool read image ${resolved.virtual} (${formatBytes(image.bytes)})`);
     const text = `--- ${resolved.virtual} — ${formatBytes(image.bytes)} ${image.mimeType} ---`;
-    const responseBytes = Buffer.byteLength(text, 'utf8') + image.base64.length;
-    if (responseBytes > options.aggregateBytes) {
+    if (image.base64.length > options.imageBytes) {
       throw new Error(
-        `Image response would exceed read's ${formatBytes(MAX_READ_BYTES)} aggregate output cap; use view_image for this file.`
+        `Read image output cap reached (${formatBytes(MAX_READ_IMAGE_BYTES)} base64 per call); read remaining images in another call or use view_image.`
       );
     }
     return {
       text,
-      bytes: responseBytes,
+      bytes: Buffer.byteLength(text, 'utf8'),
       image: { data: image.base64, mimeType: image.mimeType }
     };
   }
@@ -2348,3 +2277,4 @@ function boundedNumberedRead(
 }
 
 export type { ToolResult };
+import { firstTaskRoot } from '../skill-access.js';

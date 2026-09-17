@@ -51,7 +51,8 @@
  */
 
 import { randomBytes } from 'node:crypto';
-import type { Handoff } from '../../shared/session.js';
+import { isProModel } from '../../shared/chat-models.js';
+import { isReasoningEffort, type Handoff, type ReasoningEffort } from '../../shared/session.js';
 import { logInfo, logWarn } from '../logger.js';
 import {
   PRIME_ID,
@@ -63,7 +64,7 @@ import {
   thawPrimeTransfer
 } from '../agents.js';
 import { clearChatWorkspace, moveChatWorkspace, workspaceForChat } from '../workspace.js';
-import { clearGoalObjective, clearGoalSwitch, goalObjectiveFor, goalSwitchFor, moveGoalObjective, moveGoalSwitch } from '../goal.js';
+import { clearGoalObjective, clearGoalSwitch, goalObjectiveFor, goalSwitchFor, moveGoalObjective, moveGoalSwitch, retireGoalDraftsFor } from '../goal.js';
 import { writeDurableNow, writeDurableSoon } from '../durable.js';
 import { prepareHandoff, resumeBootstrapMatches } from './handoff.js';
 import { ensureHandoffRecorded, recordHandoff, recordNote, rebindConversation } from './recorder.js';
@@ -88,7 +89,19 @@ import {
 export const CONTINUATION_TTL_MS = 10 * 60_000;
 
 /**
- * How long any handover may run once it has actually been asked for.
+ * The longer writing deadline for a manual ticket whose frozen source selection is Pro.
+ *
+ * Pro reasoning is not part of the visible transcript, so a brief it spends twenty minutes
+ * thinking about produces no text growth and never renews `touchedAt` — the ordinary clock
+ * then sweeps a perfectly healthy generation as "took too long". Only the `awaiting-summary`
+ * phase uses this: once the brief is captured, opening chat B is app-paced work that keeps
+ * the ordinary clock. An unobserved (null) selection keeps the ordinary clock too, because
+ * unknown identity never widens a deadline.
+ */
+export const CONTINUATION_PRO_WRITING_TTL_MS = 60 * 60_000;
+
+/**
+ * How long an automatic handover may run once it has actually been asked for.
  *
  * An auto-compaction ticket has no clock while it is only intended: the chat may be mid-turn
  * for hours before it is safe to ask for the brief. But from the moment the brief request is
@@ -165,7 +178,19 @@ export function normalizeProjectId(value: unknown): string | null {
   return /^g-p-[0-9a-f]{32}$/.test(candidate) ? candidate : null;
 }
 
+type RequestedModel = { model: string; reasoningEffort: ReasoningEffort | null };
+
+function requestedModel(value: unknown): RequestedModel | null {
+  if (!value || typeof value !== 'object') return null;
+  const { model, reasoningEffort } = value as Record<string, unknown>;
+  if (typeof model !== 'string' || !/^[a-zA-Z0-9 ._-]{1,80}$/.test(model) ||
+      (reasoningEffort != null && !isReasoningEffort(reasoningEffort))) return null;
+  return { model, reasoningEffort: isReasoningEffort(reasoningEffort) ? reasoningEffort : null };
+}
+
 interface Continuation {
+  /** Frozen source selection intent; only the destination picker proves B's actual selection. */
+  requestedModel: RequestedModel | null;
   sourceTurnId: string | null;
   token: string;
   sessionId: string;
@@ -173,7 +198,7 @@ interface Continuation {
   from: string;
   openedAt: number;
   /**
-   * Last sign of progress; the manual pre-dispatch deadline runs on this stamp.
+   * Last sign that this handoff is still being worked, which is what the manual deadline runs on.
    *
    * The ten-minute clock is a limit on *waiting*, and it used to be measured from `openedAt` — so
    * a brief that ChatGPT was still writing was indistinguishable from one nobody had touched. On a
@@ -181,14 +206,16 @@ interface Continuation {
    * happened next: the running generation was declared dead and auto-compaction then treated the
    * compaction itself as an eligible turn, stopped it, and started another one.
    *
-   * Renewed only by real forward progress. After dispatch, askedAt owns expiration instead:
-   * neither output growth nor a reload can extend the six-hour handover limit.
+   * Renewed only by real forward progress. A token that has genuinely gone quiet for a full TTL
+   * still expires, so this lengthens nothing for a stalled handoff. Pro reasoning is not visible
+   * text, so it produces no growth to renew on: while a Pro brief is being written the deadline
+   * itself is longer instead — see CONTINUATION_PRO_WRITING_TTL_MS.
    */
   touchedAt: number;
   sourceProgress: number;
   /** Auto-compaction ticket: survives page/retry clocks until commit or explicit Off/cancel. */
   automatic: boolean;
-  /** When the brief request first went on its way; every dispatched handover starts its clock here. */
+  /** When the brief request first went on its way; the automatic clock starts here. */
   askedAt: number | null;
   state: ContinuationState;
   /** The brief, once captured. Handed to whoever opens chat B, and to nothing else. */
@@ -232,6 +259,8 @@ export const CONTINUATIONS_STATE = 'continuations';
 const RESUME_SHADOW_COLLISION = 'the replacement chat already belongs to another local session';
 
 interface ContinuationRecord {
+  /** Absent in legacy WALs; never reconstruct from a later session selection. */
+  requestedModel?: RequestedModel | null;
   sourceTurnId?: string | null;
   token: string;
   sessionId: string;
@@ -267,6 +296,7 @@ export interface ContinuationSnapshot {
 
 function durableRecord(entry: Continuation): ContinuationRecord {
   return {
+    requestedModel: requestedModel(entry.requestedModel),
     sourceTurnId: entry.sourceTurnId,
     token: entry.token,
     sessionId: entry.sessionId,
@@ -324,6 +354,7 @@ function publishRecord(entry: Continuation, record: ContinuationRecord): void {
   if (record.state === 'committed' || record.state === 'aborted') endResumeClaim(entry.token);
   entry.to = record.to;
   entry.project = normalizeProjectId(record.project);
+  entry.requestedModel = requestedModel(record.requestedModel);
   // Never let a durable read move the deadline backwards: a snapshot written before this field
   // existed reports nothing, and reading that as "last touched when it opened" would expire a
   // handoff that has been progressing since.
@@ -343,7 +374,9 @@ function publishRecord(entry: Continuation, record: ContinuationRecord): void {
     ? { ...record.destinationSend }
     : { state: 'not-attempted', conversationId: null, messageId: null };
   entry.error = record.error;
-  entry.askedAt = record.askedAt ?? null;
+  if (entry.askedAt === null && handoffAsked(entry)) {
+    entry.askedAt = typeof record.askedAt === 'number' && Number.isFinite(record.askedAt) ? record.askedAt : Date.now();
+  }
 }
 
 async function transitionNow(
@@ -352,9 +385,6 @@ async function transitionNow(
 ): Promise<ContinuationRecord> {
   const current = durableRecord(entry);
   const next = derive(current);
-  // The first dispatch starts the immutable handover clock in the WAL itself. Stamping only
-  // after the write lets a dispatched-but-unresolved ticket restart its deadline on every reload.
-  next.askedAt = current.askedAt ?? (handoffAsked(next) ? Date.now() : null);
   // Any semantic transition is forward progress, so it renews the waiting deadline. Without this
   // the stamp would only ever be set at open and the manual clock would be back to counting from
   // there — the same bug in a new field.
@@ -397,6 +427,7 @@ export function setContinuationRecoveryHooks(hooks: ContinuationRecoveryHooks): 
 }
 
 export interface ContinuationView {
+  requestedModel: RequestedModel | null;
   touchedAt: number;
   token: string;
   sessionId: string;
@@ -416,6 +447,7 @@ export interface ContinuationView {
 }
 
 const view = (entry: Continuation): ContinuationView => ({
+  requestedModel: requestedModel(entry.requestedModel),
   touchedAt: entry.touchedAt,
   token: entry.token,
   sessionId: entry.sessionId,
@@ -433,21 +465,31 @@ const view = (entry: Continuation): ContinuationView => ({
 });
 
 /** Whether the brief has been asked for: the request is on its way, went out, or was answered. */
-const handoffAsked = (entry: Pick<ContinuationRecord, 'state' | 'sourceSend'>): boolean =>
+const handoffAsked = (entry: Continuation): boolean =>
   entry.state !== 'awaiting-summary' ||
-  entry.sourceSend?.state === 'dispatched-unresolved' ||
-  entry.sourceSend?.state === 'sent';
+  entry.sourceSend.state === 'dispatched-unresolved' ||
+  entry.sourceSend.state === 'sent';
 
 /**
- * Whether a nonterminal continuation has outlived its wait. Before dispatch, a manual
- * request gets CONTINUATION_TTL_MS from progress and an automatic ticket has no clock.
- * Once dispatched, both use the immutable askedAt handover deadline: Pro may reason for
- * more than ten minutes without publishing any public text to renew touchedAt.
+ * The waiting deadline for a manual ticket. Pro's longer budget exists only while its brief
+ * is being written: later phases are app-paced and keep the ordinary clock.
+ */
+const manualWaitingTtlMs = (state: ContinuationState, requested: RequestedModel | null): number =>
+  state === 'awaiting-summary' && requested !== null &&
+  isProModel(requested.model, requested.reasoningEffort ?? undefined)
+    ? CONTINUATION_PRO_WRITING_TTL_MS
+    : CONTINUATION_TTL_MS;
+
+/**
+ * Whether a nonterminal continuation has outlived its wait. A manual one gets
+ * CONTINUATION_TTL_MS from its last sign of progress — CONTINUATION_PRO_WRITING_TTL_MS while
+ * a Pro brief is still being written; an automatic one has no clock until it is asked for and
+ * AUTOMATIC_HANDOVER_TTL_MS from then.
  */
 const expired = (entry: Continuation, now = Date.now()): boolean =>
-  entry.askedAt !== null
-    ? now - entry.askedAt >= AUTOMATIC_HANDOVER_TTL_MS
-    : !entry.automatic && now - entry.touchedAt >= CONTINUATION_TTL_MS;
+  entry.automatic
+    ? entry.askedAt !== null && now - entry.askedAt >= AUTOMATIC_HANDOVER_TTL_MS
+    : now - entry.touchedAt >= manualWaitingTtlMs(entry.state, entry.requestedModel);
 
 const isOpen = (entry: Continuation): boolean =>
   entry.state !== 'committed' && entry.state !== 'aborted' && !expired(entry);
@@ -694,6 +736,7 @@ export async function repairPrimeFromResumeShadow(conversationId: string): Promi
  */
 function makeContinuation(sessionId: string, fromConversationId: string, automatic: boolean, project: string | null): Continuation {
   return {
+    requestedModel: null,
     sourceTurnId: null,
     token: randomBytes(16).toString('base64url'),
     sessionId,
@@ -734,7 +777,11 @@ export async function openContinuationNow(
     const again = [...byToken.values()].find((entry) => entry.sessionId === sessionId && isOpen(entry));
     if (again) return view(again);
     const entry = makeContinuation(sessionId, fromConversationId, automatic, normalizeProjectId(project));
-    entry.sourceTurnId = (await getSession(sessionId))?.activeTurnId ?? null;
+    const source = await getSession(sessionId);
+    entry.sourceTurnId = source?.activeTurnId ?? null;
+    if (source?.conversationId === fromConversationId && source.selectedModel?.conversationId === fromConversationId) {
+      entry.requestedModel = requestedModel(source.selectedModel);
+    }
     try {
       await writeDurableNow(CONTINUATIONS_STATE, snapshotWith(entry.token, durableRecord(entry)));
     } catch (err) {
@@ -757,10 +804,9 @@ export async function openContinuationNow(
 }
 
 async function withCheckpointLock<T>(token: string, work: () => Promise<T>): Promise<T> {
-  const prior = checkpointLocks.get(token) ?? Promise.resolve();
-  // Reserve the queue position before yielding. Awaiting the old owner first lets
-  // several waiters start together, allowing pre-send abort to race an approved Send.
-  const current = prior.then(work, work);
+  const prior = checkpointLocks.get(token);
+  if (prior) await prior.catch(() => undefined);
+  const current = work();
   checkpointLocks.set(token, current);
   try {
     return await current;
@@ -854,8 +900,8 @@ export async function bindContinuationSourceMessageNow(token: string, messageId:
     if (!entry || !isOpen(entry) || entry.state !== 'awaiting-summary') return false;
     if (entry.sourceSend.state === 'sent') {
       if (entry.sourceSend.messageId !== messageId) return false;
-      // Keep exact response progress without extending the immutable dispatch deadline.
-      // Persist at most twice a minute; unchanged snapshots and a spinner add no evidence.
+      // Only growth of this exact marked response renews the manual waiting deadline.
+      // Persist at most twice a minute; unchanged snapshots and a spinner alone buy no time.
       if (!entry.automatic && Number.isSafeInteger(progress) && progress! > entry.sourceProgress &&
           progress! <= 4_000_000 && Date.now() - entry.touchedAt >= 30_000) {
         await transitionNow(entry, current => ({ ...current, sourceProgress: progress! }));
@@ -923,10 +969,18 @@ export async function dispatchContinuationDestinationSendNow(token: string): Pro
  * case. A composer still holding the text is the ambiguous one and stays armed; only the marked
  * message or a cancel resolves it. Released, the brief may be offered to a fresh chat again.
  */
-export async function releaseContinuationDestinationSendNow(token: string): Promise<boolean> {
+export function continuationClaimedBy(token: string, claimant: string): boolean {
+  return byToken.get(token)?.claimedBy === claimant;
+}
+
+export async function releaseContinuationDestinationSendNow(token: string, unattemptedClaimant?: string): Promise<boolean> {
   return withCheckpointLock(token, async () => {
     const entry = byToken.get(token);
     if (!entry || !isOpen(entry) || !entry.handoffId || entry.state === 'awaiting-summary') return false;
+    // Command retirement has no page proof of loss. It can release only its own
+    // still-unattempted claim, rechecked inside the same Send checkpoint lock.
+    if (unattemptedClaimant !== undefined &&
+        (entry.claimedBy !== unattemptedClaimant || entry.destinationSend.state !== 'not-attempted')) return false;
     if (entry.destinationSend.state === 'sent') return false;
     if (entry.destinationSend.state === 'not-attempted' && entry.claimedBy === null) return true;
     // The claim goes with the dispatch. It named the one command whose page was to send the
@@ -1138,6 +1192,8 @@ function publishCommittedProjection(
   moveChatWorkspace(entry.from, toConversationId);
   moveGoalObjective(entry.from, toConversationId);
   moveGoalSwitch(entry.from, toConversationId);
+  // A's final is superseded, never a completed turn in B. B earns its own debt.
+  retireGoalDraftsFor(entry.from);
   if (swarm === 'frozen') {
     if (!commitPrimeTransfer(entry.from, toConversationId)) {
       // The frozen handover cannot expire. A miss here means the run ended outright while
@@ -1472,19 +1528,26 @@ export async function restoreContinuations(snapshot: ContinuationSnapshot | null
     'aborted'
   ]);
   for (const raw of snapshot.entries.slice(0, 32)) {
+    if (!raw) continue;
+    // The retention window scales with the same per-ticket deadline the live sweep uses:
+    // a Pro brief still inside its longer writing clock must survive a restart within it
+    // rather than vanish silently at twice the ordinary TTL.
+    const retentionMs = manualWaitingTtlMs(raw.state, requestedModel(raw.requestedModel)) * 2;
+    const lastTouchedAt = Number.isFinite(raw.touchedAt) && raw.touchedAt! <= now ? raw.touchedAt! : raw.openedAt;
     if (
-      !raw ||
       !/^[A-Za-z0-9_-]{16,64}$/.test(raw.token) ||
       !/^[0-9a-z-]{8,64}$/i.test(raw.sessionId) ||
       typeof raw.from !== 'string' ||
       raw.from.length === 0 || raw.from.length > 256 ||
       !validStates.has(raw.state) ||
       !Number.isFinite(raw.openedAt) ||
-      ((raw.state === 'committed' || raw.state === 'aborted') && now - (Number.isFinite(raw.touchedAt) && raw.touchedAt! <= now ? raw.touchedAt! : raw.openedAt) >= CONTINUATION_TTL_MS * 2)
+      ((raw.state === 'committed' || raw.state === 'aborted') && now - lastTouchedAt >= retentionMs) ||
+      (raw.automatic !== true && now - lastTouchedAt >= retentionMs)
     ) {
       continue;
     }
     const entry: Continuation = {
+      requestedModel: requestedModel(raw.requestedModel),
       sourceTurnId: typeof raw.sourceTurnId === 'string' ? raw.sourceTurnId : null,
       token: raw.token,
       sessionId: raw.sessionId,
@@ -1583,12 +1646,7 @@ export async function restoreContinuations(snapshot: ContinuationSnapshot | null
             );
           }
         }
-        rebindConversation(entry.sessionId, entry.from, entry.to);
-        moveChatWorkspace(entry.from, entry.to);
-        moveGoalObjective(entry.from, entry.to);
-        moveGoalSwitch(entry.from, entry.to);
-        const repaired = recoveryHooks.repairPrimeTransfer?.(entry.from, entry.to) ?? false;
-        if (!repaired) commitPrimeTransfer(entry.from, entry.to);
+        publishCommittedProjection(entry, entry.to, 'recovery');
         entry.state = 'committed';
         entry.error = null;
         logInfo(`continuation ${entry.token.slice(0, 8)} recovered after durable commit`);

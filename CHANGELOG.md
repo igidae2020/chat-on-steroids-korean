@@ -1,36 +1,11 @@
 # Changelog
 
-## [2.0.11] — 2026-09-11
+## [2.1.16] — Korean distribution revision 3
 
-- 한국어 전송 시간 초과·다시 시도 안내를 인식하고 숨겨진 오류 안내를 제외.
-- Goal/Loop의 미완료 Pro·모델 미확인 응답은 기존 복구 큐로 10분 간격 재관찰. 새로고침이나 실패한 스트림을 완료로 간주하지 않으며 실제 최종 답변 전에 후속 지시를 생성하지 않음.
-- 대화별 Developer MCP 지원 제한과 정상적인 새 대화 인계 절차를 [복구 안내](docs/chatgpt-recovery.md)에 추가.
-- 화면상 변화가 10분간 없다는 확장의 관찰 경고를 ChatGPT 전송 실패와 분리. 기존 확장의 같은 경고도 즉시 재로드 권한으로 사용하지 않음.
-- 경고의 출처를 COS로 표시하고, 실제 작업 중단이나 완료를 뜻하지 않음을 명시. 앱의 모델·실제 작업 증거에 따른 복구와 실제 전송 오류 처리는 유지.
-- 이전 Chrome cold-start 복구 수정과 설정은 유지. [배포 참고](docs/release-notes/v2.0.11.md).
-
-## [2.0.10] — 2026-09-11
-
-**한국어 · OpenCodex 배포판 — 공식 2.0.8 기반**
-
-- 작업 중 Chrome이 종료되면 silence/no-tab 복구도 기존 단일 브라우저 시작 경로로 전달합니다. 정지·차단·복구 Off·이전 대화 전환 시 실행 권한을 재검사합니다.
-- Windows에서 별도 user-data 디렉터리의 자동화 Chrome이나 남은 렌더러를 작업용 브라우저로 오인하지 않습니다. 프로세스 정보가 불확실하면 재실행하지 않으며 다른 프로필의 프로세스를 종료하지 않습니다.
-- main에 반영된 요약 응답의 provider request 연결, 전송 전 되돌릴 수 있는 입력 실패 처리, 긴 수동 요약 응답의 전송 후 수명 보완을 포함합니다.
-
-See [the release notes](docs/release-notes/v2.0.10.md). Existing releases are unchanged.
-
-## [2.0.9] — 2026-09-10
-
-**한국어 · OpenCodex 배포판 — 공식 2.0.8 기반**
-
-- 기존 ChatGPT 문서에 전체 코드를 다시 주입하는 복구 경로를 제거하고, 정확한 문서와 유휴 상태를 재확인하는 제한된 재로드로 교체.
-- 탭 응답 대기 제한, 이전 DOM 감시 해제, 전송 직전 입력창 검사와 React 원본 메시지 구조를 보존하는 접기 표시.
-- 응답 차례 ID와 요약 전송 시각을 유지하고, 미전송 요약만 취소하며 동일 차례의 실패한 자동 요약 반복을 방지.
-- 전송 허가와 취소의 체크포인트 대기열을 직렬화하고, 확정적으로 재로드하지 않은 문서만 복구 예약 해제.
-- 앱·확장 프로토콜 14로 갱신. 새 앱과 함께 제공되는 확장을 사용해야 함.
-- 한국어 UI와 OpenCodex 모델·추론 선택을 유지. 한국어판 배포 번호와 공식 기준 버전을 분리해 자동 동기화 시 버전 충돌을 방지.
-
-See [the release notes](docs/release-notes/v2.0.9.md). Existing 2.0.8 artifacts are unchanged.
+- Based on official v2.1.13; upstream behavior wins over conflicting legacy fork policies.
+- Add Korean UI through the existing locale catalog and an OpenCodex custom-provider preset.
+- Keep updates and matching extension downloads on the Korean distribution repository.
+- See [release notes](docs/release-notes/v2.1.16.md) and [integration decisions](docs/korean-integration.md).
 
 All notable changes to this project are documented here.
 
@@ -41,7 +16,37 @@ The app and the `extension/` companion are versioned together. **Reload the
 extension after updating the app**. If their bridge protocols are incompatible,
 the app refuses the extension and asks you to reload the matching copy.
 
-## Unreleased
+## [2.1.13] — i am very sad. openai theatend to ban my account for whatever reason. anthropic support blocks me. money tight.
+
+refreh your extension and all CoS plugins in chatgpt
+
+![OpenAI email](docs/images/openai-account-warning-2026-09.png)
+
+![OpenAI email](docs/images/openai-chatgpt-warning-2026-09.png)
+
+![Anthropic support reply](docs/images/anthropic-support-reply-2026-09.png)
+
+## [2.1.11] — 2 weeks 6 sol
+
+- Goal/Loop decisions use authored conversation context without recorded tool bodies.
+- API reasoning choices follow the selected OpenRouter model’s supported levels.
+- Reduced renderer memory growth during long-running sessions.
+- Clearer tool-permission and recovered-identity guidance.
+- More reliable plugin discovery, refresh and Windows paths.
+- Deleted conversation history stays deleted after restart.
+
+## [2.1.0] — 6 sol in 2 weeks
+
+- Cleaner setup, compact profiles and better sidebar controls.
+- More reliable Goal/Loop recovery, queued messages and conversation history.
+- Updated runtime, MCP and plugin dependencies.
+
+## [2.0.9] — they nerfed astra
+
+- Code mode combines local and plugin tools in one JavaScript call, with saved task plans and automatic background command results.
+- More reliable message delivery, workflow retries, Compact & Resume, worker reuse, and idle browser-tab handling.
+- Improved Windows desktop control and window capture, plus faster recording and clearer tool results.
+- Simplified Chinese UI, better project and transcript controls, and a reminder to refresh ChatGPT connectors after updates.
 
 ## [2.0.8] — 2026-09-08
 

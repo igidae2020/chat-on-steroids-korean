@@ -69,7 +69,7 @@ describe('captured ChatGPT rendered HTML', () => {
     expect(rendered.textContent).not.toMatch(/[\uE200-\uE202]/);
     const stale = renderedMarkdown(source, whole(capture.text.replace('Evidence.', 'Different.')));
     expect(stale.querySelector('a')).toBeNull();
-    expect(stale.textContent).toContain('[출처 링크 없음]');
+    expect(stale.textContent).toContain('[source link unavailable]');
   });
   it('shows exact uploaded-file citation names as text and omits missing or stale file references', () => {
     const marker = '\uE200filecite\uE202turn0file0\uE201';
@@ -177,7 +177,7 @@ describe('a capture that could not be carried whole', () => {
     '<pre class="overflow-visible!"><div class="contain-inline-size rounded-2xl relative">' +
     '<div class="flex items-center px-4 py-2 text-xs select-none">bash</div>' +
     '<div class="sticky top-9"><div class="absolute end-0 bottom-0 flex h-9 items-center pe-2">' +
-    '<button class="flex gap-1 items-center select-none py-1" aria-label="복사">Copy</button>' +
+    '<button class="flex gap-1 items-center select-none py-1" aria-label="Copy">Copy</button>' +
     '<button class="flex items-center gap-1 py-1 select-none">Edit</button>' +
     '</div></div>' +
     '<div class="overflow-y-auto p-4" dir="ltr"><code class="whitespace-pre! language-bash">npm run verify</code></div>' +
@@ -194,7 +194,7 @@ describe('a capture that could not be carried whole', () => {
     const paragraphs = [...rendered.querySelectorAll('p')].map((node) => node.textContent);
     expect(paragraphs).toEqual(['Run the suite before pushing.', 'Then open a pull request.']);
     expect(rendered.querySelector('button')).toBeNull();
-    expect(rendered.textContent).not.toContain('복사');
+    expect(rendered.textContent).not.toContain('Copy');
   });
 
   it('shows the whole message as markdown rather than a cut capture ending inside a code box', () => {
@@ -233,5 +233,45 @@ describe('a capture that could not be carried whole', () => {
 
     expect(rendered.classList.contains('rich')).toBe(false);
     expect(rendered.textContent).toBe(MARKDOWN);
+  });
+
+  it('reads a right-to-left answer in its own direction', () => {
+    // Nothing in the recording says which way this runs, and the stylesheet is left-to-right
+    // throughout, so the container has to resolve it from the text itself.
+    expect(renderedMarkdown('مرحبا بالعالم').getAttribute('dir')).toBe('auto');
+  });
+
+  it('resolves separate Markdown prose blocks without letting an English introduction or code set their direction', () => {
+    const rendered = renderedMarkdown('English introduction.\n\nمرحبا بالعالم 123.\n\nשלום עולם!\n\n- خطوة أولى\n- خطوة ثانية\n\n> اقتباس عربي\n\n```js\nconst name = "مرحبا";\n```');
+    expect([...rendered.querySelectorAll(':scope > p, ul, blockquote')].map(node => node.getAttribute('dir')))
+      .toEqual(['auto', 'auto', 'auto', 'auto', 'auto']);
+    // The list/quote owns its subtree; nested auto scopes would remove its text from
+    // the browser's first-strong scan and put the marker/border on the wrong side.
+    expect(rendered.querySelector('blockquote p')?.hasAttribute('dir')).toBe(false);
+    expect(rendered.querySelector('pre')?.getAttribute('dir')).toBe('ltr');
+    expect(rendered.querySelector('code')?.getAttribute('dir')).toBe('ltr');
+    const table = renderedMarkdown('| English | العربية |\n| --- | --- |\n| Hello | مرحبا |');
+    expect([...table.querySelectorAll('th, td')].every(node => node.getAttribute('dir') === 'auto')).toBe(true);
+  });
+
+  it('respects an explicit ancestor direction while isolating code from RTL prose', () => {
+    const rendered = renderedMessage(whole('<div dir="rtl"><p>English inside an explicitly RTL block.</p><pre><code>const x = 1;</code></pre></div>'), '');
+    expect(rendered.querySelector('div')?.getAttribute('dir')).toBe('rtl');
+    expect(rendered.querySelector('p')?.hasAttribute('dir')).toBe(false);
+    expect(rendered.querySelector('pre')?.getAttribute('dir')).toBe('ltr');
+  });
+
+  it('keeps the direction ChatGPT marked on a mixed-language answer', () => {
+    // One first strong character cannot describe two paragraphs that run opposite ways, so
+    // where the capture carried the answer, sanitisation has to leave it there.
+    const rendered = renderedMessage(whole('<p dir="rtl">مرحبا بالعالم</p><p dir="ltr">Hello world</p>'), 'fallback');
+
+    expect([...rendered.querySelectorAll('p')].map((node) => node.getAttribute('dir'))).toEqual(['rtl', 'ltr']);
+  });
+
+  it('drops a direction value that is not one of the three', () => {
+    const rendered = renderedMessage(whole('<p dir="javascript:alert(1)">text</p>'), 'fallback');
+
+    expect(rendered.querySelector('p')!.getAttribute('dir')).toBe('auto');
   });
 });

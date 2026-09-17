@@ -31,17 +31,17 @@
 
 
       <p class="alert" id="alert" hidden></p>
-      <p class="caption">대화 기록</p>
+      <p class="caption">Session capture</p>
       <section class="card">
         <div class="row" id="r-tab">
           <svg class="ico"><use href="#i-tab" /></svg>
-          <span class="name">ChatGPT 탭</span>
+          <span class="name">ChatGPT tab</span>
           <span class="meta" id="d-tab"></span>
           <span class="badge"></span>
       </div>
       <div class="row" id="r-rec">
         <svg class="ico"><use href="#i-rec" /></svg>
-        <span class="name">현재 대화 기록</span>
+        <span class="name">대화 기록</span>
         <span class="meta" id="d-rec"></span>
         <span class="badge"></span>
       </div>
@@ -53,7 +53,7 @@
       </div>
       <div class="row" id="r-req">
         <svg class="ico"><use href="#i-req" /></svg>
-        <span class="name">요청 ID</span>
+        <span class="name">현재 요청</span>
         <button class="meta copy" id="d-req" type="button"></button>
         <span class="badge"></span>
       </div>
@@ -66,9 +66,9 @@
           <span class="chevron" aria-hidden="true"></span>
         </summary>
         <div class="stages">
-          <div class="stage" id="s-read"><span class="tick"></span><span class="name">페이지 수집</span><span class="meta" id="n-read"></span></div>
-          <div class="stage" id="s-sent"><span class="tick"></span><span class="name">앱 전달</span><span class="meta" id="n-sent"></span></div>
-          <div class="stage" id="s-proc"><span class="tick"></span><span class="name">앱 처리</span><span class="meta" id="n-proc"></span></div>
+          <div class="stage" id="s-read"><span class="tick"></span><span class="name">요청 ID 확인</span><span class="meta" id="n-read"></span></div>
+          <div class="stage" id="s-sent"><span class="tick"></span><span class="name">앱에 전달됨</span><span class="meta" id="n-sent"></span></div>
+          <div class="stage" id="s-proc"><span class="tick"></span><span class="name">대화 소유권 확인</span><span class="meta" id="n-proc"></span></div>
           <p class="why" id="why"></p>
           <div class="calls" id="calls"></div>
         </div>
@@ -76,7 +76,7 @@
     </section>
 
 
-    <p class="caption">ChatGPT 표시 개선</p>
+    <p class="caption">ChatGPT 표시</p>
     <section class="card">
       <label class="row" for="overwriteToggle">
         <svg class="ico"><use href="#i-pen" /></svg>

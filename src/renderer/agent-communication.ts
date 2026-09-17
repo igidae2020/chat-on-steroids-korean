@@ -1,13 +1,14 @@
+import { t } from './i18n.js';
 import type { SessionEvent } from '../shared/session.js';
 
 type Communication = Extract<SessionEvent, { kind: 'agent_message' }>;
 
 export function communicationTitle(event: Communication): string {
   const worker = event.from === 'prime' ? event.to : event.from;
-  if (event.from === 'prime') return `${worker}에게 보낸 메시지`;
-  if ((event.message.text.startsWith(`[${worker} is awake again]`) || event.message.text.startsWith(`[${worker} is back]`))) return `${worker} 작업 재개`;
-  if ((event.message.text.startsWith(`[${worker} reported]`) || event.message.text.startsWith(`[${worker} finished]`))) return `${worker} 완료 · 보고`;
-  return `${worker}의 메시지`;
+  if (event.from === 'prime') return t("Message to {0}", [worker]);
+  if ((event.message.text.startsWith(`[${worker} is awake again]`) || event.message.text.startsWith(`[${worker} is back]`))) return t("{0} resumed work", [worker]);
+  if ((event.message.text.startsWith(`[${worker} reported]`) || event.message.text.startsWith(`[${worker} finished]`))) return t("{0} finished · report", [worker]);
+  return t("Message from {0}", [worker]);
 }
 
 /** Keep the tool's args/result as the single presentation of its outgoing message.

@@ -1,4 +1,5 @@
 import type { ChatModelCatalog } from '../shared/chat-models.js';
+import type { GoalModel } from '../shared/goal-reasoning.js';
 import type { TaskProgress } from '../shared/task-progress.js';
 import type { BrowserPreferences } from '../shared/browser-preferences.js';
 import type { SessionControlsView } from '../main/bridge.js';
@@ -6,6 +7,7 @@ import type { InputAttachment } from '../shared/input.js';
 import type { UsageOverview } from '../shared/usage.js';
 import type { InputArgs, InputEntry } from '../main/session/input.js';
 import type { LocalProject } from '../shared/projects.js';
+import type { SkillSummary } from '../shared/skills.js';
 import type { PluginSnapshot, PluginInstallRequest, PluginConfigPatch } from '../shared/plugins.js';
 /**
  * The entire renderer-facing API.
@@ -19,6 +21,9 @@ import { contextBridge, ipcRenderer, webUtils } from 'electron';
 import type { AppState, Capabilities, Config, Diagnosis, LogEntry } from '../shared/types.js';
 import type {
   Handoff,
+  ImageStorageClearMode,
+  ImageStorageClearResult,
+  ImageStorageInfo,
   SessionEvent,
   SessionSummary,
   ClearAgentResult,
@@ -45,8 +50,9 @@ export interface SettingsPatch {
 
 /** One page of the model catalogue, as the model picker asks for it. */
 export interface GoalModelPage {
-  models: Array<{ id: string; name: string; created: number; contextLength: number }>;
+  models: GoalModel[];
   total: number;
+  selectedModel?: GoalModel;
 }
 
 export interface SessionList {
@@ -92,6 +98,8 @@ const api = {
     return () => ipcRenderer.removeListener('plugins:changed', wrapped);
   },
   chooseFiles: () => call<InputAttachment[]>('sessions:files'),
+  listSkills: () => call<SkillSummary[]>('skills:list'),
+  importSkill: () => call<SkillSummary | null>('skills:import'),
   dropFiles: async (files: File[]): Promise<Reply<InputAttachment[]>> => {
     if (!files.length || files.length > 20) return { ok: false, error: 'Attach up to 20 files per message' };
     try {
@@ -113,7 +121,10 @@ const api = {
   addRootPath: (file: File) => call<AppState>('roots:addPath', { path: webUtils.getPathForFile(file) }),
   removeRoot: (name: string) => call<AppState>('roots:remove', { name }),
   renameRoot: (name: string, newName: string) => call<AppState>('roots:rename', { name, newName }),
-  setApiKey: (value: string) => call<AppState>('secret:set', { value }),
+  setApiKey: (value: string, profileId?: string) => call<AppState>('secret:set', { value, ...(profileId ? { profileId } : {}) }),
+  addSetupProfile: (name: string) => call<AppState>('setup:profile', { action: 'add', name }),
+  selectSetupProfile: (id: string) => call<AppState>('setup:profile', { action: 'select', id }),
+  removeSetupProfile: (id: string) => call<AppState>('setup:profile', { action: 'remove', id }),
   // The goal loop's own credential. Same channel, named slot; the value only ever goes in.
   setGoalKey: (value: string) => call<AppState>('secret:set', { value, key: 'openRouterApiKey' }),
   // The same, for a custom provider endpoint. Optional: keyless local servers need nothing stored.
@@ -140,7 +151,10 @@ const api = {
     call<SessionList>('sessions:list', options ?? {}),
   listProjects: () => call<LocalProject[]>('projects:list'),
   addProject: () => call<LocalProject | null>('projects:add'),
+  removeProject: (id: string) => call<LocalProject>('projects:remove', { id }),
   getSessionImage: (id: string, assetId: string) => call<string | null>('sessions:image', { id, assetId }),
+  getImageStorage: () => call<ImageStorageInfo>('sessions:imageStorage'),
+  clearImageStorage: (mode: ImageStorageClearMode) => call<ImageStorageClearResult>('sessions:clearImageStorage', { mode }),
   getSession: (id: string, options?: { from?: number; before?: number; limit?: number }) =>
     call<SessionDetail>('sessions:events', { id, ...options }),
   stopSessionTurn: (id: string, expectedTurnId: string) => call<SessionControlsView>('sessions:stopTurn', { id, expectedTurnId }),
@@ -149,13 +163,18 @@ const api = {
   getChatModels: () => call<ChatModelCatalog>('chatModels:get'),
   browserPreferences: (patch: Partial<BrowserPreferences> = {}) => call<BrowserPreferences>('browser:preferences', patch),
   requestChatModels: () => call<ChatModelCatalog>('chatModels:request'),
+  onToolApprovalNotice: (listener: () => void): (() => void) => {
+    const wrapped = (): void => listener();
+    ipcRenderer.on('setup:toolApprovalNotice', wrapped);
+    return () => ipcRenderer.removeListener('setup:toolApprovalNotice', wrapped);
+  },
   onChatModelsChanged: (listener: (catalog: ChatModelCatalog) => void): (() => void) => {
     const wrapped = (_event: unknown, catalog: ChatModelCatalog): void => listener(catalog);
     ipcRenderer.on('chatModels:changed', wrapped);
     return () => ipcRenderer.removeListener('chatModels:changed', wrapped);
   },
   getSessionControls: (id: string) => call<SessionControlsView>('sessions:controls', { id }),
-  setSessionAutomation: (id: string, automation: SessionControlsView['automation']) => call<SessionControlsView>('sessions:automation', { id, automation }),
+  setSessionAutomation: (id: string, automation: SessionControlsView['automation'], afterTurn?: boolean) => call<SessionControlsView>('sessions:automation', { id, automation, afterTurn }),
   setSessionObjective: (id: string, text: string, mode: 'goal' | 'loop') => call<SessionControlsView>('sessions:objective', { id, text, mode }),
   compactSession: (id: string) => call<SessionControlsView>('sessions:compact', { id }),
   cancelSessionCompaction: (id: string) => call<SessionControlsView>('sessions:cancelCompaction', { id }),
@@ -168,7 +187,7 @@ const api = {
   editQueuedInput: (id: string, text: string, afterTurn?: boolean) => call<boolean>('sessions:editInput', { id, text, afterTurn }),
   reorderQueuedInputs: (sessionId: string, ids: string[]) => call<boolean>('sessions:reorderInputs', { sessionId, ids }),
   cancelInput: (id: string) => call<boolean>('sessions:cancelInput', { id }),
-  setInputAutomation: (id: string, mode: 'off' | 'goal' | 'loop') => call<boolean>('sessions:inputAutomation', { id, mode }),
+  setInputAutomation: (id: string, mode: 'off' | 'goal' | 'loop', loopAfterTurn?: boolean) => call<boolean>('sessions:inputAutomation', { id, mode, loopAfterTurn }),
   setZoom: (factor: number) => call<number>('window:zoom', { factor }),
   getZoom: () => call<number>('window:getZoom'),
   openSessionChat: (id: string) => call<boolean>('sessions:openChat', { id }),

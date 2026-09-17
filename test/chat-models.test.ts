@@ -7,6 +7,13 @@ const models = [{ id: 'gpt-example', label: 'GPT Example', efforts: ['none', 'me
 beforeEach(() => { resetChatModelsForTests(); saved.value = null; vi.useFakeTimers(); });
 afterEach(() => vi.useRealTimers());
 describe('durable observed ChatGPT model catalog', () => {
+  it('settles native picker close failure immediately while retaining observed choices', () => {
+    requestChatModels(); observeChatModels({ nonce: pendingChatModelRequest()!.nonce, models });
+    requestChatModels();
+    expect(observeChatModels({ nonce: pendingChatModelRequest()!.nonce, models: null, error: 'picker_close_failed' })).toBe(true);
+    expect(pendingChatModelRequest()).toBeNull();
+    expect(getChatModels()).toMatchObject({ state: 'ready', models, error: expect.any(String) });
+  });
   it('restores successful choices after restart without restoring browser opening authority', async () => {
     requestChatModels(); observeChatModels({ nonce: pendingChatModelRequest()!.nonce, models });
     resetChatModelsForTests(); await restoreChatModels();
@@ -54,7 +61,7 @@ describe('durable observed ChatGPT model catalog', () => {
     const nonce = pendingChatModelRequest()!.nonce;
     const first = startChatModelDiscovery(), second = startChatModelDiscovery();
     expect(wake).toHaveBeenCalledTimes(1);
-    release(); await passive;
+    release(); await passive; await Promise.resolve();
     expect(wake.mock.calls).toEqual([[nonce, false], [nonce, true]]);
     release(); await Promise.all([first, second]);
     expect(pendingChatModelRequest()).toMatchObject({ nonce, allowOpen: true });
@@ -85,6 +92,17 @@ describe('durable observed ChatGPT model catalog', () => {
     configureChatModelDiscovery({ wake: async () => { throw new Error('Chrome not found'); }, changed: () => {} });
     expect(await startChatModelDiscovery()).toMatchObject({ state: 'unavailable', models: [], error: expect.stringMatching(/Chrome not found/) });
     expect(pendingChatModelRequest()).toBeNull();
+  });
+  it('returns pending while OS wake hangs and lets a new nonce retry after the bounded deadline', async () => {
+    const wake = vi.fn(() => new Promise<void>(() => {}));
+    configureChatModelDiscovery({ wake, changed: () => {} });
+    expect(await startChatModelDiscovery()).toMatchObject({ state: 'pending' });
+    const old = pendingChatModelRequest()!.nonce;
+    await vi.advanceTimersByTimeAsync(120000);
+    expect(getChatModels().state).toBe('unavailable');
+    expect(await startChatModelDiscovery()).toMatchObject({ state: 'pending' });
+    expect(pendingChatModelRequest()!.nonce).not.toBe(old);
+    expect(wake).toHaveBeenCalledTimes(2);
   });
   it('reuses a pending request, accepts only its nonce, and detaches all public views', () => {
     expect(getChatModels().state).toBe('unknown');

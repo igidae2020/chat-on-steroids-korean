@@ -45,12 +45,12 @@ export type TurnOutcome =
   | 'unknown';
 
 export const TURN_OUTCOME_LABELS: Record<TurnOutcome, string> = {
-  completed: '완료',
-  failed: '오류가 표시되며 실패',
-  stopped: '사용자가 중단함',
-  interrupted: '완료 전에 끊김',
-  stalled: '정체됨 — 표시되는 진행 없음',
-  unknown: '알 수 없는 이유로 종료됨'
+  completed: 'completed',
+  failed: 'failed with a visible error',
+  stopped: 'stopped by the user',
+  interrupted: 'interrupted before it finished',
+  stalled: 'stalled — no visible progress',
+  unknown: 'ended for an unknown reason'
 };
 
 /**
@@ -90,6 +90,21 @@ export interface AssetRef {
   width?: number;
   height?: number;
 }
+
+/** Recording-asset storage is global; cleanup never changes the configured 2 GiB ceiling. */
+export interface ImageStorageInfo {
+  /** All bytes charged to the global session-asset quota, including preserved non-image assets. */
+  usedBytes: number;
+  limitBytes: number;
+}
+
+export interface ImageStorageClearResult extends ImageStorageInfo {
+  /** Physical image bytes removed by this explicit user operation. */
+  freedBytes: number;
+  removedFiles: number;
+}
+
+export type ImageStorageClearMode = 'oldest-gib' | 'all';
 
 /** Compact human-readable presentation of one tool call. */
 export interface ActivitySummary {
@@ -169,16 +184,18 @@ export type CallAttribution =
  * goes rather than being guessed into somebody's history.
  */
 export const ATTRIBUTION_LABELS: Record<CallAttribution, string> = {
-  request_id: '정확한 요청 ID',
-  unattributed: '요청 ID 귀속 미확인',
-  superseded: '교체된 이전 대화',
-  agent: '에이전트 키',
-  turn: '웹페이지의 도구 블록',
-  generation: '유일하게 응답 중인 대화',
-  inferred: '대화에 귀속되지 않음'
+  request_id: 'exact request id',
+  unattributed: 'request id not resolved',
+  superseded: 'retired conversation',
+  agent: 'agent key',
+  turn: 'tool block on the page',
+  generation: 'the only chat generating',
+  inferred: 'not placed in a chat'
 };
 
 export interface ToolCallRecord {
+  /** Child lifetime, independent of the initial tool response and output delivery. */
+  process?: { sessionId: string; completedAt?: number; exitCode?: number | null; durationMs?: number };
   /** Recorded model evidence, when known; absence is not the current picker selection. */
   model?: string;
   reasoningEffort?: ReasoningEffort;
@@ -200,6 +217,8 @@ export interface ToolCallRecord {
   /** Files this call demonstrably changed, with line counts where computable. */
   changes?: FileChange[];
   assets?: AssetRef[];
+  /** Image assets explicitly removed from local recording storage; same-call replay cannot restore them. */
+  retiredImageAssetIds?: string[];
   /**
    * This call was the caller's last word: a worker's successful finish report. Recorded so
    * the session itself, not only the in-memory swarm, knows the worker stopped working here.
@@ -208,6 +227,17 @@ export interface ToolCallRecord {
 }
 
 export type MessageState = 'streaming' | 'final';
+
+/** A persisted launch acknowledgement never proves that its child is still alive. */
+export function toolCallSummary(call: Pick<ToolCallRecord, 'tool' | 'summary'>): ActivitySummary {
+  return call.tool === 'exec_command' && call.summary.metric === 'running'
+    ? { ...call.summary, metric: 'started' } : call.summary;
+}
+
+/** Process-status revisions are delivery cursors, not new model work. */
+export function workSequence(event: SessionEvent): number {
+  return event.kind === 'tool_call' ? event.origin ?? event.seq : event.seq;
+}
 
 /** Reads current outcomes and only self-proving legacy `error` rows; ambiguous legacy errors abstain. */
 export function normalizedToolOutcome(
@@ -259,8 +289,12 @@ export type SessionEvent =
       inputDelivery?: 'offered' | 'confirmed';
       /** Original app-authored text, excluding transport-only control instructions. */
       authoredText?: string;
+      /** Native badge on this exact user message. Missing means unobserved; null means absent. */
+      reaction?: string | null;
       attachments?: import('./input.js').InputAttachment[];
       assets?: AssetRef[];
+      /** Image assets explicitly removed from local recording storage; same-message replay cannot restore them. */
+      retiredImageAssetIds?: string[];
       /** First sequence assigned to this stable website message; revisions keep this anchor. */
       origin?: number;
     })
@@ -287,7 +321,34 @@ export type SessionEvent =
       final: boolean;
       /** This exact stable reply was proven terminal and may enter Goal policy. */
       goalEligible?: boolean;
+      /** Store-owned sequence of the latest final text/state change; rendering/metadata cannot advance it. */
+      finalContentSeq?: number;
+      /** Local acceptance time of final content; provider time can predate its last tools. */
+      finalObservedAt?: number;
       /** First sequence assigned to this logical message; later revisions keep this anchor. */
+      origin?: number;
+    })
+  | (BaseEvent & {
+      /** ChatGPT-native generated media, independent of assistant prose and local MCP calls. */
+      kind: 'native_image';
+      /** Exact provider message UUID that owns this output. */
+      messageId: string;
+      /** Stable non-secret id from the typed sediment image pointer. */
+      providerAssetId: string;
+      providerRole: 'tool' | 'assistant';
+      providerChannel?: 'final';
+      /** Exact typed provider lifecycle for this image payload; it is not a turn boundary. */
+      providerStatus?: 'in_progress' | 'finished_successfully';
+      /** Provider-declared source geometry, used only to reserve truthful layout space. */
+      width?: number;
+      height?: number;
+      /** Locally retained preview geometry and content-addressed bytes, when capture succeeded. */
+      previewWidth?: number;
+      previewHeight?: number;
+      previewStatus: 'pending' | 'available' | 'unavailable';
+      previewError?: 'not_loaded' | 'ambiguous' | 'tainted' | 'oversized' | 'invalid' | 'quota' | 'removed';
+      asset?: AssetRef;
+      /** First sequence assigned to this exact provider-message/asset tuple. */
       origin?: number;
     })
   /**
@@ -321,9 +382,9 @@ export type SessionEvent =
    * call under the same server turn then proved it had not. Absent on the page's own starts.
    */
   | (BaseEvent & { kind: 'turn_start'; detail?: string })
-  | (BaseEvent & { kind: 'turn_end'; outcome: TurnOutcome; detail?: string })
-  | (BaseEvent & { kind: 'chat_error'; message: StoredText })
-  | (BaseEvent & { kind: 'tool_call'; call: ToolCallRecord })
+  | (BaseEvent & { kind: 'turn_end'; outcome: TurnOutcome; detail?: string; reason?: 'thinking_failed' })
+  | (BaseEvent & { kind: 'chat_error'; message: StoredText; recoverable?: boolean; blocking?: boolean; reason?: 'thinking_failed' })
+  | (BaseEvent & { kind: 'tool_call'; call: ToolCallRecord; origin?: number })
   /**
    * An app-authored line. `continuation` names the Compact & Resume it is about, so the
    * timeline can fold the note into that compaction's one row instead of showing it loose.
@@ -429,6 +490,8 @@ export function originTitle(origin: SessionOrigin, source: string | null): strin
 }
 
 export interface SessionSummary {
+  /** Durable naming authority; absent only on legacy recordings. */
+  titleSource?: 'fallback' | 'provider' | 'manual';
   /** Latest proven native picker selection; scoped to its frontend, never worker creation intent. */
   selectedModel?: { conversationId: string; model: string; observedAt: number; reasoningEffort?: ReasoningEffort };
   /** Explicit local project; durable across frontend conversation replacement. */
@@ -628,7 +691,9 @@ export interface AgentInfo {
   primeConversationId?: string;
   id: string;
   role: AgentRole;
+  /** Spawn label; reused assignments fall back to the stable worker id. */
   label: string;
+  /** Spawn brief, or a bounded inbox preview for the current reused assignment. */
   task: string;
   /**
    * Requested reasoning level for this worker's chat, or null to inherit the default.
@@ -656,7 +721,7 @@ export interface AgentInfo {
    */
   activatedAt: number | null;
   finishedAt: number | null;
-  /** Result text the worker reported when it finished. */
+  /** Current completion report; cleared when work resumes. Prior reports remain in history/inbox. */
   result: string | null;
   /** Messages waiting for this agent, including offered-but-unacknowledged ones. */
   pending: number;
@@ -818,13 +883,16 @@ export function estimateTokens(text: string): number {
 }
 
 /** Recorder clipping changes storage, not the text already sent to the model. */
-function storedTextTokens(value: StoredText): number {
+export function storedTextTokens(value: StoredText): number {
   const chars = value.truncated && Number.isSafeInteger(value.chars) && value.chars >= 0
     ? value.chars : value.text.length;
   return Math.ceil(chars / 4);
 }
 
-/** Token weight of original recorded text; previews, assets and HTML are not extra context. */
+/** Local estimation policy for one MCP return, independent of recorder/transport limits. */
+export const MAX_TOOL_RESULT_TOKENS = 10_000;
+
+/** Token weight of recorded context; previews, assets and HTML are not extra context. */
 export function eventTokens(event: SessionEvent): number {
   switch (event.kind) {
     case 'user_message':
@@ -847,7 +915,7 @@ export function eventTokens(event: SessionEvent): number {
     case 'tool_call':
       return (
         storedTextTokens(event.call.args) +
-        storedTextTokens(event.call.result) +
+        Math.min(MAX_TOOL_RESULT_TOKENS, storedTextTokens(event.call.result)) +
         estimateTokens(event.call.summary.title)
       );
     case 'handoff':
@@ -886,6 +954,7 @@ export function foldProgress(events: readonly SessionEvent[]): SessionEvent[] {
     if (!event) continue;
     let key: string | null = null;
     if (event.kind === 'progress' && event.progressId) key = `progress\u0000${event.progressId}`;
+    else if (event.kind === 'tool_call') key = `tool_call\u0000${event.call.callId}`;
     else if (event.kind === 'page_tool' && event.messageId) key = `page_tool\u0000${event.messageId}`;
     if (!key) continue;
     const at = anchor.get(key);
@@ -898,6 +967,8 @@ export function foldProgress(events: readonly SessionEvent[]): SessionEvent[] {
       out[at] = { ...held, message: event.message };
     } else if (held && held.kind === 'page_tool' && event.kind === 'page_tool') {
       out[at] = { ...held, label: event.label };
+    } else if (held && held.kind === 'tool_call' && event.kind === 'tool_call') {
+      out[at] = event.seq >= held.seq ? { ...event, origin: held.origin ?? held.seq, time: held.time } : held;
     }
     out[index] = null;
   }

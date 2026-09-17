@@ -14,8 +14,10 @@
 
 import { RELEASE_REPOSITORY } from '../shared/types.js';
 
-export { RELEASE_REPOSITORY, DISTRIBUTION_LABEL } from '../shared/types.js';
-export const APP_VERSION = '2.0.11';
+/** Korean distribution revision 3, based on the immutable official v2.1.13 tag. */
+export const APP_VERSION = '2.1.16';
+export const UPSTREAM_VERSION = '2.1.13';
+export const UPSTREAM_COMMIT = 'a4fe9726232edfbf67b97d6c716b6f653284739a';
 
 /**
  * Standalone extension recovery must stay on the app's own release. Using GitHub's moving
@@ -69,6 +71,6 @@ export function extensionDownloadUrl(version = APP_VERSION): string {
  */
 // 13 — native file attachments require exact claimed-input chunk delivery and final
 // draft ownership. A 12 companion would silently send text without these files.
-// 14 — sourceLost must durably abort an unsent compaction instead of being treated
-// as an ordinary compact request by a 13 app. Update the app and companion together.
+// 14 — exact native generated-image metadata and bounded preview observations. A 13 app
+// would ACK the journal while silently discarding that new event kind.
 export const BRIDGE_PROTOCOL = 14;

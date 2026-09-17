@@ -50,8 +50,9 @@ describe('cross-platform tunnel executable discovery', () => {
       await writeFile(allowed, '#!/bin/sh\n', { mode: 0o644 });
       await chmod(allowed, 0o755);
 
-      // An unusable hint may fall back to an installed or bundled executable.
-      // Reject this file regardless of what binaries the test host already has.
+      // Packaging may already have staged the legitimate bundled fallback. Reject
+      // the non-executable hint without assuming this checkout has no tunnel binary.
+      expect(locateBinary('tunnel-client', blocked)).toBe(locateBinary('tunnel-client'));
       expect(locateBinary('tunnel-client', blocked)).not.toBe(blocked);
       expect(locateBinary('tunnel-client', allowed)).toBe(allowed);
     } finally {

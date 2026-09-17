@@ -1,17 +1,24 @@
 import zhCN from './locales/zh-CN.json';
+import ko from './locales/ko.json';
 
-export type Language = 'en' | 'zh-CN';
+export type Language = 'en' | 'zh-CN' | 'ko';
 const STORAGE_KEY = 'cos.ui.language';
 const catalog: Readonly<Record<string, string>> = zhCN;
+const languageChoice = (value: string | null | undefined): Language => value === 'ko' || value === 'zh-CN' ? value : 'en';
 let language: Language = 'en';
-try { if (window.localStorage.getItem(STORAGE_KEY) === 'zh-CN') language = 'zh-CN'; } catch { /* Storage may be unavailable in a restricted renderer. */ }
+try {
+  if (window.navigator?.language.toLowerCase().startsWith('ko')) language = 'ko';
+  const saved = window.localStorage.getItem(STORAGE_KEY);
+  if (saved === 'en' || saved === 'zh-CN' || saved === 'ko') language = saved;
+} catch { /* Storage may be unavailable in a restricted renderer. */ }
 
 export function currentLanguage(): Language { return language; }
 
 /** Translate only app-authored copy at explicit call sites. Arguments remain verbatim. */
 export function t(source: string, args: readonly unknown[] = []): string {
   const key = Object.hasOwn(catalog, source) ? source : source.replace(/\s+/g, ' ').trim();
-  const translated = language === 'zh-CN' && Object.hasOwn(catalog, key) ? catalog[key]! : source;
+  const selected: Readonly<Record<string, string>> | null = language === 'ko' ? ko : language === 'zh-CN' ? catalog : null;
+  const translated = selected && Object.hasOwn(selected, key) ? selected[key]! : source;
   return translated.replace(/\{(\d+)\}/g, (match, index: string) => Number(index) < args.length ? String(args[Number(index)]) : match);
 }
 
@@ -94,8 +101,8 @@ export function initLanguage(): void {
   document.documentElement.lang = language;
   const select = document.getElementById('uiLanguage') as HTMLSelectElement;
   syncLanguageControls();
-  select.addEventListener('change', () => setLanguage(select.value === 'zh-CN' ? 'zh-CN' : 'en'));
+  select.addEventListener('change', () => setLanguage(languageChoice(select.value)));
   for (const button of document.querySelectorAll<HTMLButtonElement>('[data-language]')) {
-    button.addEventListener('click', () => setLanguage(button.dataset.language === 'zh-CN' ? 'zh-CN' : 'en'));
+    button.addEventListener('click', () => setLanguage(languageChoice(button.dataset.language)));
   }
 }

@@ -1985,7 +1985,7 @@ names render as plain chips; unresolved file citations do not gain invented loca
 Tool result rendering preserves structured text/image/resource distinctions within bounds.
 App-owned external/local links cross their validated main-process route.
 
-English and Simplified Chinese are explicit UI translations (`i18n.ts`, `locales/zh-CN.json`),
+English, Korean and Simplified Chinese are explicit UI translations (`i18n.ts`, `locales/*.json`),
 with the selected locale in `cos.ui.language`. Changing language repaints owned labels while
 retaining drafts/selections; never translate authored messages, provider text or file paths.
 Bindings live only in a WeakMap keyed by their DOM node. Language changes walk the current

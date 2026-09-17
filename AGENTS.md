@@ -1287,7 +1287,11 @@ The service worker journals observations before acknowledgement, batches/replays
 suspension, and preserves event identity so retransmission does not create duplicate turns or
 messages. Two transport slots, one batch per conversation and fair batch election prevent one
 hot/stalled chat blocking another. Command ACK custody precedes later observations from that
-route. Reconnection restores eligible documents before creating new work; browser restart is
+route. A fresh Resume retains its observation gate across only the first concrete route
+acquired by its exact native Send click (source conversation, epoch and draft must match).
+Preflight permission/dispatch waits do not authorize route adoption; refusal or navigation
+before the click releases the gate. Marker/activity proof releases the successful Resume gate.
+Reconnection restores eligible documents before creating new work; browser restart is
 a different lifetime from MV3 suspension (§2).
 
 An idle composer or missing Stop button alone does not prove a completed answer. Turn state

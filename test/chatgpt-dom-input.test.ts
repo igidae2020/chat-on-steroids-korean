@@ -610,6 +610,22 @@ describe('native image readiness', () => {
 
 
 describe('provider limit notice', () => {
+  it('recognizes visible Korean timeout notices without accepting hidden notices or authored quotations', () => {
+    const notice = document.createElement('div');
+    notice.innerHTML = '<p>메시지 전송 시간이 초과되었습니다. 다시 시도해 주세요.</p><button>다시 시도</button>';
+    document.body.append(notice);
+    expect(api.errors()).toEqual([expect.objectContaining({ recoverable: true })]);
+    notice.setAttribute('hidden', '');
+    expect(api.errors()).toEqual([]);
+    notice.removeAttribute('hidden'); notice.setAttribute('aria-hidden', 'true');
+    expect(api.errors()).toEqual([]);
+    notice.remove();
+    const quotation = document.createElement('div');
+    quotation.className = 'markdown';
+    quotation.innerHTML = '<p>오류 예시: 메시지 전송 시간이 초과되었습니다. 다시 시도해 주세요.</p><button>다시 시도</button>';
+    document.body.append(quotation);
+    expect(api.errors()).toEqual([]);
+  });
   it('records and acknowledges the exact Korean access notice once without accepting other dialogs', () => {
     const notice = document.createElement('div'); notice.setAttribute('role', 'dialog');
     notice.innerHTML = '<h2>요청이 너무 많습니다</h2><p>요청을 너무 빠르게 보내고 있습니다. 데이터를 보호하기 위해 대화에 대한 액세스가 일시적으로 제한되었습니다. 몇 분 후 다시 시도해 주세요.</p><button>알겠습니다</button>';

@@ -14,7 +14,10 @@
 
 import { RELEASE_REPOSITORY } from '../shared/types.js';
 
-export const APP_VERSION = '2.1.13';
+/** Korean distribution revision 3, based on the immutable official v2.1.13 tag. */
+export const APP_VERSION = '2.1.16';
+export const UPSTREAM_VERSION = '2.1.13';
+export const UPSTREAM_COMMIT = 'a4fe9726232edfbf67b97d6c716b6f653284739a';
 
 /**
  * Standalone extension recovery must stay on the app's own release. Using GitHub's moving

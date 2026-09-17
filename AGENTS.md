@@ -21,7 +21,7 @@ changed lines before applying an older patch. Document the work and its actual v
 the code currently does it. Known implementation gaps are collected in §21 instead of being
 mixed into the happy path as features.
 
-Source alignment: **2026-09-16**, including the local stability candidate. App/extension **2.1.13**,
+Source alignment: official **v2.1.13** (2026-09-16), Korean distribution revision 3. App/extension **2.1.16**,
 bridge protocol **14** in the checked declarations (`package.json`, `src/main/version.ts`,
 `extension/manifest.json`). This does not prove release, installation or live Chrome behavior.
 
@@ -2239,8 +2239,9 @@ diagnostics, not restart authority; secrets must never be printed to investigate
 
 ## 20. Build, installation, updater and release
 
-Source, bundle, package, installed bytes and live behavior are separate gates (§3). The app id
-is `com.chatonsteroids.app`. Native release targets are Windows x64/arm64 NSIS, macOS x64/arm64
+Source, bundle, package, installed bytes and live behavior are separate gates (§3). The Korean distribution keeps upstream behavior on conflicts; see `docs/korean-integration.md`.
+OpenCodex is only a preset of the existing custom API provider, not another transport.
+The app id is `com.chatonsteroids.app`. Native release targets are Windows x64/arm64 NSIS, macOS x64/arm64
 DMG+ZIP and Linux x64/arm64 AppImage+DEB. Windows is per-user-capable and `asInvoker`; replacing
 the package preserves userData. Synchronize package/main/extension versions deliberately.
 

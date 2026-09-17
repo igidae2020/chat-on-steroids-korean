@@ -1,5 +1,12 @@
 # Changelog
 
+## [2.1.16] — Korean distribution revision 3
+
+- Based on official v2.1.13; upstream behavior wins over conflicting legacy fork policies.
+- Add Korean UI through the existing locale catalog and an OpenCodex custom-provider preset.
+- Keep updates and matching extension downloads on the Korean distribution repository.
+- See [release notes](docs/release-notes/v2.1.16.md) and [integration decisions](docs/korean-integration.md).
+
 All notable changes to this project are documented here.
 
 This project is in **beta** despite its version number. Behavior may still change between

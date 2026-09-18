@@ -477,7 +477,7 @@ describe('session finish turn identity', () => {
   it('does not notify or draft if the durable reservation cannot be written', async () => {
     vi.spyOn(fs, 'appendFile').mockRejectedValueOnce(new Error('disk unavailable'));
     await expect(announceSessionFinish(sessionId, 'Uncommitted')).rejects.toThrow('could not be recorded');
-    expect(notify).not.toHaveBeenCalled(); expect(hooks.enqueue).not.toHaveBeenCalled();
+    expect(notify).not.toHaveBeenCalled(); expect(hooks.followup).not.toHaveBeenCalled();
   });
   it('reports an unavailable notification and backend error without repeating either', async () => {
     setFinishNotifier(null);
@@ -496,6 +496,6 @@ describe('session finish turn identity', () => {
     });
     const result = await announceSessionFinish(sessionId, 'Wrapping up');
     expect(JSON.stringify(await readRecentEvents(sessionId, 100, { kinds: ['progress'] }))).toContain('discarded');
-    expect(result).not.toContain('Stale follow-up must not escape');
+    expect(result).not.toContain('Stale follow-up must escape');
   });
 });

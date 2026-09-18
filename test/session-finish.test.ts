@@ -496,6 +496,6 @@ describe('session finish turn identity', () => {
     });
     const result = await announceSessionFinish(sessionId, 'Wrapping up');
     expect(JSON.stringify(await readRecentEvents(sessionId, 100, { kinds: ['progress'] }))).toContain('discarded');
-    expect(result).not.toContain('Stale follow-up must escape');
+    expect(result).not.toContain('Stale follow-up must not escape');
   });
 });

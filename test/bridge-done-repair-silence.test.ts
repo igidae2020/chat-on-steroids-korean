@@ -319,3 +319,39 @@ it.each(['end-first', 'start-first'] as const)('settles the exact successor fina
     expect(await maintenance()).toMatchObject({ conversationId: chat, reason: 'silence' });
   } finally { vi.useRealTimers(); }
 });
+
+describe('confirmed silence recovery has a finite lifetime', () => {
+  it.each(['pro', 'unknown'] as const)('does not repeat a %s reload over four hours without new work', async model => {
+    const chat = model === 'pro' ? 'f0f00003-1111-4111-8111-111111111111' : 'f0f00004-1111-4111-8111-111111111111';
+    vi.useFakeTimers();
+    try {
+      await pair();
+      await events([
+        ...(model === 'pro' ? [{ kind: 'model_selection', model: 'gpt-6-pro', reasoningEffort: 'pro', time: Date.now() }] : []),
+        { kind: 'turn_start', turnId: `finite-${model}`, time: Date.now() }
+      ], chat);
+      await attributedCall(chat);
+      await vi.advanceTimersByTimeAsync(10 * 60_000);
+      await sweepStaleSwarm(Date.now());
+      const repair = await maintenance();
+      expect(repair).toMatchObject({ conversationId: chat, reason: 'silence' });
+      expect(await maintenance(repair!.token, 'reloaded')).toBeNull();
+      // Maintenance and duplicate acknowledgements are receipts, never fresh model work.
+      // Cover the original 17:38–22:17 incident with 29 ten-minute polling intervals.
+      for (let index = 0; index < 29; index++) {
+        await vi.advanceTimersByTimeAsync(10 * 60_000);
+        await sweepStaleSwarm(Date.now());
+        expect(await maintenance(repair!.token, 'reloaded')).toBeNull();
+        expect(await maintenance()).toBeNull();
+      }
+      // This is not a blanket ban: a genuinely new turn earns its own repair.
+      await events([{ kind: 'turn_start', turnId: `fresh-${model}`, time: Date.now() }], chat);
+      await attributedCall(chat);
+      await vi.advanceTimersByTimeAsync(10 * 60_000);
+      await sweepStaleSwarm(Date.now());
+      expect(await maintenance()).toMatchObject({ conversationId: chat, reason: 'silence' });
+    } finally {
+      vi.useRealTimers();
+    }
+  });
+});

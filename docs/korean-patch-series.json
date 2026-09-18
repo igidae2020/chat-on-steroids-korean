@@ -196,6 +196,22 @@
       ],
       "label": "Automatic resume missing first Loop obligation",
       "portable": true
+    },
+    {
+      "id": "automatic-resume-proof-retention",
+      "commit": "3826471c02c7604cc2b0341536eb748f586a61de",
+      "title": "fix(resume): retain committed proof while the first Loop reply is owed",
+      "dependsOn": [
+        "automatic-resume-first-reply"
+      ],
+      "files": [
+        "AGENTS.md",
+        "src/main/goal.ts",
+        "src/main/session/continuation.ts",
+        "test/continuation.test.ts"
+      ],
+      "label": "Automatic resume proof retention across restart",
+      "portable": true
     }
   ]
 }

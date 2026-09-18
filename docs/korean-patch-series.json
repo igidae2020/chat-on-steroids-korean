@@ -1,0 +1,217 @@
+{
+  "schemaVersion": 1,
+  "upstreamBase": "a4fe9726232edfbf67b97d6c716b6f653284739a",
+  "upstreamVersion": "2.1.13",
+  "verifiedSourceBeforeSplit": "ffedb6de67e6fccfbb7a3c1a47ef063e7e0a1186",
+  "verifiedSourceTree": "02568ab964b9b057593303da75ccd95852581cd3",
+  "archiveBranch": "patches/upstream-2.1.13-korean",
+  "patches": [
+    {
+      "id": "catalog-opencodex",
+      "commit": "cc3019c8cc1bdd80141f66f3cde74efa6aae6803",
+      "title": "chore(i18n): register the OpenCodex provider label",
+      "dependsOn": [],
+      "files": [
+        "src/renderer/locales/zh-CN.json"
+      ],
+      "label": "공용 번역 키",
+      "portable": true
+    },
+    {
+      "id": "korean-ui",
+      "commit": "2513f2e92e5e2c49453aa3ec492431ac7ce0d870",
+      "title": "feat(i18n): add Korean UI and companion popup translations",
+      "dependsOn": [
+        "catalog-opencodex"
+      ],
+      "files": [
+        "src/renderer/i18n.ts",
+        "src/renderer/locales/ko.json",
+        "extension/popup.html",
+        "extension/popup.js",
+        "test/renderer-i18n.test.ts",
+        "test/extension-popup.test.ts",
+        "src/renderer/index.html",
+        "AGENTS.md"
+      ],
+      "label": "한글 UI·확장 팝업",
+      "portable": true
+    },
+    {
+      "id": "opencodex-preset",
+      "commit": "afede3608498cfb9da8e37ac952128bf3032ba98",
+      "title": "feat(provider): add the OpenCodex custom API preset",
+      "dependsOn": [
+        "catalog-opencodex"
+      ],
+      "files": [
+        "src/renderer/chat.ts",
+        "src/renderer/index.html",
+        "test/renderer-state.test.ts"
+      ],
+      "label": "OpenCodex API 프리셋",
+      "portable": true
+    },
+    {
+      "id": "korean-timeout",
+      "commit": "4d785ed72d00284d81569e381bd7d8372839d202",
+      "title": "fix(companion): recognize Korean delivery timeout controls",
+      "dependsOn": [],
+      "files": [
+        "extension/chatgpt-dom.js",
+        "test/chatgpt-dom-input.test.ts"
+      ],
+      "label": "한국어 전송 시간 초과 감지",
+      "portable": true
+    },
+    {
+      "id": "finite-silence-regression",
+      "commit": "b30369bcf235ac5e7d756f0eedbacb1ebe9f728f",
+      "title": "test(recovery): cover finite reload grants over four hours",
+      "dependsOn": [],
+      "files": [
+        "test/bridge-done-repair-silence.test.ts"
+      ],
+      "label": "반복 재로드 종료 회귀 검사",
+      "portable": true
+    },
+    {
+      "id": "successor-turn-identity",
+      "commit": "3878ad22e96ba5805174f0ce19b32f0170d189f6",
+      "title": "fix(recorder): preserve successor identity across batched turn boundaries",
+      "dependsOn": [
+        "finite-silence-regression"
+      ],
+      "files": [
+        "src/main/bridge.ts",
+        "src/main/session/recorder.ts",
+        "test/bridge-done-repair-silence.test.ts"
+      ],
+      "label": "연속 응답 식별·복구",
+      "portable": true
+    },
+    {
+      "id": "resume-first-route",
+      "commit": "6fbb1da6b148b7ba5204cef77354778fdca94c4e",
+      "title": "fix(resume): retain journal custody across the first sent SPA route",
+      "dependsOn": [],
+      "files": [
+        "extension/content.js",
+        "test/content-script.test.ts",
+        "AGENTS.md"
+      ],
+      "label": "요약 이전 첫 SPA 이동 보호",
+      "portable": true
+    },
+    {
+      "id": "resume-canonical-wakeup",
+      "commit": "b94c081777a094789264ba5b2c8e813086db3fff",
+      "title": "fix(resume): wake canonical receipt checks on native transcript mutation",
+      "dependsOn": [
+        "resume-first-route"
+      ],
+      "files": [
+        "extension/content.js",
+        "test/content-script.test.ts",
+        "AGENTS.md"
+      ],
+      "label": "백그라운드 요약 전송 확인",
+      "portable": true
+    },
+    {
+      "id": "tunnel-fixture",
+      "commit": "376898b1efc6ddefdcdc6cb6f34d40d6e41e9771",
+      "title": "test(packaging): allow the valid bundled tunnel fallback",
+      "dependsOn": [],
+      "files": [
+        "test/tunnel.test.ts"
+      ],
+      "label": "패키징 후 터널 검사",
+      "portable": true
+    },
+    {
+      "id": "korean-release-routing",
+      "commit": "fe82fb10a0cdf236f4f5ee57c3abcf0830c3af82",
+      "title": "chore(distribution): route updates and downloads to the Korean fork",
+      "dependsOn": [],
+      "files": [
+        "src/main/update.ts",
+        "src/shared/types.ts",
+        "src/main/version.ts",
+        "README.md"
+      ],
+      "label": "우리 저장소 업데이트·다운로드",
+      "portable": true
+    },
+    {
+      "id": "release-2.1.16",
+      "commit": "a8dff81e09ffbf3475ae52823db501fe06e83e73",
+      "title": "chore(release): identify official 2.1.13 Korean revision 3",
+      "dependsOn": [
+        "korean-release-routing"
+      ],
+      "files": [
+        "AGENTS.md",
+        "CHANGELOG.md",
+        "README.md",
+        "docs/korean-integration.md",
+        "docs/release-notes/v2.1.16.md",
+        "extension/manifest.json",
+        "package.json",
+        "package-lock.json",
+        "src/main/version.ts"
+      ],
+      "label": "2.1.16 버전·배포 기록",
+      "portable": false
+    },
+    {
+      "id": "historical-completion-gate",
+      "commit": "39345e78fcc23fb291d9b27ad6c3dafaee33d63c",
+      "title": "fix(session): ignore historical metadata in completion checks",
+      "dependsOn": [],
+      "files": [
+        "src/main/session/store.ts",
+        "test/recorder-final-identity.test.ts",
+        "test/bridge.test.ts",
+        "AGENTS.md"
+      ],
+      "label": "Historical message replay completion gate",
+      "portable": true
+    },
+    {
+      "id": "automatic-resume-first-reply",
+      "commit": "f4ea92499229e57b0eb1bbdbb9ba9da28c578b8b",
+      "title": "fix(loop): recover the missing first reply after automatic resume",
+      "dependsOn": [
+        "historical-completion-gate"
+      ],
+      "files": [
+        "AGENTS.md",
+        "src/main/bridge.ts",
+        "src/main/goal.ts",
+        "src/main/session/continuation.ts",
+        "src/main/session/store.ts",
+        "test/bridge.test.ts",
+        "test/continuation.test.ts"
+      ],
+      "label": "Automatic resume missing first Loop obligation",
+      "portable": true
+    },
+    {
+      "id": "automatic-resume-proof-retention",
+      "commit": "3826471c02c7604cc2b0341536eb748f586a61de",
+      "title": "fix(resume): retain committed proof while the first Loop reply is owed",
+      "dependsOn": [
+        "automatic-resume-first-reply"
+      ],
+      "files": [
+        "AGENTS.md",
+        "src/main/goal.ts",
+        "src/main/session/continuation.ts",
+        "test/continuation.test.ts"
+      ],
+      "label": "Automatic resume proof retention across restart",
+      "portable": true
+    }
+  ]
+}

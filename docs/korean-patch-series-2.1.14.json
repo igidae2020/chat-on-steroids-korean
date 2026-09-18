@@ -1,0 +1,179 @@
+{
+  "schemaVersion": 1,
+  "upstreamSource": "6de3f963adc21766954c4a712ce00b42f3caf14c",
+  "upstreamSourceVersion": "2.1.14",
+  "forkVersion": "2.1.19",
+  "koreanRevision": 1,
+  "branch": "integrate/upstream-2.1.14-korean",
+  "patches": [
+    {
+      "commit": "1ae76fbf38fd72be0e82427ae6d4ca1fd81ef21f",
+      "id": "catalog-opencodex",
+      "subject": "chore(i18n): register OpenCodex label on official 2.1.14",
+      "files": [
+        "src/renderer/locales/zh-CN.json"
+      ],
+      "portable": true,
+      "dependsOn": []
+    },
+    {
+      "commit": "bdb751ebf47fe665670ab6a043a5f6cb776dc106",
+      "id": "korean-ui",
+      "subject": "feat(i18n): adapt Korean UI to official 2.1.14 languages and features",
+      "files": [
+        "extension/popup.html",
+        "extension/popup.js",
+        "src/renderer/i18n.ts",
+        "src/renderer/index.html",
+        "src/renderer/locales/ko.json",
+        "test/extension-popup.test.ts",
+        "test/renderer-i18n.test.ts"
+      ],
+      "portable": true,
+      "dependsOn": [
+        "catalog-opencodex"
+      ]
+    },
+    {
+      "commit": "7aa8ae6088aa3e1c31854aeafa5b66f1052505af",
+      "id": "opencodex-preset",
+      "subject": "feat(provider): add the OpenCodex custom API preset",
+      "files": [
+        "src/renderer/chat.ts",
+        "src/renderer/index.html",
+        "test/renderer-state.test.ts"
+      ],
+      "portable": true,
+      "dependsOn": [
+        "catalog-opencodex"
+      ]
+    },
+    {
+      "commit": "60e2172cfbf6f23e61f63ab2a88cb9b39105f215",
+      "id": "tunnel-fixture",
+      "subject": "test(packaging): allow the valid bundled tunnel fallback",
+      "files": [
+        "test/tunnel.test.ts"
+      ],
+      "portable": true,
+      "dependsOn": []
+    },
+    {
+      "commit": "1da8e1dd92d6a07da67a724ac4b6eba288077a6a",
+      "id": "korean-release-routing",
+      "subject": "feat(release): retain Korean fork update and extension routing",
+      "files": [
+        "src/main/update.ts",
+        "src/main/version.ts",
+        "src/shared/types.ts"
+      ],
+      "portable": true,
+      "dependsOn": []
+    },
+    {
+      "commit": "95637a93bd6f6bd75be3fe0404257185b349d635",
+      "id": "release-identification",
+      "subject": "chore(release): identify official 2.1.14 Korean revision 1 as 2.1.19",
+      "files": [
+        "CHANGELOG.md",
+        "docs/release-notes/v2.1.19.md",
+        "extension/manifest.json",
+        "package-lock.json",
+        "package.json",
+        "src/main/version.ts"
+      ],
+      "portable": false,
+      "dependsOn": []
+    },
+    {
+      "commit": "27b73e8ea119012a9c9048ce57319965bcdfd25e",
+      "id": "korean-timeout",
+      "subject": "fix(companion): recognize Korean delivery timeout controls",
+      "files": [
+        "extension/chatgpt-dom.js",
+        "test/chatgpt-dom-input.test.ts"
+      ],
+      "portable": true,
+      "dependsOn": []
+    },
+    {
+      "commit": "20d13fe060aa9544d881fa722eafcbc38022de89",
+      "id": "successor-turn-identity-2.1.14",
+      "subject": "fix(recovery): preserve successor turn ownership",
+      "files": [
+        "src/main/bridge.ts",
+        "src/main/session/recorder.ts",
+        "src/main/session/store.ts",
+        "test/bridge-done-repair-silence.test.ts"
+      ],
+      "portable": true,
+      "dependsOn": []
+    },
+    {
+      "commit": "ad5dfd4e6b7f17fe3903008676477132769cf7af",
+      "id": "resume-first-route-2.1.14",
+      "subject": "fix(companion): retain resume journal on the first owned SPA route",
+      "files": [
+        "extension/content.js",
+        "test/content-script.test.ts"
+      ],
+      "portable": true,
+      "dependsOn": []
+    },
+    {
+      "commit": "b8e5dab5b39472e334690874c2ed07b262647142",
+      "id": "historical-completion-regression-2.1.14",
+      "subject": "test(completion): retain metadata replay coverage on official completion logic",
+      "files": [
+        "test/bridge.test.ts",
+        "test/recorder-final-identity.test.ts"
+      ],
+      "portable": true,
+      "dependsOn": []
+    },
+    {
+      "commit": "b04fd86a5ba8d429f4c6f5e700f6334232d599b7",
+      "id": "automatic-resume-first-reply-2.1.14",
+      "subject": "fix(loop): preserve the first automatic resume reply on official recovery owners",
+      "files": [
+        "src/main/bridge.ts",
+        "src/main/goal.ts",
+        "src/main/session/continuation.ts",
+        "src/main/session/store.ts",
+        "test/bridge.test.ts",
+        "test/continuation.test.ts"
+      ],
+      "portable": true,
+      "dependsOn": []
+    },
+    {
+      "commit": "43408f02be225adfc6a622ff169f2ec36d831f00",
+      "id": "automatic-resume-proof-retention-2.1.14",
+      "subject": "fix(resume): retain committed proof for its pending Loop obligation",
+      "files": [
+        "src/main/goal.ts",
+        "src/main/session/continuation.ts",
+        "test/continuation.test.ts"
+      ],
+      "portable": true,
+      "dependsOn": [
+        "automatic-resume-first-reply-2.1.14"
+      ]
+    },
+    {
+      "commit": "4ba01b407e37138b949edf4e67d947d724c99640",
+      "id": "finite-silence-regression-2.1.14",
+      "subject": "test(recovery): retain four-hour finite reload regression on official policy",
+      "files": [
+        "test/bridge-done-repair-silence.test.ts"
+      ],
+      "portable": true,
+      "dependsOn": []
+    }
+  ],
+  "officialPreferred": [
+    "historical-completion-gate production change omitted; retain regression tests",
+    "resume-canonical-wakeup production change omitted; use official receipt observer"
+  ],
+  "adaptationNote": "First resumed Loop app-side obligation and proof retention still failed on official source; retained narrowly after reproducing. Manual Pro waiting remains official one hour."
+}

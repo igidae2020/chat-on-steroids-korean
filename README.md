@@ -1,3 +1,5 @@
+> 한국어판: 공식 2.1.14 소스 기반 2.1.19 통합본입니다. [통합 및 검증 기록](docs/integration-2.1.14-korean.md) · [기능별 패치](docs/korean-patch-series-2.1.14.json)
+
 <p align="center"><img src="docs/images/readme-hero.svg?v=2" width="960" alt="Turn ChatGPT into Codex-style local coding. Chat On Steroids: Your files. Your terminal. Your ChatGPT plan." /></p>
 
 <p align="center">

@@ -1,20 +1,25 @@
 import zhCN from './locales/zh-CN.json';
+import ko from './locales/ko.json';
 import es from './locales/es.json';
 import zhTW from './locales/zh-TW.json';
 
-export type Language = 'en' | 'es' | 'zh-CN' | 'zh-TW';
+export type Language = 'en' | 'es' | 'zh-CN' | 'zh-TW' | 'ko';
 const STORAGE_KEY = 'cos.ui.language';
 type Catalog = Readonly<Record<string, string>>;
-const catalogs: Readonly<Record<Exclude<Language, 'en'>, Catalog>> = { es, 'zh-CN': zhCN, 'zh-TW': zhTW };
+const catalogs: Readonly<Record<Exclude<Language, 'en'>, Catalog>> = { es, 'zh-CN': zhCN, 'zh-TW': zhTW, ko };
 const sourceKeys = new Set(Object.values(catalogs).flatMap(catalog => Object.keys(catalog)));
 
 function parseLanguage(value: string | null | undefined): Language {
-  return value === 'es' || value === 'zh-CN' || value === 'zh-TW' ? value : 'en';
+  return value === 'es' || value === 'zh-CN' || value === 'zh-TW' || value === 'ko' ? value : 'en';
 }
 
 let language: Language = 'en';
-try { language = parseLanguage(window.localStorage.getItem(STORAGE_KEY)); }
-catch { /* Storage may be unavailable in a restricted renderer; English remains the default. */ }
+try {
+  if (window.navigator?.language.toLowerCase().startsWith('ko')) language = 'ko';
+  const saved = window.localStorage.getItem(STORAGE_KEY);
+  if (saved === 'en' || saved === 'es' || saved === 'zh-CN' || saved === 'zh-TW' || saved === 'ko') language = parseLanguage(saved);
+}
+catch { /* Storage may be unavailable; retain the detected host language. */ }
 
 export function currentLanguage(): Language { return language; }
 

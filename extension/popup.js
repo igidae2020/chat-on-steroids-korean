@@ -219,18 +219,18 @@ function paintHeader(status) {
 
   $('pill').className = `pill ${ready ? '' : incompatible ? 'bad' : 'off'}`;
   $('state').textContent = incompatible
-    ? 'Version mismatch'
+    ? '버전 불일치'
     : off
-      ? 'Disconnected'
+      ? '연결 해제됨'
       : !connected
-        ? 'App not reachable'
+        ? '앱에 연결할 수 없음'
         : ready
           // Health + pairing prove reachability, not the recorder/command flow.
-          ? `App reachable · Port ${status.port}`
-          : `Port ${status.port} · connecting`;
+          ? `앱 응답 확인 · 포트 ${status.port}`
+          : `포트 ${status.port} · 연결 중`;
 
   $('retryBtn').hidden = ready || incompatible;
-  $('retryBtn').textContent = off ? 'Connect' : 'Try again';
+  $('retryBtn').textContent = off ? '연결' : '다시 시도';
   $('unpairBtn').hidden = !paired || incompatible;
   return ready;
 }

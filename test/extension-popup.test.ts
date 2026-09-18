@@ -24,10 +24,10 @@ it('reports only app reachability from compatible health and pairing', () => {
   (popup!.window as any).paintHeader({ connected: true, paired: true, port: 8765 });
   expect(document.getElementById('state')!.textContent).not.toContain('Connected');
   (popup!.window as any).paintHeader({ connected: true, paired: true, compatible: true, port: 8765 });
-  expect(document.getElementById('state')!.textContent).toBe('App reachable · Port 8765');
+  expect(document.getElementById('state')!.textContent).toBe('앱 응답 확인 · 포트 8765');
   expect(document.getElementById('state')!.textContent).not.toContain('Connected');
   (popup!.window as any).paintHeader({ connected: false });
-  expect(document.getElementById('state')!.textContent).toBe('App not reachable');
+  expect(document.getElementById('state')!.textContent).toBe('앱에 연결할 수 없음');
 });
 
 it('explains manual mismatch recovery with both versions', () => {

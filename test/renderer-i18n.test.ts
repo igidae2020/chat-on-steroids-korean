@@ -192,3 +192,67 @@ describe('Chinese app interface', () => {
     }
   });
 });
+
+describe('Korean app interface', () => {
+  it.each(['es', 'zh-TW', 'zh-CN', 'en'] as const)('preserves saved %s on a Korean host', async saved => {
+    Object.defineProperty(window.navigator, 'language', { value: 'ko-KR', configurable: true });
+    window.localStorage.setItem('cos.ui.language', saved);
+    const { initLanguage, currentLanguage } = await import('../src/renderer/i18n.js');
+    initLanguage();
+    expect(currentLanguage()).toBe(saved);
+    expect(document.documentElement.lang).toBe(saved);
+    expect((document.getElementById('uiLanguage') as HTMLSelectElement).value).toBe(saved);
+  });
+
+  it('covers the official catalog and preserves interpolation placeholders', async () => {
+    const { default: ko } = await import('../src/renderer/locales/ko.json');
+    const { default: es } = await import('../src/renderer/locales/es.json');
+    const { default: zhTW } = await import('../src/renderer/locales/zh-TW.json');
+    const officialKeys = new Set([...Object.keys(zhCN), ...Object.keys(es), ...Object.keys(zhTW)]);
+    expect(Object.keys(ko).sort()).toEqual([...officialKeys].sort());
+    for (const [source, translated] of Object.entries(ko)) {
+      expect(translated.trim(), source).not.toBe('');
+      expect([...translated.matchAll(/\{\d+\}/g)].map(match => match[0]).sort(), source)
+        .toEqual([...source.matchAll(/\{\d+\}/g)].map(match => match[0]).sort());
+    }
+  });
+
+  it('defaults Korean hosts to Korean but keeps an explicit English preference after reload', async () => {
+    Object.defineProperty(window.navigator, 'language', { value: 'ko-KR', configurable: true });
+    const first = await import('../src/renderer/i18n.js');
+    first.initLanguage();
+    expect(document.documentElement.lang).toBe('ko');
+    expect(document.querySelector('.setup-heading h1')!.textContent).toBe('연결 설정');
+    first.setLanguage('en');
+    vi.resetModules();
+    const second = await import('../src/renderer/i18n.js');
+    expect(second.currentLanguage()).toBe('en');
+    expect(second.t('New chat')).toBe('New chat');
+  });
+
+  it('switches Korean and Chinese without replacing draft controls or translating authored messages', async () => {
+    const { initLanguage, setLanguage, ui, t } = await import('../src/renderer/i18n.js');
+    initLanguage();
+    const input = document.getElementById('chatInput') as HTMLTextAreaElement;
+    input.value = 'Save\n사용자 원문 <img src=x>';
+    input.setSelectionRange(2, 6);
+    const message = document.createElement('p');
+    message.textContent = 'New chat';
+    document.body.append(message);
+    const bound = document.createElement('button');
+    document.body.append(bound);
+    ui(bound, 'textContent', () => t('Remove {0}', ['New chat <img src=x>']));
+    for (const locale of ['ko', 'es', 'zh-TW', 'zh-CN', 'en', 'ko'] as const) {
+      setLanguage(locale);
+      expect(document.getElementById('chatInput')).toBe(input);
+      expect(input.value).toBe('Save\n사용자 원문 <img src=x>');
+      expect([input.selectionStart, input.selectionEnd]).toEqual([2, 6]);
+      expect(message.textContent).toBe('New chat');
+      expect(bound.querySelector('img')).toBeNull();
+    }
+    expect(bound.textContent).toBe('New chat <img src=x> 제거');
+    expect((document.getElementById('uiLanguage') as HTMLSelectElement).value).toBe('ko');
+    expect(document.querySelector('[data-language="ko"]')!.getAttribute('aria-pressed')).toBe('true');
+    expect(window.localStorage.getItem('cos.ui.language')).toBe('ko');
+  });
+});

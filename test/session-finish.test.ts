@@ -163,21 +163,38 @@ describe('session finish turn identity', () => {
   });
   it.each(['new input', 'turn release'])('cancels a pending Goal retry on %s', async reason => {
     let fail!: (error: Error) => void;
-    hooks.followup.mockImplementationOnce(() => new Promise((_resolve, reject) => { fail = reject; }));
-    await announceTransport(sessionId, 'Ready');
-    await vi.waitFor(() => expect(fail).toBeTypeOf('function'));
-    vi.useFakeTimers();
-    fail(new TaskRequestError('http_503: busy', true));
-    await vi.advanceTimersByTimeAsync(0);
-    if (reason === 'new input') {
-      hooks.delivered.push({ id: 'new-user-work', sessionId, text: 'Changed instructions', state: 'sent' });
-      for (const listener of hooks.inputListeners) listener();
-    } else await releaseSessionFinish(sessionId, 'turn-one');
-    vi.useRealTimers();
-    await settleSessionFinishForTests();
-    expect(hooks.followup).toHaveBeenCalledTimes(1);
-    expect(hooks.enqueue).not.toHaveBeenCalled();
-    expect(hooks.inputListeners.size).toBe(0);
+    let signal!: AbortSignal;
+    hooks.followup.mockImplementationOnce((_id, currentSignal) => {
+      signal = currentSignal;
+      return new Promise<string>((_resolve, reject) => { fail = reject; });
+    });
+    try {
+      await announceTransport(sessionId, 'Ready');
+      await vi.waitFor(() => expect(fail).toBeTypeOf('function'));
+      fail(new TaskRequestError('http_503: busy', true));
+      // This tests cancellation, not the backoff clock. Keep the recorder's real
+      // 400 ms notification alive: switching back from fake timers can discard
+      // that notification and strand the pending retry's cancellation promise.
+      await vi.waitFor(() => expect(getSessionFinishDraft(sessionId, 'turn-one')?.text).toContain('retrying in'));
+      expect(signal.aborted).toBe(false);
+      if (reason === 'new input') {
+        hooks.delivered.push({ id: 'new-user-work', sessionId, text: 'Changed instructions', state: 'sent' });
+        for (const listener of hooks.inputListeners) listener();
+      } else await releaseSessionFinish(sessionId, 'turn-one');
+      // Cancellation must precede the 15-second retry; a later provider attempt
+      // noticing the release must not turn this into a false-positive pass.
+      await vi.waitFor(() => expect(signal.aborted).toBe(true), { timeout: 2000 });
+      await settleSessionFinishForTests();
+      expect(hooks.followup).toHaveBeenCalledTimes(1);
+      expect(hooks.enqueue).not.toHaveBeenCalled();
+      expect(hooks.inputListeners.size).toBe(0);
+      expect(getSessionFinishDraft(sessionId, 'turn-one')).toBeNull();
+    } finally {
+      // Even a failed assertion must not leave a provider/retry in the next test.
+      fail?.(new Error('Release the test provider'));
+      await setGoalSwitchNow(hooks.caller.conversationId, 'goal', false);
+      await settleSessionFinishForTests();
+    }
   });
   it('uses the armed Astra switch as Loop at finish and suppresses Notify', async () => {
     await observeSessionModel(sessionId, hooks.caller.conversationId, 'gpt-6-pro', Date.now());
@@ -460,7 +477,7 @@ describe('session finish turn identity', () => {
   it('does not notify or draft if the durable reservation cannot be written', async () => {
     vi.spyOn(fs, 'appendFile').mockRejectedValueOnce(new Error('disk unavailable'));
     await expect(announceSessionFinish(sessionId, 'Uncommitted')).rejects.toThrow('could not be recorded');
-    expect(notify).not.toHaveBeenCalled(); expect(hooks.followup).not.toHaveBeenCalled();
+    expect(notify).not.toHaveBeenCalled(); expect(hooks.enqueue).not.toHaveBeenCalled();
   });
   it('reports an unavailable notification and backend error without repeating either', async () => {
     setFinishNotifier(null);

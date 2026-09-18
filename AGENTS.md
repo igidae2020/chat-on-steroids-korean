@@ -21,7 +21,7 @@ changed lines before applying an older patch. Document the work and its actual v
 the code currently does it. Known implementation gaps are collected in §21 instead of being
 mixed into the happy path as features.
 
-Source alignment: official **v2.1.13** (2026-09-16), Korean distribution revision 3. App/extension **2.1.16**,
+Source alignment: official **v2.1.13** (2026-09-16), Korean distribution revision 5. App/extension **2.1.18**,
 bridge protocol **14** in the checked declarations (`package.json`, `src/main/version.ts`,
 `extension/manifest.json`). This does not prove release, installation or live Chrome behavior.
 
@@ -1771,6 +1771,15 @@ Explicit user activation may proceed without that proof after the existing idle 
 activation setter records that exemption in the existing reply ledger; browser parameters or
 reply-ID prefixes cannot grant it. Recheck restored automatic debt, provider start and delivery.
 This condition does not change ordinary Goal mode or user-message delivery.
+Korean revision 5 adds one post-resume exception: an enabled Loop with a saved objective may
+file a missing obligation for the exact first completed reply of its committed automatic
+resume without an MCP call in that reply. An existing handled reply is never rearmed. The current session/continuation/bootstrap/final identities must agree;
+the existing Goal ledger retains that one obligation and its handled tombstone. This grants no
+bootstrap-send receipt, cannot reopen an Off/blocked/stopped chat and never exempts later replies
+or ordinary no-MCP turns. Late final recording is recovered from the same durable boundary.
+The committed automatic-resume WAL remains available for the 12-hour missing-reply recovery
+window and for any exact pending reply's remaining lifetime. This retention is not a handover
+waiting deadline; manual Pro's one-hour writing rule stays unchanged.
 They retain the exact source turn, work sequence and Pro policy. Native busy durably defers the same ticket
 by five minutes, repeatedly if necessary. MCP/interim work revokes the ticket and pending draft
 and rearms ten minutes; fresh work/queue priority and exact document/draft authority are checked
@@ -1855,6 +1864,9 @@ a draft exists, then the generated continuation text and delivery state. Both ap
 the extension project the same pending reply and activity/listening deadlines. Display countdowns
 grant no execution authority. A full canonical final consumes silence immediately, including an
 exact final first backfilled after a completed turn; interim prose and Stop/Send changes never do.
+Completion checks compare canonical messages by authored position, not their later delivery
+cursor. Historical metadata/HTML replay cannot reopen work; changed final content retains its
+own completion sequence and genuine newer messages, tools and turn boundaries still veto it.
 A completed MCP-backed response without final text is a recovery indication, not a terminal error:
 normal chats use two minutes before reload and one minute of listening after confirmed reload.
 Expired recovery debt goes directly to decision preparation without another Answer Settling wait.

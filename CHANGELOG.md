@@ -1,5 +1,18 @@
 # Changelog
 
+## [2.1.18] — Korean distribution revision 5
+
+- Continue an enabled Loop from the exact first completed response after a committed automatic resume, even when that response made no MCP call.
+- Recover the first response from durable resume provenance when its final arrives without a local turn id. Preserve ordinary Loop MCP requirements and current Stop, Off, block and delivery ownership checks.
+- Retain committed automatic-resume provenance across delayed pickup and restart for the recovery/owed-reply lifetime, without changing manual handover deadlines.
+- Based on official v2.1.13; see [release notes](docs/release-notes/v2.1.18.md).
+
+## [2.1.17] — Korean distribution revision 4
+
+- Fix completed Goal/Loop replies remaining on Answer settling after historical message metadata is re-observed.
+- Preserve the existing completion evidence for new messages, changed final content, tools, turn boundaries and session ownership.
+- Based on official v2.1.13; see [release notes](docs/release-notes/v2.1.17.md).
+
 ## [2.1.16] — Korean distribution revision 3
 
 - Based on official v2.1.13; upstream behavior wins over conflicting legacy fork policies.

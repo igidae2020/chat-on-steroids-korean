@@ -60,6 +60,7 @@ const {
   bindContinuationSourceMessageNow,
   bindContinuationDestinationMessageNow,
   claimContinuationNow,
+  committedAutomaticResumeBootstrap,
   commitContinuation,
   compactingConversation,
   continuationByToken,
@@ -84,6 +85,7 @@ const store = await import('../src/main/session/store.js');
 const { recordChatObservations, resetRecorderForTests, sessionForConversation } = await import('../src/main/session/recorder.js');
 const { resetWorkspaces, setWorkspaceFor, workspaceEntries } = await import('../src/main/workspace.js');
 const {
+  GOAL_REPLY_TTL_MS,
   goalObjectiveFor,
   goalPendingReplyFor,
   goalSwitchFor,
@@ -149,6 +151,73 @@ async function readyContinuation(): Promise<{ sessionId: string; token: string }
 }
 
 describe('capturing the brief', () => {
+  it('keeps committed automatic bootstrap provenance through the Goal reply lifetime and restart', async () => {
+    vi.useFakeTimers();
+    const session = await createSession({ title: 'retained automatic provenance', conversationId: CHAT_A });
+    const opened = await openContinuationNow(session.id, CHAT_A, true);
+    const handoff = await attachSummary(opened.token, SAMPLE_BRIEF);
+    await claimContinuationNow(opened.token, 'retained-owner');
+    await beginContinuationDestinationSendNow(opened.token);
+    await dispatchContinuationDestinationSendNow(opened.token);
+    expect(await commitContinuation(opened.token, CHAT_B)).toBe(true);
+    const committedAt = continuationByToken(opened.token)!.touchedAt;
+    vi.setSystemTime(committedAt + 3 * 60 * 60_000);
+    const saved = snapshotContinuations();
+    expect(continuationByToken(opened.token)?.state).toBe('committed');
+    resetContinuationsForTests();
+    const original = saved.entries[0]!;
+    await restoreContinuations({ ...saved, entries: [
+      ...Array.from({ length: 32 }, (_, index) => ({ ...original,
+        token: `expired-terminal-${String(index).padStart(3, '0')}`, state: 'aborted' as const,
+        touchedAt: Date.now() - 21 * 60_000 })),
+      ...Array.from({ length: 32 }, (_, index) => ({ ...original,
+        token: `recent-terminal-${String(index).padStart(3, '0')}`, state: 'aborted' as const,
+        touchedAt: Date.now() })),
+      ...saved.entries
+    ] });
+    expect(committedAutomaticResumeBootstrap({ sessionId: session.id, conversationId: CHAT_B,
+      handoffId: handoff!.id, messageId: 'first-bootstrap', text: `[[CLF-RESUME:${opened.token}]]\n\nsummary` })).toBe(true);
+    vi.setSystemTime(committedAt + GOAL_REPLY_TTL_MS);
+    expect(continuationByToken(opened.token)).toBeNull();
+    resetContinuationsForTests();
+    await restoreContinuations(saved);
+    expect(continuationByToken(opened.token)).toBeNull();
+  });
+
+  it('retains automatic commit proof for a reply accepted near the end of the recovery window', async () => {
+    vi.useFakeTimers();
+    const destination = 'cafea199-0000-4000-8000-00000000a199';
+    const session = await createSession({ title: 'late filed automatic reply', conversationId: CHAT_A });
+    const opened = await openContinuationNow(session.id, CHAT_A, true);
+    const handoff = await attachSummary(opened.token, SAMPLE_BRIEF);
+    await claimContinuationNow(opened.token, 'late-filed-owner');
+    await beginContinuationDestinationSendNow(opened.token);
+    await dispatchContinuationDestinationSendNow(opened.token);
+    expect(await commitContinuation(opened.token, destination)).toBe(true);
+    const committedAt = continuationByToken(opened.token)!.touchedAt;
+    const saved = snapshotContinuations();
+    const acceptedAt = committedAt + GOAL_REPLY_TTL_MS - 60_000;
+    vi.setSystemTime(acceptedAt);
+    restoreGoalReplies({ version: 1, savedAt: acceptedAt, replies: [{
+      conversationId: destination, sessionId: session.id, replyId: 'late-final', turnId: 'reply:late-final',
+      eventSeq: 10, acceptedAt, state: 'pending', resumeHandoffId: handoff!.id,
+      resumeBootstrapMessageId: 'first-bootstrap'
+    }] });
+    vi.setSystemTime(committedAt + GOAL_REPLY_TTL_MS + 60_000);
+    expect(continuationByToken(opened.token)?.state).toBe('committed');
+    resetContinuationsForTests();
+    await restoreContinuations({ ...saved, entries: [
+      ...Array.from({ length: 32 }, (_, index) => ({ ...saved.entries[0]!,
+        token: `newer-automatic-${String(index).padStart(3, '0')}`,
+        sessionId: `2026-09-18-cafe${String(index).padStart(4, '0')}`,
+        openedAt: Date.now() - 60_000, touchedAt: Date.now() - 60_000 })),
+      ...saved.entries
+    ] });
+    expect(continuationByToken(opened.token)?.state).toBe('committed');
+    vi.setSystemTime(acceptedAt + GOAL_REPLY_TTL_MS);
+    expect(continuationByToken(opened.token)).toBeNull();
+  });
+
   it('freezes exact source model intent across selection changes and durable restore', async () => {
     const summary = await createSession({ title: 'model transfer', conversationId: CHAT_A });
     await store.observeSessionModel(summary.id, CHAT_A, 'gpt-5.6-sol', 10, 'high');
@@ -499,6 +568,30 @@ describe('committing', () => {
     expect(await releaseContinuationDestinationSendNow(token)).toBe(false);
     expect(continuationByToken(token)?.destinationSend.state).toBe('sent');
     expect(await releaseContinuationDestinationSendNow('0000000000000000000000000000dead')).toBe(false);
+  });
+
+  it.each([
+    { name: 'manual continuation', automatic: false, commit: true, marker: 'own' },
+    { name: 'uncommitted automatic continuation', automatic: true, commit: false, marker: 'own' },
+    { name: 'foreign marker token', automatic: true, commit: true, marker: 'foreign' }
+  ])('does not authorize a resume bootstrap from a $name tuple', async ({ automatic, commit, marker }) => {
+    const summary = await createSession({ title: 'resume bootstrap tuple', conversationId: CHAT_A });
+    const opened = await openContinuationNow(summary.id, CHAT_A, automatic);
+    const handoff = await attachSummary(opened.token, SAMPLE_BRIEF);
+    expect(handoff).not.toBeNull();
+    expect(await claimContinuationNow(opened.token, 'resume-bootstrap-tuple-owner')).not.toBeNull();
+    expect((await beginContinuationDestinationSendNow(opened.token))?.allowed).toBe(true);
+    expect(await dispatchContinuationDestinationSendNow(opened.token)).toBe(true);
+    if (commit) expect(await commitContinuation(opened.token, CHAT_B)).toBe(true);
+
+    const token = marker === 'own' ? opened.token : '00000000000000000000000000000000';
+    expect(committedAutomaticResumeBootstrap({
+      sessionId: summary.id,
+      conversationId: CHAT_B,
+      handoffId: handoff!.id,
+      messageId: 'recorded-bootstrap-message',
+      text: `[[CLF-RESUME:${token}]]\n\nresume`
+    })).toBe(false);
   });
 
   it.each(['unattempted', 'attempted', 'dispatched', 'sent'])('command retirement only releases its own unattempted claim (%s)', async state => {

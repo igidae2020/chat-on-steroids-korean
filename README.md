@@ -1,4 +1,4 @@
-> **한국어 · OpenCodex 배포판 2.1.16** — 공식 **v2.1.13** 기반 개정 3입니다. 공식과 충돌하면 공식 동작을 우선합니다. [채택·제외 내역 및 검증](docs/korean-integration.md).
+> **한국어 · OpenCodex 배포판 2.1.18** — 공식 **v2.1.13** 기반 개정 5입니다. 공식과 충돌하면 공식 동작을 우선합니다. [채택·제외 내역 및 검증](docs/korean-integration.md).
 
 <p align="center"><img src="docs/images/readme-hero.svg?v=2" width="960" alt="Turn ChatGPT into Codex-style local coding. Chat On Steroids: Your files. Your terminal. Your ChatGPT plan." /></p>
 

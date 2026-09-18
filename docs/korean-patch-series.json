@@ -163,6 +163,55 @@
       ],
       "label": "2.1.16 버전·배포 기록",
       "portable": false
+    },
+    {
+      "id": "historical-completion-gate",
+      "commit": "39345e78fcc23fb291d9b27ad6c3dafaee33d63c",
+      "title": "fix(session): ignore historical metadata in completion checks",
+      "dependsOn": [],
+      "files": [
+        "src/main/session/store.ts",
+        "test/recorder-final-identity.test.ts",
+        "test/bridge.test.ts",
+        "AGENTS.md"
+      ],
+      "label": "Historical message replay completion gate",
+      "portable": true
+    },
+    {
+      "id": "automatic-resume-first-reply",
+      "commit": "f4ea92499229e57b0eb1bbdbb9ba9da28c578b8b",
+      "title": "fix(loop): recover the missing first reply after automatic resume",
+      "dependsOn": [
+        "historical-completion-gate"
+      ],
+      "files": [
+        "AGENTS.md",
+        "src/main/bridge.ts",
+        "src/main/goal.ts",
+        "src/main/session/continuation.ts",
+        "src/main/session/store.ts",
+        "test/bridge.test.ts",
+        "test/continuation.test.ts"
+      ],
+      "label": "Automatic resume missing first Loop obligation",
+      "portable": true
+    },
+    {
+      "id": "automatic-resume-proof-retention",
+      "commit": "3826471c02c7604cc2b0341536eb748f586a61de",
+      "title": "fix(resume): retain committed proof while the first Loop reply is owed",
+      "dependsOn": [
+        "automatic-resume-first-reply"
+      ],
+      "files": [
+        "AGENTS.md",
+        "src/main/goal.ts",
+        "src/main/session/continuation.ts",
+        "test/continuation.test.ts"
+      ],
+      "label": "Automatic resume proof retention across restart",
+      "portable": true
     }
   ]
 }

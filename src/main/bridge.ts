@@ -109,6 +109,7 @@ import {
   readRecentEvents,
   readLatestUserMessage,
   readCompletedFinal,
+  readResumeBootstrapFinal,
   turnHasMcpCall,
   readActivityEvents,
   readHydratedActivityCall,
@@ -171,6 +172,7 @@ import {
   bindContinuationDestinationMessageNow,
   bindContinuationSourceMessageNow,
   claimContinuationNow,
+  committedAutomaticResumeBootstrap,
   continuationClaimedBy,
   commitContinuationResult,
   CONTINUATION_TTL_MS,
@@ -2334,6 +2336,56 @@ async function handle(req: http.IncomingMessage, res: http.ServerResponse): Prom
       const expected = bootstrapText({ type: 'worker', agent: summary.origin.agentId, task: summary.origin.task,
         model: null, reasoningEffort: null, runId: '' }, '');
       if (!openingUserMessage.message.truncated && authored === expected) bootstrapMessageId = openingUserMessage.messageId;
+    }
+    // A committed automatic resume can finish its first B generation while the hidden page is
+    // suspended. The recorder then has the exact start/completed-end/final boundary, but the
+    // late canonical final has no document-local turn owner and no MCP call. Join it once to the
+    // already-committed S/B/H tuple; do not upgrade the ambiguous destination send checkpoint or
+    // reuse this authority for any later B turn.
+    if (summary?.conversationId === id && summary.lastCommittedResumeHandoffId && !goalPendingReplyFor(id)) {
+      const latestUser = await readLatestUserMessage(live.sessionId);
+      const users = [
+        ...(resumeUserMessage ? [resumeUserMessage] : []),
+        ...(latestUser ? [latestUser] : []),
+        ...events.filter((event): event is Extract<SessionEvent, { kind: 'user_message' }> => event.kind === 'user_message')
+          .sort((left, right) => (right.origin ?? right.seq) - (left.origin ?? left.seq))
+      ];
+      const resumeBootstrap = users.find((event, index) => event.messageId &&
+        users.findIndex(candidate => candidate.messageId === event.messageId) === index &&
+        committedAutomaticResumeBootstrap({
+          sessionId: live.sessionId,
+          conversationId: id,
+          handoffId: summary.lastCommittedResumeHandoffId!,
+          messageId: event.messageId!,
+          text: event.message.text
+        }));
+      if (resumeBootstrap?.messageId) {
+        const candidate = await readResumeBootstrapFinal(
+          live.sessionId,
+          id,
+          summary.lastCommittedResumeHandoffId,
+          resumeBootstrap.messageId
+        );
+        if (candidate) {
+          try {
+            await acceptGoalReplyNow({
+              conversationId: id,
+              sessionId: live.sessionId,
+              replyId: candidate.replyId,
+              turnId: candidate.turnId,
+              eventSeq: candidate.eventSeq,
+              blocked: superseded || goalFencedChat(id),
+              resumeBootstrap: {
+                handoffId: candidate.handoffId,
+                messageId: candidate.bootstrapMessageId
+              },
+              current: () => !goalFencedChat(id) && !stopRequestedFor(id)
+            });
+          } catch (err) {
+            logWarn(`bridge: committed resume Goal reply for ${id} is not durable yet — ${err instanceof Error ? err.message : String(err)}`);
+          }
+        }
+      }
     }
     // Where this conversation begins inside a session that has been compacted and resumed.
     //

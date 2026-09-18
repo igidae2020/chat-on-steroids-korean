@@ -14,8 +14,8 @@
 
 import { RELEASE_REPOSITORY } from '../shared/types.js';
 
-/** Korean distribution revision 4, based on the immutable official v2.1.13 tag. */
-export const APP_VERSION = '2.1.17';
+/** Korean distribution revision 5, based on the immutable official v2.1.13 tag. */
+export const APP_VERSION = '2.1.18';
 export const UPSTREAM_VERSION = '2.1.13';
 export const UPSTREAM_COMMIT = 'a4fe9726232edfbf67b97d6c716b6f653284739a';
 

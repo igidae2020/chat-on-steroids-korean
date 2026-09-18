@@ -21,7 +21,7 @@ changed lines before applying an older patch. Document the work and its actual v
 the code currently does it. Known implementation gaps are collected in §21 instead of being
 mixed into the happy path as features.
 
-Source alignment: official **v2.1.13** (2026-09-16), Korean distribution revision 4. App/extension **2.1.17**,
+Source alignment: official **v2.1.13** (2026-09-16), Korean distribution revision 5. App/extension **2.1.18**,
 bridge protocol **14** in the checked declarations (`package.json`, `src/main/version.ts`,
 `extension/manifest.json`). This does not prove release, installation or live Chrome behavior.
 

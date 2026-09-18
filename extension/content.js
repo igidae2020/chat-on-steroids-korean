@@ -786,6 +786,29 @@
     return CLF_DOM.send({ stillCurrent, clearAcceptedDraft, beforeSend, acceptUserReceipt, matchesUser,
       observeEvidence: check => { pageViewChecks.add(check); return () => pageViewChecks.delete(check); } });
   }
+  function armClaimedContinuationRoute() {
+    const prepared = commandAttempt?.continuationSend;
+    if (
+      !prepared ||
+      prepared.invoked ||
+      commandAttempt?.phase !== 'claimed' ||
+      !continuationJournalPending ||
+      !commandJournalGate ||
+      prepared.sourceConversationId !== conversationId ||
+      prepared.sourceEpoch !== epoch ||
+      sendText(CLF_DOM.composer()?.textContent) !== prepared.text
+    ) return;
+    // The capturing click listener runs inside CLF_DOM.send's final, synchronous native-control
+    // revalidation and immediately before ChatGPT handles the click. Preflight ownership is not
+    // enough: a user can navigate while destinationAttempt/destinationDispatch is awaiting the
+    // app. Only this exact invocation may elect the first concrete route as Resume destination.
+    prepared.invoked = true;
+    commandAttempt.continuationRoute = {
+      sourceConversationId: conversationId,
+      sourceEpoch: epoch,
+      destinationConversationId: null
+    };
+  }
   const GOAL_MARKER_INSTRUCTION = '\n\nFor this Goal session only: at the end of each final reply, write exactly one separate last line: [[COS_GOAL:COMPLETE]] if the entire requested task is finished, or [[COS_GOAL:CONTINUE]] if requested work remains. Do not claim completion for partial work. If user input is required, explain it and omit both markers.';
   function rememberUserSend() {
     // Only the explicitly selected offline Goal backend changes the user prompt.
@@ -816,7 +839,10 @@
   }
   document.addEventListener('click', (event) => {
     const button = CLF_DOM.sendButton?.();
-    if (button && event.target && button.contains(event.target)) rememberUserSend();
+    if (button && event.target && button.contains(event.target)) {
+      armClaimedContinuationRoute();
+      rememberUserSend();
+    }
   }, true);
   document.addEventListener('submit', (event) => {
     const composer = CLF_DOM.composer();
@@ -1557,7 +1583,7 @@
     return false;
   }
 
-  function resetConversation() {
+  function resetConversation(preserveContinuationJournal = false) {
     // Native suppression is document presentation, not conversation state. Give every mounted
     // row back before clearing the Fiber/stream proof that selected it; otherwise an SPA A -> B
     // transition can leave chat A's notification layout hidden until React happens to remount it.
@@ -1596,12 +1622,16 @@
     // it has never seen, exactly as a reload does. Until the app has said which of those user
     // messages it already holds, none of them can be read as a send — see resumeIdentityPending.
     resumeIdentityPending = Boolean(conversationId);
-    // The journal gate belongs to the chat that raised it. It exists so a fresh app-opened chat
-    // is not journalled before its A→B rebind commits; the chat this tab is moving to has no
-    // such transaction. Carrying it across an SPA move silently unrecorded the next chat —
-    // its first message, its title, its turn — until the tab was reloaded.
-    continuationJournalPending = false;
-    commandJournalGate = false;
+    // The journal gate normally belongs to the chat that raised it. The one exception is the
+    // exact first route acquired by a claimed fresh Resume command: New Chat may reuse A's SPA
+    // document, retain A through the id-less `/` gap, then assign B only after Send. That A -> B
+    // observation is the command acquiring its destination, not unrelated navigation, and B
+    // must remain fenced until marker/activity proof says the rebind committed. Every other SPA
+    // move clears the gate so a later chat cannot inherit this command's journal suppression.
+    if (!preserveContinuationJournal) {
+      continuationJournalPending = false;
+      commandJournalGate = false;
+    }
     nativeBusy = false;
     nativePhase = '';
     pressedAt = 0;
@@ -2196,6 +2226,19 @@
     // lifetime is owned by chrome.tabs.onRemoved in background.js; an SPA move is proven
     // here only when another concrete conversation id replaces the old one.
     if (id && id !== conversationId) {
+      const continuationRoute = commandAttempt?.continuationRoute;
+      const acquiresClaimedContinuationRoute = Boolean(
+        continuationJournalPending &&
+        commandJournalGate &&
+        commandAttempt?.phase === 'claimed' &&
+        continuationRoute &&
+        !continuationRoute.destinationConversationId &&
+        continuationRoute.sourceConversationId === conversationId &&
+        continuationRoute.sourceEpoch === epoch
+      );
+      if (acquiresClaimedContinuationRoute) {
+        continuationRoute.destinationConversationId = id;
+      }
       // A dispatched opening may learn its route before the provider exposes its exact
       // authored user row. Keep that operation pending; only the receipt below binds it.
       const opening = pendingObjectiveSend?.current() ? {
@@ -2219,7 +2262,7 @@
         // the worker". A tab that has left the worker's chat is nobody's worker.
         agent = null;
         agentCommandId = null;
-        resetConversation();
+        resetConversation(acquiresClaimedContinuationRoute);
         // New Chat can be reached from an older chat in the same document. Retire that
         // old recording normally, transferring only this dispatched opening to its first
         // elected route's epoch. Its user receipt is still required before Goal binding.
@@ -10240,7 +10283,10 @@
     // that was checked above; prove both again after each write and at the native click.
     const exactBootstrapDraft = () => squeeze(CLF_DOM.composer()?.textContent) === expectedText;
     const rejectChangedBootstrap = async () => {
-      if (await failIfRetargeted()) return true;
+      if (await failIfRetargeted()) {
+        continuationJournalPending = false;
+        return true;
+      }
       if (exactBootstrapDraft()) return false;
       if (boot.type === 'resume' && !squeeze(CLF_DOM.composer()?.textContent)) {
         continuationJournalPending = false;
@@ -10270,6 +10316,7 @@
       const permit = await ask({ type: 'compact', token: resumeMarker[2], commandId: boot.id, client: RUN_ID, destinationAttempt: true });
       if (await rejectChangedBootstrap()) return;
       if (!permit || permit.ok !== true || !permit.data || permit.data.allowed !== true) {
+        continuationJournalPending = false;
         await bootstrapDraft.clear();
         return;
       }
@@ -10278,11 +10325,20 @@
       const armed = await ask({ type: 'compact', token: resumeMarker[2], commandId: boot.id, client: RUN_ID, destinationDispatch: true });
       if (await rejectChangedBootstrap()) return;
       if (!armed || armed.ok !== true || !armed.data || armed.data.armed !== true) {
+        continuationJournalPending = false;
         await bootstrapDraft.clear();
         return;
       }
     }
     if (!stillOnTarget() || !exactBootstrapDraft()) { await rejectChangedBootstrap(); return; }
+    if (boot.type === 'resume' && attempt) {
+      attempt.continuationSend = {
+        sourceConversationId: conversationId,
+        sourceEpoch: epoch,
+        text: sendText(CLF_DOM.composer()?.textContent),
+        invoked: false
+      };
+    }
     // The destination Resume prompt is the first authored evidence in a brand-new chat.
     // Record it before send() clicks so reportMessages can open B's turn immediately instead
     // of waiting until Fiber eventually exposes the first connector request.
@@ -10291,9 +10347,14 @@
     // matchesSubmittedBootstrap. Every other caller keeps the exact comparison.
     if (!(await sendSubmittedText(() => !attempt?.cancelled && sendingBootstrap(), false, null, null,
                                   matchesSubmittedBootstrap))) {
-      // Once send() was invoked, a missing/cleared draft cannot prove that no click
-      // happened. Only the exact pre-click check above may release the dispatch.
+      // Once the native click was invoked, a missing/cleared draft cannot prove that ChatGPT
+      // rejected it. The capturing click proof above distinguishes that ambiguity from a send
+      // helper that stopped before touching the native control.
       if (boot.type === 'resume') {
+        if (!attempt?.continuationRoute) {
+          continuationJournalPending = false;
+          await ask({ type: 'compact', token: resumeMarker[2], commandId: boot.id, client: RUN_ID, destinationLost: true });
+        }
         // Retain the armed ticket and journal gate for exact marker reconciliation; never
         // replay an ambiguous click or let ordinary events create its shadow session.
         return;

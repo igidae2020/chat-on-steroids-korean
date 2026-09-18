@@ -137,7 +137,7 @@ interface Hook {
   currentActivityPullDelay(): number;
   notePresentation(messageId: string, text: string, now?: number): boolean;
   presentationPending(now?: number): boolean;
-  runCommand(): Promise<void>;
+  runCommand(id?: string, fromUrl?: boolean): Promise<void>;
   startCompact(automatic?: boolean): Promise<void>;
   cancelCompact(): Promise<void>;
   chronological<T extends { seq: number; time: number; kind: string; turnId?: string | null }>(entries: T[]): T[];
@@ -12867,6 +12867,131 @@ describe('the fresh chat the app opened', () => {
         conversationId: '11111111-2222-3333-4444-555555555555'
       })
     ]);
+  });
+
+  it('keeps a fresh resume journal fenced while an id-less reused document acquires its first route', async () => {
+    const previous = 'aaaaaaaa-bbbb-4ccc-8ddd-eeeeeeeeeeee';
+    const destination = '11111111-2222-4333-8444-555555555555';
+    const commandId = 'cmd-reused-new-chat-resume';
+    const bootstrap = '[[CLF-RESUME:0123456789abcdef0123456789abcdef]]\n\nContinue the carried handoff.';
+    let releaseAck!: (reply: unknown) => void;
+    const heldAck = new Promise(resolve => { releaseAck = resolve; });
+
+    live = await harness('https://chatgpt.com/', {
+      redeem: () => ({ ok: true, command: { id: commandId, type: 'resume', text: bootstrap, agent: null } }),
+      ack: () => heldAck
+    }, (document, dom) => {
+      document.querySelector('[data-testid="send-button"]')!.addEventListener('click', () => {
+        dom.reconfigure({ url: `https://chatgpt.com/c/${destination}` });
+        userTurn(document, 'reused-new-chat-resume', bootstrap, { sent: false });
+      });
+    });
+
+    // ChatGPT can reuse one SPA document for New Chat. Its id-less route deliberately retains
+    // the prior concrete conversation until the next route is known, so B's first assignment
+    // is an A -> B observation even though the command was sent from `/`.
+    live.dom.reconfigure({ url: `https://chatgpt.com/c/${previous}` });
+    live.hook.observe();
+    await settle();
+    live.dom.reconfigure({ url: `https://chatgpt.com/?clf=${commandId}#clf=${commandId}` });
+    live.hook.observe();
+    await settle();
+
+    const command = live.hook.runCommand(commandId, true);
+    await settle(300);
+    expect(live.window.location.pathname).toBe(`/c/${destination}`);
+    expect(live.sent).toContainEqual(expect.objectContaining({
+      type: 'ack', id: commandId, status: 'sent', conversationId: destination
+    }));
+
+    // ACK custody may wait through MV3 suspension/re-authentication. Until the app confirms
+    // the resume binding, no observation from B may reach /events and create a shadow owner.
+    const before = live.sent.filter(message => message.type === 'events').length;
+    live.hook.emit({ kind: 'conversation_title', text: 'Replacement chat', time: 1_700_000_000_999 });
+    await live.hook.flush();
+    expect(live.sent.filter(message => message.type === 'events')).toHaveLength(before);
+
+    releaseAck({ ok: true });
+    await command;
+    live.reply.set('activity', () => ({ ok: true, data: {
+      entries: [], stream: [], nextSince: 0, pendingTools: 0,
+      sessionId: 'resumed-reused-document-session', bootstrap: 'resume', job: null
+    } }));
+    await live.hook.pullActivity();
+    await live.hook.flush();
+    expect(emitted(live.sent, 'conversation_title').map(entry => entry.event.text)).toContain('Replacement chat');
+  });
+
+  it.each(['permit', 'dispatch'])('releases a fresh resume journal when the %s fence refuses the send', async fence => {
+    const previous = 'aaaaaaaa-bbbb-4ccc-8ddd-eeeeeeeeeeee';
+    const commandId = `cmd-refused-${fence}`;
+    const bootstrap = '[[CLF-RESUME:0123456789abcdef0123456789abcdef]]\n\nDo not send this refused handoff.';
+    let sends = 0;
+    live = await harness('https://chatgpt.com/', {
+      redeem: () => ({ ok: true, command: { id: commandId, type: 'resume', text: bootstrap, agent: null } }),
+      compact: message => message.destinationAttempt
+        ? { ok: true, data: { allowed: fence !== 'permit' } }
+        : message.destinationDispatch
+          ? { ok: true, data: { armed: false } }
+          : { ok: false, error: 'unexpected_compact_shape' }
+    }, document => {
+      document.querySelector('[data-testid="send-button"]')!.addEventListener('click', () => { sends++; });
+    });
+    live.dom.reconfigure({ url: `https://chatgpt.com/c/${previous}` });
+    live.hook.observe();
+    await settle();
+    live.dom.reconfigure({ url: `https://chatgpt.com/?clf=${commandId}#clf=${commandId}` });
+    live.hook.observe();
+    await settle();
+
+    await live.hook.runCommand(commandId, true);
+    expect(sends).toBe(0);
+    live.dom.reconfigure({ url: `https://chatgpt.com/c/${previous}` });
+    live.hook.emit({ kind: 'conversation_title', text: `Refused at ${fence}`, time: 1_700_000_001_000 });
+    await live.hook.flush();
+    expect(emitted(live.sent, 'conversation_title').map(entry => entry.event.text)).toContain(`Refused at ${fence}`);
+  });
+
+  it.each(['permit', 'dispatch'])('does not adopt a chat opened while the resume %s fence is awaiting the app', async fence => {
+    const previous = 'aaaaaaaa-bbbb-4ccc-8ddd-eeeeeeeeeeee';
+    const unrelated = '99999999-8888-4777-8666-555555555555';
+    const commandId = `cmd-awaiting-${fence}`;
+    const bootstrap = '[[CLF-RESUME:0123456789abcdef0123456789abcdef]]\n\nAwait the exact send boundary.';
+    let release!: (reply: unknown) => void;
+    const held = new Promise(resolve => { release = resolve; });
+    live = await harness('https://chatgpt.com/', {
+      redeem: () => ({ ok: true, command: { id: commandId, type: 'resume', text: bootstrap, agent: null } }),
+      compact: message => {
+        if (message.destinationAttempt) return fence === 'permit' ? held : { ok: true, data: { allowed: true } };
+        if (message.destinationDispatch) return fence === 'dispatch' ? held : { ok: true, data: { armed: true } };
+        return { ok: false, error: 'unexpected_compact_shape' };
+      },
+      ack: () => ({ ok: true })
+    });
+    live.dom.reconfigure({ url: `https://chatgpt.com/c/${previous}` });
+    live.hook.observe();
+    await settle();
+    live.dom.reconfigure({ url: `https://chatgpt.com/?clf=${commandId}#clf=${commandId}` });
+    live.hook.observe();
+    await settle();
+
+    const command = live.hook.runCommand(commandId, true);
+    await settle(120);
+    live.dom.reconfigure({ url: `https://chatgpt.com/c/${unrelated}` });
+    live.hook.observe();
+    await settle();
+    release({ ok: true, data: fence === 'permit' ? { allowed: true } : { armed: true } });
+    await command;
+
+    expect(live.sent.filter(message => message.type === 'ack')).toEqual([
+      expect.objectContaining({ id: commandId, status: 'failed', error: expect.stringMatching(/changed before/) })
+    ]);
+    live.hook.emit({ kind: 'conversation_title', text: `Unrelated during ${fence}`, time: 1_700_000_001_001 });
+    await live.hook.flush();
+    expect(emitted(live.sent, 'conversation_title')).toContainEqual(expect.objectContaining({
+      conversationId: unrelated,
+      event: expect.objectContaining({ text: `Unrelated during ${fence}` })
+    }));
   });
 
   /**

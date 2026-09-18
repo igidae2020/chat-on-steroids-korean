@@ -442,7 +442,14 @@ const goalReplies = new Map<string, GoalReplyObligation>();
  * every final assistant reply this app records, each one fsynced before its HTTP 200, so an
  * unbounded ledger would make every reply in every chat pay for every chat that came before.
  */
-const GOAL_REPLY_TTL_MS = 12 * 60 * 60_000;
+export const GOAL_REPLY_TTL_MS = 12 * 60 * 60_000;
+
+/** The continuation owner must retain the proof while this exact durable obligation is owed. */
+export function goalResumeProofExpiresAt(sessionId: string, conversationId: string | null, handoffId: string | null): number {
+  const reply = conversationId ? goalReplies.get(conversationId) : undefined;
+  return reply?.state === 'pending' && reply.sessionId === sessionId && reply.resumeHandoffId === handoffId
+    ? reply.acceptedAt + GOAL_REPLY_TTL_MS : 0;
+}
 const MAX_GOAL_REPLIES = 200;
 
 /** Retires expired pickups and caps the stable-final ledger to its newest conversations. */

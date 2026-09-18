@@ -1619,12 +1619,16 @@ export async function readRecoveryBoundary(sessionId: string, turnId?: string | 
   // Read under this session's existing queue. Another read or metadata flush
   // must not invalidate the boundary and permanently spend a valid silence grant.
   return enqueueSessionOperation(entry, 'recovery boundary read', async () => {
-    const [boundary] = await readRecentEventsFromDisk(sessionId, 1, {
+    // A transport batch can append successor start before predecessor end. Journal seq then
+    // makes the old end look newest even though the turn timeline places it before the new
+    // start. Read a bounded lifecycle tail and let the canonical chronology projection choose
+    // the actual latest boundary instead of selecting one row before projecting turn origins.
+    const boundaries = await readRecentEventsFromDisk(sessionId, 256, {
       kinds: ['turn_start', 'turn_end', 'user_message'], orderByOrigin: true,
       before: Number.POSITIVE_INFINITY,
       acceptEvent: event => !isTurnCorrection(event, turnId)
     });
-    return boundary;
+    return boundaries.at(-1);
   });
 }
 

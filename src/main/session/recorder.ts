@@ -1907,7 +1907,7 @@ export function recordChatObservations(
 ): Promise<{
   sessionId: string | null;
   stored: number;
-  activity: { meaningful: boolean; working: boolean; terminal: boolean; at?: number; endedTurnId?: string };
+  activity: { meaningful: boolean; working: boolean; terminal: boolean; at?: number; startedTurnId?: string; endedTurnId?: string };
   goalCandidates: Array<{ replyId: string; turnId: string; eventSeq: number }>;
 }> {
   const hasEvidence = observations.some((item) => item.kind === 'tool_evidence');
@@ -2021,10 +2021,10 @@ async function recordChatObservationsNow(
 ): Promise<{
   sessionId: string | null;
   stored: number;
-  activity: { meaningful: boolean; working: boolean; terminal: boolean; at?: number; endedTurnId?: string };
+  activity: { meaningful: boolean; working: boolean; terminal: boolean; at?: number; startedTurnId?: string; endedTurnId?: string };
   goalCandidates: Array<{ replyId: string; turnId: string; eventSeq: number }>;
 }> {
-  const activity: { meaningful: boolean; working: boolean; terminal: boolean; at?: number; endedTurnId?: string } = { meaningful: false, working: false, terminal: false };
+  const activity: { meaningful: boolean; working: boolean; terminal: boolean; at?: number; startedTurnId?: string; endedTurnId?: string } = { meaningful: false, working: false, terminal: false };
   if (!recordingEnabled()) return { sessionId: null, stored: 0, activity, goalCandidates: [] };
   if (!conversations.has(conversationId)) {
     const lineage = await supersededLineage(conversationId);
@@ -2062,8 +2062,8 @@ async function recordChatObservationsNow(
   // Reload can lose or replace the page's turn id. The canonical message store keeps
   // the first exact owner of that stable assistant message through every revision.
   // Decide recovery from its committed result, never the replacement page's hint.
-  // Only a turn already open before this batch qualifies; apply the end after all
-  // observations so a newer turn or an explicit verdict cannot be overwritten.
+  // An existing open turn, or a freshly accepted start with a live final, qualifies.
+  // Apply the end after all observations so newer work or an explicit verdict wins.
   const recoverableTurns = new Set(live?.openTurns);
   let recoveredFinal: { turnId: string; time: number; seq: number; origin: number; native: boolean } | undefined;
 
@@ -2163,7 +2163,8 @@ async function recordChatObservationsNow(
         const workingActivity = written.contentChanged && state !== 'final' && item.activeNow === true &&
           (!canonicalTurn || canonicalTurn === live?.turnId || resumedUncertainTurn) &&
           !(live?.turnStartedAt === null && (live.lastTurnOutcome === 'stopped' || live.lastTurnOutcome === 'completed'));
-        if (state === 'final' && written.event.kind === 'assistant_message' && canonicalTurn && recoverableTurns.has(canonicalTurn) &&
+        if (state === 'final' && written.event.kind === 'assistant_message' && canonicalTurn &&
+            (recoverableTurns.has(canonicalTurn) || (activity.startedTurnId === canonicalTurn && item.activeNow === true)) &&
             !explicitEnds.has(canonicalTurn) && live?.turnId === canonicalTurn) {
           recoveredFinal = { turnId: canonicalTurn, time: item.time,
             seq: written.event.finalContentSeq ?? written.event.origin ?? written.event.seq,
@@ -2287,6 +2288,7 @@ async function recordChatObservationsNow(
         }
         activity.meaningful = true; activity.at = Math.max(activity.at ?? 0, item.time);
         activity.working = true;
+        activity.startedTurnId = item.turnId;
         break;
       case 'turn_end': {
         // An unnamed end closes nothing durable and, worse, used to clear whichever named
@@ -2373,6 +2375,13 @@ async function recordChatObservationsNow(
     activity.terminal = true;
     activity.endedTurnId = turnId;
     stored++;
+  }
+  // A previous turn may end in the same delivery that starts its successor,
+  // in either event order. A committed successor still open after the batch
+  // owns recovery activity; the predecessor's terminal flag cannot close it.
+  // Replayed starts do not qualify, and a successor ended in this batch stays terminal.
+  if (activity.startedTurnId && live?.turnId === activity.startedTurnId && live.openTurns.has(activity.startedTurnId)) {
+    activity.terminal = false;
   }
   if (recoveredGoalSeen && live) live.lastTurnOutcome = 'completed';
   notifyChanged();

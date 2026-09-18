@@ -6434,7 +6434,7 @@ async function noteRecoveryObservations(
   conversationId: string,
   sessionId: string | null,
   observations: readonly ChatObservation[],
-  activity: { meaningful: boolean; working: boolean; terminal: boolean; at?: number; endedTurnId?: string }
+  activity: { meaningful: boolean; working: boolean; terminal: boolean; at?: number; startedTurnId?: string; endedTurnId?: string }
 ): Promise<void> {
   const accessLimit = (item: ChatObservation): boolean => item.kind === 'chat_error' &&
     (item.blocking === true ||
@@ -6499,14 +6499,14 @@ async function noteRecoveryObservations(
       const previous = activeUntil.get(conversationId);
       const [sourceBoundary] = !previous && !liveTurn && activity.working
         ? await readRecentEvents(sessionId, 1, { kinds: ['turn_start', 'turn_end'] }) : [];
-      const workingTurn = liveTurn ?? (sourceBoundary?.kind === 'turn_end' &&
+      const workingTurn = activity.startedTurnId ?? liveTurn ?? (sourceBoundary?.kind === 'turn_end' &&
         ['stalled', 'failed', 'unknown'].includes(sourceBoundary.outcome) ? sourceBoundary.turnId : null);
       let selection: ChatObservation | undefined;
       let turn: Pick<ActivityGrant, 'turnId' | 'model'> | undefined = !previous && workingTurn
         ? { turnId: workingTurn, model: provenModel } : undefined;
       for (const item of observations) {
         if (item.kind === 'model_selection') selection = item;
-        if (item.kind === 'turn_start' && item.turnId === liveTurn && previous?.turnId !== item.turnId) {
+        if (item.kind === 'turn_start' && item.turnId === workingTurn && previous?.turnId !== item.turnId) {
           turn = { turnId: item.turnId ?? null, model: selection?.kind === 'model_selection' && selection.model ?
             isProModel(selection.model, selection.reasoningEffort) ? 'pro' : 'other' : provenModel };
         }

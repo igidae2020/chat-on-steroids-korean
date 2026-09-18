@@ -169,6 +169,19 @@
       ],
       "portable": true,
       "dependsOn": []
+    },
+    {
+      "id": "catalog-opencodex-extra-languages",
+      "commit": "6e35aa4c46d7629299141780db559cae39d9a5f7",
+      "subject": "Register OpenCodex in official Spanish and Traditional Chinese catalogs",
+      "files": [
+        "src/renderer/locales/es.json",
+        "src/renderer/locales/zh-TW.json"
+      ],
+      "portable": true,
+      "dependsOn": [
+        "catalog-opencodex"
+      ]
     }
   ],
   "officialPreferred": [

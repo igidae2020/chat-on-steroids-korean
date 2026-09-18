@@ -1641,12 +1641,20 @@ export async function readCompletedFinal(sessionId: string, conversationId: stri
   const entry = await ensureOpen(sessionId);
   await flushSession(sessionId);
   const revision = entry.nextSeq, queue = entry.queue;
+  const completed = await readCompletedFinalFromDisk(entry, conversationId, turnId);
+  if (entry.nextSeq !== revision || entry.queue !== queue || entry.summary.conversationId !== conversationId) return null;
+  return completed;
+}
+
+/** Caller holds the session queue or validates its revision and queue after this read. */
+async function readCompletedFinalFromDisk(entry: OpenSession, conversationId: string, turnId?: string | null): Promise<{
+  messageId: string; turnId: string | null; completedAt: number; contentSeq: number; text: string;
+} | null> {
   if (entry.summary.conversationId !== conversationId) return null;
   const [recent, questions] = await Promise.all([
-    readRecentEventsFromDisk(sessionId, 256, { kinds: ['turn_start', 'turn_end', 'user_message', 'assistant_message', 'tool_call', 'page_tool'] }),
-    readRecentEventsFromDisk(sessionId, 1, { kinds: ['user_message'], orderByOrigin: true })
+    readRecentEventsFromDisk(entry.summary.id, 256, { kinds: ['turn_start', 'turn_end', 'user_message', 'assistant_message', 'tool_call', 'page_tool'] }),
+    readRecentEventsFromDisk(entry.summary.id, 1, { kinds: ['user_message'], orderByOrigin: true })
   ]);
-  if (entry.nextSeq !== revision || entry.queue !== queue || entry.summary.conversationId !== conversationId) return null;
   const final = recent.findLast(event => event.kind === 'assistant_message' && event.final === true &&
     (!!event.message.text.trim() || !!event.providerMessageId) && !!event.messageId && (!turnId || event.turnId === turnId ||
       (turnId.startsWith('reply:') && event.messageId === turnId.slice(6))));
@@ -1672,6 +1680,86 @@ export async function readCompletedFinal(sessionId: string, conversationId: stri
     return event.kind === 'assistant_message' || event.kind === 'page_tool';
   })) return null;
   return { messageId: final.messageId, turnId: final.turnId ?? null, completedAt, contentSeq: seq, text: final.message.text };
+}
+
+export interface ResumeBootstrapFinal {
+  handoffId: string;
+  bootstrapMessageId: string;
+  bootstrapText: string;
+  replyId: string;
+  turnId: string;
+  eventSeq: number;
+}
+
+/**
+ * The one completed answer a committed Compact & Resume bootstrap can own without a local
+ * tool call.
+ *
+ * This does not decide that the bootstrap was sent. The continuation WAL owns that decision;
+ * bridge supplies the exact already-proven handoff and bootstrap message identities. This
+ * reader only joins those identities to the recorder's current canonical boundary. In
+ * particular, a marker found in an arbitrary user message grants nothing by itself.
+ */
+export async function readResumeBootstrapFinal(
+  sessionId: string,
+  conversationId: string,
+  handoffId: string,
+  bootstrapMessageId: string
+): Promise<ResumeBootstrapFinal | null> {
+  if (!handoffId || !bootstrapMessageId) return null;
+  const entry = await ensureOpen(sessionId);
+  await flushSession(sessionId);
+  return enqueueSessionOperation(entry, 'resume bootstrap final read', async () => {
+    if (entry.summary.conversationId !== conversationId ||
+        entry.summary.lastCommittedResumeHandoffId !== handoffId || entry.summary.activeTurnId) return null;
+    const completed = await readCompletedFinalFromDisk(entry, conversationId);
+    if (!completed) return null;
+    const recent = await readRecentEventsFromDisk(sessionId, 512, {
+      kinds: ['handoff', 'user_message', 'assistant_message', 'turn_start', 'turn_end', 'tool_call', 'page_tool']
+    });
+
+    const bootstrap = recent.find(event => event.kind === 'user_message' && event.messageId === bootstrapMessageId);
+    if (!bootstrap || bootstrap.kind !== 'user_message') return null;
+    const handoff = recent.find(event => event.kind === 'handoff' && event.handoffId === handoffId);
+    if (!handoff) return null;
+    const firstUser = recent.filter(event => event.kind === 'user_message' && positionOf(event) > positionOf(handoff))
+      .sort((left, right) => positionOf(left) - positionOf(right))[0];
+    if (firstUser !== bootstrap) return null;
+    const bootstrapAt = positionOf(bootstrap);
+    const afterBootstrap = recent.filter(event => positionOf(event) > bootstrapAt);
+    if (afterBootstrap.some(event => event.kind === 'user_message')) return null;
+
+    const finals = afterBootstrap
+      .filter((event): event is Extract<SessionEvent, { kind: 'assistant_message' }> =>
+        event.kind === 'assistant_message' && event.final === true && !!event.messageId && !!event.message.text.trim())
+      .sort((left, right) => (left.finalContentSeq ?? positionOf(left)) - (right.finalContentSeq ?? positionOf(right)));
+    const firstFinal = finals[0];
+    if (!firstFinal?.messageId || completed.messageId !== firstFinal.messageId ||
+        completed.contentSeq !== (firstFinal.finalContentSeq ?? positionOf(firstFinal))) return null;
+
+    const boundaries = afterBootstrap
+      .filter((event): event is Extract<SessionEvent, { kind: 'turn_start' | 'turn_end' }> =>
+        event.kind === 'turn_start' || event.kind === 'turn_end')
+      .sort((left, right) => positionOf(left) - positionOf(right));
+    // This narrow authority is only for the clean first B generation. Stop/failure/recovery
+    // boundaries keep their existing recovery owners and never borrow resume authority.
+    if (boundaries.length !== 2 || boundaries[0]?.kind !== 'turn_start' || boundaries[1]?.kind !== 'turn_end' ||
+        boundaries[1].outcome !== 'completed' || boundaries[0].turnId !== boundaries[1].turnId ||
+        positionOf(boundaries[0]) >= completed.contentSeq ||
+        (firstFinal.turnId && firstFinal.turnId !== boundaries[1].turnId)) return null;
+
+    return {
+      handoffId,
+      bootstrapMessageId,
+      bootstrapText: bootstrap.message.text,
+      replyId: firstFinal.messageId,
+      // The final itself stayed unowned. Keep that truth and use the existing canonical reply
+      // alias so completion/draft gates resolve the exact message without manufacturing a local
+      // turn owner from the nearby lifecycle boundary.
+      turnId: `reply:${firstFinal.messageId}`.slice(0, 200),
+      eventSeq: firstFinal.origin ?? firstFinal.seq
+    };
+  });
 }
 
 /** Recorded local execution, not a native tool label or a request-id sighting alone. */

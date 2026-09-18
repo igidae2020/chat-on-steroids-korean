@@ -52,7 +52,7 @@
 
 import { randomBytes } from 'node:crypto';
 import { isProModel } from '../../shared/chat-models.js';
-import { isReasoningEffort, type Handoff, type ReasoningEffort } from '../../shared/session.js';
+import { CONTINUATION_MARKER, isReasoningEffort, type Handoff, type ReasoningEffort } from '../../shared/session.js';
 import { logInfo, logWarn } from '../logger.js';
 import {
   PRIME_ID,
@@ -530,6 +530,39 @@ export function continuationByToken(token: string): ContinuationView | null {
   sweep();
   const entry = byToken.get(token);
   return entry ? view(entry) : null;
+}
+
+/**
+ * Proves that one recorded user row is the bootstrap of an already-committed automatic resume.
+ *
+ * `dispatched-unresolved` remains ambiguous for retry purposes and is deliberately not promoted
+ * to `sent` here. Once the continuation itself is committed to S/B/H, however, the exact marked
+ * row in B can identify the first answer that transaction already caused. This grants no send,
+ * retry or rebind authority.
+ */
+export function committedAutomaticResumeBootstrap(input: {
+  sessionId: string;
+  conversationId: string;
+  handoffId: string;
+  messageId: string;
+  text: string;
+}): boolean {
+  const raw = CONTINUATION_MARKER.exec(input.text)?.[2] ?? null;
+  // ChatGPT can serialize the native Markdown user bubble with punctuation escaped. Accept
+  // only that representation of the marker at the authored start; arbitrary body differences
+  // remain irrelevant because the committed WAL tuple, not marker text alone, is the owner.
+  const escaped = /^\s*\\?\[\\?\[CLF\\?-RESUME\\?:([A-Za-z0-9_-]{16,64})\\?\]\\?\](?:\s|$)/.exec(input.text)?.[1] ?? null;
+  const token = raw ?? escaped;
+  if (!token) return false;
+  const entry = byToken.get(token);
+  if (!entry || entry.token !== token || entry.automatic !== true || entry.state !== 'committed' ||
+      entry.sessionId !== input.sessionId || entry.to !== input.conversationId ||
+      entry.handoffId !== input.handoffId || entry.from === input.conversationId) return false;
+  if (entry.destinationSend.state === 'sent') {
+    return entry.destinationSend.conversationId === input.conversationId &&
+      entry.destinationSend.messageId === input.messageId;
+  }
+  return entry.destinationSend.state === 'dispatched-unresolved';
 }
 
 /**

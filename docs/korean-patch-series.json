@@ -177,6 +177,25 @@
       ],
       "label": "Historical message replay completion gate",
       "portable": true
+    },
+    {
+      "id": "automatic-resume-first-reply",
+      "commit": "f4ea92499229e57b0eb1bbdbb9ba9da28c578b8b",
+      "title": "fix(loop): recover the missing first reply after automatic resume",
+      "dependsOn": [
+        "historical-completion-gate"
+      ],
+      "files": [
+        "AGENTS.md",
+        "src/main/bridge.ts",
+        "src/main/goal.ts",
+        "src/main/session/continuation.ts",
+        "src/main/session/store.ts",
+        "test/bridge.test.ts",
+        "test/continuation.test.ts"
+      ],
+      "label": "Automatic resume missing first Loop obligation",
+      "portable": true
     }
   ]
 }

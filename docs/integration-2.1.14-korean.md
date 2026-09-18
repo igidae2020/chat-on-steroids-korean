@@ -49,3 +49,39 @@
 이 수치는 겹치는 근접 검사를 합산한 전체 테스트 수가 아니다. 서브에이전트의 공급자 오류/용량 제한으로 작업 중단이 있었으며, 부모가 실제 diff를 읽고 미완성 변경을 이어 구현·검증했다. 독립 최종 검토가 완료됐다고 표시하지 않는다.
 
 최종 전체 검사·설치와 실사용 결과는 아래에 완료 증거만 추가한다.
+
+
+## 2.1.19 설치 및 최종 로컬 검사
+
+- 최종 `npm run verify` 통과: 일반 5,182개 + 종료 처리 6개, 환경별/선택 검사 129개 제외. 개인정보·라이선스·네이티브 소스·타입 검사 포함.
+- 첫 전체 검사에서 es/zh-TW의 OpenCodex 키 누락 2건을 발견하고 수정. 전체 언어 근접 검사 27개 및 최종 전체 검사 통과.
+- 최종 Mac arm64 패키지 생성, 네이티브 런타임/번들 검사 통과. 기존 설치본과 같은 로컬 서명 인증서와 designated requirement로 서명했고 strict/deep 검증 통과. 공증된 공식 배포본이라는 의미는 아님.
+- 설치한 `app.asar` SHA-256: `7ea27aa5396cc9f45b113fe54b71a69c54fe4b352eb38d9d41c882a05502a5c7`. 패키지와 설치 경로의 바이트 일치 확인.
+- 실행 중인 앱을 정상 종료한 뒤 기존 앱과 userData를 비공개 로컬 rollback 디렉터리에 백업. 설치 후 4,280개 보호 대상 파일의 누락 0개, config 내용 변경 0개, 암호화된 secrets 파일 동일 확인.
+- 재시작이 메타데이터와 일부 durable cache를 갱신했으나 기존 JSONL journal을 다시 쓰거나 잘라내지 않았음. 설정/키를 다른 계정의 것으로 덮어쓰지 않음.
+- 설치된 앱의 한국어 화면과 공식 추가 기능 진입점, 전체 언어 목록, 한국어→영어→한국어 전환을 실제 UI에서 확인. 최종 언어는 한국어.
+- 앱의 안정된 확장 폴더도 2.1.19로 materialize됐고 패키지의 모든 확장 파일과 일치. 당시 Chrome 실행 확장은 2.1.17로 보고되어 사용자에게 새로고침 요청. 앞선 자동 확장 관리 접근 거부를 우회하지 않음.
+- 전송→완료→후속 진행/요약 이전의 **이번 설치본** 실사용 검증은 새 확장 활성화 전에는 미완료. 단위 검사나 예전 설치본 성공 기록으로 대체하지 않음.
+- 네이티브 CI: [실행 35371425872](https://github.com/igidae2020/chat-on-steroids-korean/actions/runs/35371425872). 실행 중 결과는 확정 후 추가 기록.
+
+
+## 확장 활성화 후 실제 검증
+
+- 사용자의 Chrome 확장 새로고침 후 2.1.17→2.1.19 경고가 해소됐고, 새 검증 대화에 앱이 메시지를 전달했다.
+- Core가 현재 기본 작업본의 package.json을 실제 읽고 `COS_2_1_19_READ_OK`를 반환. 앱에도 완료 답변 기록.
+- Loop의 API 후속 작성→전송→Core 읽기→`COS_2_1_19_FOLLOWUP_OK` 완료 확인. 기존 `custom` API 제공자(로컬 OpenCodex)와 저장된 모델 설정 사용. OpenCodex 프리셋 전용 transport를 만들지 않았음.
+- Loop 활성화 직후 지침 저장보다 기본 후속 작성이 먼저 진행되어 추가 읽기 전용 감사가 시작됨. 이를 중지하고 저장된 좁은 지침으로 재검증했으며, 검증 종료 후 Loop Off 확인. 임의의 반복 실행을 남기지 않음.
+- COS Desktop의 browser_tabs/browser_snapshot으로 Example Domain을 새 탭에서 읽고 생성한 탭만 닫음. `COS_2_1_19_BROWSER_OK` 확인.
+- 수동 Compact & Resume: sourceSend=sent, destinationSend=sent, state=committed, 같은 로컬 세션이 새 conversation에 연결됨. 새 대화에서 인수 답변까지 완료했으며 자동 진행 Off 유지.
+- 기존 읽기 전용 `cos-integration-check` 스킬을 스킬 메뉴에서 확인하고 slash 요청에 적용해 `COS_SKILL_OK` 응답 확인. 기존 스킬 파일은 변경하지 않았고 새 시험 스킬을 설치하지 않았음.
+- 기본 작업 경로도 통합 브랜치로 전환하고 재빌드. 기본 작업본 out/main 및 out/preload가 설치 asar의 해당 파일과 바이트 동일.
+- 자동 요약의 장시간 실행, 12시간 복원 및 Windows 두 실물 컴퓨터의 사용은 직접 수행하지 않았음. 해당 경계는 회귀 검사/네이티브 CI와 구분.
+
+
+## 네이티브 CI 최종 결과
+
+[CI 35371425872, attempt 2](https://github.com/igidae2020/chat-on-steroids-korean/actions/runs/35371425872)는 Windows x64, macOS arm64, Linux x64 모두 성공했다. 필수 검사와 각 OS의 실제 공개 플러그인 실행 검사 포함.
+
+첫 Windows 실행에서는 변경하지 않은 `code-mode-runtime.test.ts`의 2초/100ms 제한을 쓰는 oversized UTF-8 preview 사례 1건이 실패했다(기대 preview가 없음). 원인을 확정하지 않았으며 실패한 작업 재실행에서 소스·시간 제한 변경 없이 통과했다. 영구 수정했다고 주장하지 않는다.
+
+검증한 코드 ref는 `eba2db30d5bacc1f3d37d822afbadbf65420af9e`이다. 이후 변경은 검증 기록과 AGENTS 설명뿐이며 제품 코드·확장·테스트·빌드 입력은 동일하다. Windows 실물 두 대에서의 설치/실사용은 수행하지 않았다.

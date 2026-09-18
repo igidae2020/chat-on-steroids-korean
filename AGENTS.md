@@ -21,9 +21,10 @@ changed lines before applying an older patch. Document the work and its actual v
 the code currently does it. Known implementation gaps are collected in §21 instead of being
 mixed into the happy path as features.
 
-Source alignment: **2026-09-17**, including the 2.1.14 release candidate. App/extension **2.1.14**,
-bridge protocol **14** in the checked declarations (`package.json`, `src/main/version.ts`,
-`extension/manifest.json`). This does not prove release, installation or live Chrome behavior.
+Source alignment: **2026-09-19**, Korean revision 1 on official 2.1.14 source
+`6de3f963adc21766954c4a712ce00b42f3caf14c`. App/extension **2.1.19**, bridge protocol **14**.
+This is not an official 2.1.19 release. See `docs/integration-2.1.14-korean.md` for adopted
+official fixes, portable fork commits and the separate build/install/live evidence.
 
 ## 1. What the whole app is meant to do
 
@@ -2147,6 +2148,15 @@ Explicit user activation may proceed without that proof after the existing idle 
 activation setter records that exemption in the existing reply ledger; browser parameters or
 reply-ID prefixes cannot grant it. Recheck restored automatic debt, provider start and delivery.
 This condition does not change ordinary Goal mode or user-message delivery.
+The Korean integration retains one narrow pre-existing exception: the exact first completed
+answer of an already-committed automatic resume may file a missing obligation in the same Goal
+ledger. `readResumeBootstrapFinal` joins the handoff, first bootstrap user row and completed
+boundary; `committedAutomaticResumeBootstrap` verifies the continuation WAL tuple. The normal
+page recovery remains official. This does not invent a second ledger or turn identity, upgrade
+an ambiguous send receipt, or exempt later answers from MCP proof. Revalidate own enabled Loop,
+objective, current session, Stop/Block/Off and handled tombstones at admission and delivery.
+Retain committed automatic provenance for the existing 12-hour missing-reply/owed-reply window;
+waiting deadlines, including manual Pro summary writing's one hour, remain official.
 Automatic tickets retain exact source ownership. Native busy uses the shared one/five-minute
 wait and one Stop claim; uncollected tickets use the shared 2/5/10/15 pickup schedule (§14).
 Fresh work and queue priority are checked again before Send. A Thinking-failed notice learned

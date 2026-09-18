@@ -1777,6 +1777,9 @@ resume without an MCP call in that reply. An existing handled reply is never rea
 the existing Goal ledger retains that one obligation and its handled tombstone. This grants no
 bootstrap-send receipt, cannot reopen an Off/blocked/stopped chat and never exempts later replies
 or ordinary no-MCP turns. Late final recording is recovered from the same durable boundary.
+The committed automatic-resume WAL remains available for the 12-hour missing-reply recovery
+window and for any exact pending reply's remaining lifetime. This retention is not a handover
+waiting deadline; manual Pro's one-hour writing rule stays unchanged.
 They retain the exact source turn, work sequence and Pro policy. Native busy durably defers the same ticket
 by five minutes, repeatedly if necessary. MCP/interim work revokes the ticket and pending draft
 and rearms ten minutes; fresh work/queue priority and exact document/draft authority are checked

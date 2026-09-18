@@ -64,7 +64,7 @@ import {
   thawPrimeTransfer
 } from '../agents.js';
 import { clearChatWorkspace, moveChatWorkspace, workspaceForChat } from '../workspace.js';
-import { clearGoalObjective, clearGoalSwitch, goalObjectiveFor, goalSwitchFor, moveGoalObjective, moveGoalSwitch, retireGoalDraftsFor } from '../goal.js';
+import { clearGoalObjective, clearGoalSwitch, GOAL_REPLY_TTL_MS, goalResumeProofExpiresAt, goalObjectiveFor, goalSwitchFor, moveGoalObjective, moveGoalSwitch, retireGoalDraftsFor } from '../goal.js';
 import { writeDurableNow, writeDurableSoon } from '../durable.js';
 import { prepareHandoff, resumeBootstrapMatches } from './handoff.js';
 import { ensureHandoffRecorded, recordHandoff, recordNote, rebindConversation } from './recorder.js';
@@ -494,6 +494,14 @@ const expired = (entry: Continuation, now = Date.now()): boolean =>
 const isOpen = (entry: Continuation): boolean =>
   entry.state !== 'committed' && entry.state !== 'aborted' && !expired(entry);
 
+// This terminal record is also the provenance of the first post-resume Loop obligation.
+// Keep it for that obligation's lifetime; this does not extend a waiting handover deadline.
+const terminalRetentionMs = (entry: ContinuationRecord): number =>
+  entry.state === 'committed' && entry.automatic === true
+    ? Math.max(GOAL_REPLY_TTL_MS,
+        goalResumeProofExpiresAt(entry.sessionId, entry.to, entry.handoffId) - (entry.touchedAt ?? entry.openedAt))
+    : CONTINUATION_TTL_MS * 2;
+
 function sweep(): void {
   for (const entry of [...byToken.values()]) {
     // A commit in flight is never swept. It holds a frozen prime handover and an in-flight
@@ -505,7 +513,7 @@ function sweep(): void {
     if (entry.state === 'committed' || entry.state === 'aborted') {
       // Kept briefly so a repeated ack can be answered with "already done" rather than with
       // a fresh transaction, then forgotten.
-      if (Date.now() - entry.touchedAt > CONTINUATION_TTL_MS * 2) byToken.delete(entry.token);
+      if (Date.now() - entry.touchedAt >= terminalRetentionMs(entry)) byToken.delete(entry.token);
       continue;
     }
     if (expired(entry)) {
@@ -1560,25 +1568,31 @@ export async function restoreContinuations(snapshot: ContinuationSnapshot | null
     'committed',
     'aborted'
   ]);
-  for (const raw of snapshot.entries.slice(0, 32)) {
-    if (!raw) continue;
-    // The retention window scales with the same per-ticket deadline the live sweep uses:
-    // a Pro brief still inside its longer writing clock must survive a restart within it
-    // rather than vanish silently at twice the ordinary TTL.
-    const retentionMs = manualWaitingTtlMs(raw.state, requestedModel(raw.requestedModel)) * 2;
-    const lastTouchedAt = Number.isFinite(raw.touchedAt) && raw.touchedAt! <= now ? raw.touchedAt! : raw.openedAt;
-    if (
-      !/^[A-Za-z0-9_-]{16,64}$/.test(raw.token) ||
-      !/^[0-9a-z-]{8,64}$/i.test(raw.sessionId) ||
-      typeof raw.from !== 'string' ||
-      raw.from.length === 0 || raw.from.length > 256 ||
-      !validStates.has(raw.state) ||
-      !Number.isFinite(raw.openedAt) ||
-      ((raw.state === 'committed' || raw.state === 'aborted') && now - lastTouchedAt >= retentionMs) ||
-      (raw.automatic !== true && now - lastTouchedAt >= retentionMs)
-    ) {
-      continue;
-    }
+  // Filter before applying the restore cap: expired terminal rows cannot hide live proof.
+  const owedProofs = new Set<string>();
+  const retained = snapshot.entries.filter(raw => {
+    if (!raw || !/^[A-Za-z0-9_-]{16,64}$/.test(raw.token) ||
+        !/^[0-9a-z-]{8,64}$/i.test(raw.sessionId) || typeof raw.from !== 'string' ||
+        raw.from.length === 0 || raw.from.length > 256 || !validStates.has(raw.state) ||
+        !Number.isFinite(raw.openedAt)) return false;
+    const terminal = raw.state === 'committed' || raw.state === 'aborted';
+    const retentionMs = terminal ? terminalRetentionMs(raw)
+      : manualWaitingTtlMs(raw.state, requestedModel(raw.requestedModel)) * 2;
+    const touched = Number.isFinite(raw.touchedAt) && raw.touchedAt! <= now ? raw.touchedAt! : raw.openedAt;
+    return !((terminal || raw.automatic !== true) && now - touched >= retentionMs);
+  }).sort((a, b) => {
+    const priority = (row: ContinuationRecord) => row.state !== 'committed' && row.state !== 'aborted'
+      ? 0 : row.state === 'committed' && row.automatic === true ? 1 : 2;
+    return priority(a) - priority(b) || (b.touchedAt ?? b.openedAt) - (a.touchedAt ?? a.openedAt);
+  }).filter((row, index) => {
+    // Goal's own bounded ledger owns these extra slots. An older but still-owed reply
+    // cannot lose its proof merely because other chats compacted more recently.
+    const key = `${row.sessionId}/${row.to}/${row.handoffId}`;
+    const owed = goalResumeProofExpiresAt(row.sessionId, row.to, row.handoffId) > now && !owedProofs.has(key);
+    if (owed) owedProofs.add(key);
+    return index < 32 || owed;
+  });
+  for (const raw of retained) {
     const entry: Continuation = {
       requestedModel: requestedModel(raw.requestedModel),
       sourceTurnId: typeof raw.sourceTurnId === 'string' ? raw.sourceTurnId : null,

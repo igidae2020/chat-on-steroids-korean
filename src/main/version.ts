@@ -14,7 +14,10 @@
 
 import { RELEASE_REPOSITORY } from '../shared/types.js';
 
-export const APP_VERSION = '2.1.14';
+// Korean revision 1 on pinned official 2.1.14 source; not an official 2.1.19 release.
+export const APP_VERSION = '2.1.19';
+export const UPSTREAM_VERSION = '2.1.14';
+export const UPSTREAM_COMMIT = '6de3f963adc21766954c4a712ce00b42f3caf14c';
 
 /**
  * Standalone extension recovery must stay on the app's own release. Using GitHub's moving

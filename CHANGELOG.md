@@ -9,6 +9,13 @@ The app and the `extension/` companion are versioned together. **Reload the
 extension after updating the app**. If their bridge protocols are incompatible,
 the app refuses the extension and asks you to reload the matching copy.
 
+## [2.1.19] — 공식 2.1.14 소스 기반 한국어판 개정 1
+
+- 공식 `6de3f963adc21766954c4a712ce00b42f3caf14c`의 새 기능과 복구 구조를 통합합니다. 공식 2.1.19 릴리스를 뜻하지 않습니다.
+- 공식 추가 언어와 새 UI를 유지하며 한국어 카탈로그와 OpenCodex 프리셋을 이식합니다.
+- 같은 의도의 공식 수정을 우선 채택하며, 남은 회귀 수정과 실제 검증 범위는 통합 기록에 구분합니다.
+- 앱과 companion 확장을 함께 교체해야 합니다.
+
 ## [2.1.14] — dead to openai/anthropic. JOIN THE RESISTANCE @dummerspast39 on x
 
 - Add the optional animated Tur Tur Sahur desktop companion.

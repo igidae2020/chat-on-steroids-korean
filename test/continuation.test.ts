@@ -60,6 +60,7 @@ const {
   bindContinuationSourceMessageNow,
   bindContinuationDestinationMessageNow,
   claimContinuationNow,
+  committedAutomaticResumeBootstrap,
   commitContinuation,
   compactingConversation,
   continuationByToken,
@@ -499,6 +500,30 @@ describe('committing', () => {
     expect(await releaseContinuationDestinationSendNow(token)).toBe(false);
     expect(continuationByToken(token)?.destinationSend.state).toBe('sent');
     expect(await releaseContinuationDestinationSendNow('0000000000000000000000000000dead')).toBe(false);
+  });
+
+  it.each([
+    { name: 'manual continuation', automatic: false, commit: true, marker: 'own' },
+    { name: 'uncommitted automatic continuation', automatic: true, commit: false, marker: 'own' },
+    { name: 'foreign marker token', automatic: true, commit: true, marker: 'foreign' }
+  ])('does not authorize a resume bootstrap from a $name tuple', async ({ automatic, commit, marker }) => {
+    const summary = await createSession({ title: 'resume bootstrap tuple', conversationId: CHAT_A });
+    const opened = await openContinuationNow(summary.id, CHAT_A, automatic);
+    const handoff = await attachSummary(opened.token, SAMPLE_BRIEF);
+    expect(handoff).not.toBeNull();
+    expect(await claimContinuationNow(opened.token, 'resume-bootstrap-tuple-owner')).not.toBeNull();
+    expect((await beginContinuationDestinationSendNow(opened.token))?.allowed).toBe(true);
+    expect(await dispatchContinuationDestinationSendNow(opened.token)).toBe(true);
+    if (commit) expect(await commitContinuation(opened.token, CHAT_B)).toBe(true);
+
+    const token = marker === 'own' ? opened.token : '00000000000000000000000000000000';
+    expect(committedAutomaticResumeBootstrap({
+      sessionId: summary.id,
+      conversationId: CHAT_B,
+      handoffId: handoff!.id,
+      messageId: 'recorded-bootstrap-message',
+      text: `[[CLF-RESUME:${token}]]\n\nresume`
+    })).toBe(false);
   });
 
   it.each(['unattempted', 'attempted', 'dispatched', 'sent'])('command retirement only releases its own unattempted claim (%s)', async state => {

@@ -1771,6 +1771,12 @@ Explicit user activation may proceed without that proof after the existing idle 
 activation setter records that exemption in the existing reply ledger; browser parameters or
 reply-ID prefixes cannot grant it. Recheck restored automatic debt, provider start and delivery.
 This condition does not change ordinary Goal mode or user-message delivery.
+Korean revision 5 adds one post-resume exception: an enabled Loop with a saved objective may
+file a missing obligation for the exact first completed reply of its committed automatic
+resume without an MCP call in that reply. An existing handled reply is never rearmed. The current session/continuation/bootstrap/final identities must agree;
+the existing Goal ledger retains that one obligation and its handled tombstone. This grants no
+bootstrap-send receipt, cannot reopen an Off/blocked/stopped chat and never exempts later replies
+or ordinary no-MCP turns. Late final recording is recovered from the same durable boundary.
 They retain the exact source turn, work sequence and Pro policy. Native busy durably defers the same ticket
 by five minutes, repeatedly if necessary. MCP/interim work revokes the ticket and pending draft
 and rearms ten minutes; fresh work/queue priority and exact document/draft authority are checked

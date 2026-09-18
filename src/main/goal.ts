@@ -53,7 +53,8 @@ import { getConfig } from './config.js';
 import { writeDurableNow, writeDurableSoon } from './durable.js';
 import { logInfo, logWarn } from './logger.js';
 import { getSecret } from './secrets.js';
-import { findSessionByConversation, getSession, readEvents, readHandoff, readRecentEvents, turnHasMcpCall } from './session/store.js';
+import { committedAutomaticResumeBootstrap } from './session/continuation.js';
+import { findSessionByConversation, getSession, readEvents, readHandoff, readRecentEvents, readResumeBootstrapFinal, turnHasMcpCall } from './session/store.js';
 import { foldProgress } from '../shared/session.js';
 import { isAstraModel, isProModel } from '../shared/chat-models.js';
 
@@ -407,6 +408,9 @@ function notifyGoalChange(): void { for (const listener of goalListeners) listen
 interface GoalReplyObligation {
   /** Only the deliberate user activation setter may grant this exemption. */
   explicitActivation?: true;
+  /** One exact committed automatic-resume bootstrap answer; never a general no-MCP exemption. */
+  resumeHandoffId?: string;
+  resumeBootstrapMessageId?: string;
   /** Exact source turn captured before its silence grant retired. Pro also requires opt-in. */
   silenceSourceTurnId?: string;
   silencePro?: boolean;
@@ -497,6 +501,10 @@ export function restoreGoalReplies(snapshot: GoalRepliesSnapshot | null): void {
       ...(Number.isSafeInteger(raw.listenUntil) && raw.listenUntil! > 0 ? { listenUntil: raw.listenUntil } : {}),
       ...(raw.silencePro === true ? { silencePro: true } : {}),
       ...(raw.explicitActivation === true ? { explicitActivation: true } : {}),
+      ...(typeof raw.resumeHandoffId === 'string' && /^[0-9a-z-]{8,64}$/i.test(raw.resumeHandoffId) &&
+          typeof raw.resumeBootstrapMessageId === 'string' && raw.resumeBootstrapMessageId
+        ? { resumeHandoffId: raw.resumeHandoffId, resumeBootstrapMessageId: raw.resumeBootstrapMessageId.slice(0, 200) }
+        : {}),
       eventSeq: raw.eventSeq,
       acceptedAt: raw.acceptedAt,
       state: raw.state
@@ -587,6 +595,8 @@ export async function acceptGoalReplyNow(input: {
   blocked: boolean;
   /** Retain proved exhausted silence while Off without creating active debt. */
   handledOnly?: true;
+  /** Bridge-supplied only after the committed automatic-resume WAL owns this exact row. */
+  resumeBootstrap?: { handoffId: string; messageId: string };
   current?: () => boolean;
 }): Promise<void> {
   if (!input.handledOnly && await astraFinishOnly(input.sessionId, input.conversationId)) return;
@@ -602,13 +612,44 @@ export async function acceptGoalReplyNow(input: {
   );
   const before = current ? { ...current } : null;
   const bounded = snapshotGoalReplies().replies;
+  const expectedControl = goalSwitchFor(input.conversationId);
+  const expectedSwitch = goalSwitches.get(input.conversationId);
+  const resume = input.resumeBootstrap
+    ? await readResumeBootstrapFinal(
+        input.sessionId,
+        input.conversationId,
+        input.resumeBootstrap.handoffId,
+        input.resumeBootstrap.messageId
+      )
+    : null;
+  const mcpAuthority = expectedControl.mode === 'loop'
+    ? await automaticLoopHasMcpWork(input.sessionId, input.conversationId, input.silenceSourceTurnId ?? input.turnId)
+    : false;
+  const keyPresent = await goalKeyPresent(expectedControl.mode);
+  const latestSession = input.resumeBootstrap ? await getSession(input.sessionId) : null;
+  // Proof/key/session reads yield. A concurrent Off, mode change, objective removal or rebind
+  // must win before this row is published; the restored authority path repeats the same checks.
+  const control = goalSwitchFor(input.conversationId);
+  const controlStayedCurrent = control.enabled === expectedControl.enabled && control.mode === expectedControl.mode &&
+    control.own === expectedControl.own && control.afterTurn === expectedControl.afterTurn;
+  const resumeAuthority = Boolean(
+    resume &&
+      resume.replyId === input.replyId &&
+      resume.turnId === input.turnId &&
+      resume.eventSeq === input.eventSeq &&
+      goalSwitches.get(input.conversationId) === expectedSwitch &&
+      committedAutomaticResumeBootstrap({ sessionId: input.sessionId, conversationId: input.conversationId,
+        handoffId: resume.handoffId, messageId: resume.bootstrapMessageId, text: resume.bootstrapText }) &&
+      control.own && control.enabled && control.mode === 'loop' &&
+      goalObjectiveFor(input.conversationId)
+  );
   const active =
     !input.handledOnly && !input.blocked &&
+    controlStayedCurrent && (!input.resumeBootstrap || latestSession?.conversationId === input.conversationId) &&
     getConfig().sessions.record &&
     goalArmedFor(input.conversationId) &&
-    await goalKeyPresent(goalSwitchFor(input.conversationId).mode) &&
-    (goalSwitchFor(input.conversationId).mode !== 'loop' ||
-      await automaticLoopHasMcpWork(input.sessionId, input.conversationId, input.silenceSourceTurnId ?? input.turnId));
+    keyPresent &&
+    (control.mode !== 'loop' || resumeAuthority || mcpAuthority);
   if (input.current && !input.current()) return;
   goalReplies.set(input.conversationId, {
     conversationId: input.conversationId,
@@ -618,6 +659,9 @@ export async function acceptGoalReplyNow(input: {
     ...(input.silenceSourceTurnId ? { silenceSourceTurnId: input.silenceSourceTurnId.slice(0, 200) } : {}),
     ...(input.silencePro ? { silencePro: true } : {}),
     ...(input.listenUntil ? { listenUntil: input.listenUntil } : {}),
+    ...(resumeAuthority && input.resumeBootstrap
+      ? { resumeHandoffId: input.resumeBootstrap.handoffId, resumeBootstrapMessageId: input.resumeBootstrap.messageId.slice(0, 200) }
+      : {}),
     eventSeq: input.eventSeq,
     // `/goal/draft` may have had to persist the local turn before Fiber exposed ChatGPT's
     // stable assistant id. The later id strengthens that same row; it must not re-evaluate
@@ -677,6 +721,23 @@ export async function loopReplyHasAuthority(sessionId: string, conversationId: s
   if (goalSwitchFor(conversationId).mode !== 'loop') return true;
   const reply = goalReplies.get(conversationId);
   if (reply?.sessionId === sessionId && reply.turnId === turnId && reply.state === 'pending' && reply.explicitActivation) return true;
+  if (reply?.sessionId === sessionId && reply.turnId === turnId && reply.state === 'pending' &&
+      reply.resumeHandoffId && reply.resumeBootstrapMessageId) {
+    const control = goalSwitchFor(conversationId);
+    const expectedSwitch = goalSwitches.get(conversationId);
+    if (!control.own || !control.enabled || control.mode !== 'loop' || !goalObjectiveFor(conversationId)) return false;
+    const resume = await readResumeBootstrapFinal(
+      sessionId,
+      conversationId,
+      reply.resumeHandoffId,
+      reply.resumeBootstrapMessageId
+    );
+    return Boolean(resume && goalReplies.get(conversationId) === reply && reply.state === 'pending' &&
+      goalSwitches.get(conversationId) === expectedSwitch && goalObjectiveFor(conversationId) &&
+      resume.replyId === reply.replyId && resume.turnId === reply.turnId && resume.eventSeq === reply.eventSeq &&
+      committedAutomaticResumeBootstrap({ sessionId, conversationId, handoffId: resume.handoffId,
+        messageId: resume.bootstrapMessageId, text: resume.bootstrapText }));
+  }
   return automaticLoopHasMcpWork(sessionId, conversationId, reply?.turnId === turnId ? reply.silenceSourceTurnId ?? turnId : turnId);
 }
 

@@ -91,12 +91,16 @@ const {
   goalObjectiveFor,
   goalDraftBusy,
   goalPendingReplyFor,
+  loopReplyHasAuthority,
   acceptGoalReplyNow,
   setGoalReplyActiveNow,
   goalSwitchFor,
   humanReply,
   resetGoalStateForTests,
-  setGoalObjective
+  restoreGoalReplies,
+  setGoalObjective,
+  setGoalSwitchNow,
+  snapshotGoalReplies
 } = await import('../src/main/goal.js');
 const { completeProcessCall, createSession, deleteSession, findSessionByConversation, getSession,
   initSessionStore, readEvents, recordProcessCall, resetSessionStoreForTests } = await import(
@@ -109,10 +113,13 @@ const {
   CONTINUATIONS_STATE,
   abortContinuation,
   attachSummary,
+  beginContinuationDestinationSendNow,
   claimContinuationNow,
+  committedAutomaticResumeBootstrap,
   commitContinuation,
   continuationByToken,
   continuationForSession,
+  dispatchContinuationDestinationSendNow,
   openContinuationNow,
   setContinuationRecoveryHooks,
   restoreContinuations
@@ -9241,6 +9248,200 @@ describe('the goal loop over the bridge', () => {
       vi.useRealTimers();
     }
   });
+
+  it('continues once from a committed automatic resume whose first completed final was backfilled unowned', async () => {
+    await pair();
+    const config = getConfig();
+    await saveConfig({ ...config, goal: { ...config.goal, loopBackend: 'api' } });
+    const from = 'cafef193-0000-4000-8000-00000000f193';
+    const to = 'cafef194-0000-4000-8000-00000000f194';
+    const source = await createSession({ title: 'automatic resume source', conversationId: from });
+    setGoalObjective(from, 'finish the resumed release verification');
+    await setGoalSwitchNow(from, 'loop', true);
+
+    const opened = await openContinuationNow(source.id, from, true);
+    const handoff = await attachSummary(opened.token, SAMPLE_BRIEF);
+    expect(handoff).not.toBeNull();
+    expect(await claimContinuationNow(opened.token, 'resume-first-final-owner')).not.toBeNull();
+    expect((await beginContinuationDestinationSendNow(opened.token))?.allowed).toBe(true);
+    expect(await dispatchContinuationDestinationSendNow(opened.token)).toBe(true);
+    expect(await commitContinuation(opened.token, to)).toBe(true);
+    expect(continuationByToken(opened.token)).toMatchObject({
+      automatic: true,
+      state: 'committed',
+      sessionId: source.id,
+      to,
+      handoffId: handoff!.id,
+      destinationSend: { state: 'dispatched-unresolved', conversationId: null, messageId: null }
+    });
+
+    // Match the live failure: ChatGPT reserialized the Markdown user bubble, so its body no
+    // longer equals resumeBootstrapText(), and the final arrived after the completed lifecycle
+    // boundary without a local turn id or goalEligible flag.
+    const bootstrapId = 'resume-bootstrap-markdown-escaped';
+    const escapedBootstrap = `\\[\\[CLF\\-RESUME\\:${opened.token}\\]\\]\n\n` +
+      '\\# Continued work with [rendered links](https://example.test/a) and escaped punctuation.';
+    expect(escapedBootstrap).not.toBe(resumeBootstrapText(handoff!.text, opened.token));
+    const turnId = 'g-resume-first-final-0-1';
+    const now = Date.now();
+    await request('POST', '/events', { body: { conversationId: to, events: [
+      { kind: 'user_message', time: now, text: escapedBootstrap, messageId: bootstrapId },
+      { kind: 'turn_start', time: now + 100, turnId }
+    ] } });
+    await request('POST', '/events', { body: { conversationId: to, events: [
+      { kind: 'turn_end', time: now + 300, turnId, outcome: 'completed' }
+    ] } });
+    await request('POST', '/events', { body: { conversationId: to, events: [
+      { kind: 'assistant_message', time: now + 200, messageId: 'resume-first-final',
+        providerMessageId: 'resume-first-final-provider', text: 'The release still needs one verification step.',
+        state: 'final', final: true }
+    ] } });
+
+    expect(committedAutomaticResumeBootstrap({ sessionId: source.id, conversationId: to,
+      handoffId: handoff!.id, messageId: bootstrapId, text: escapedBootstrap })).toBe(true);
+    expect(await sessionStoreModule.readCompletedFinal(source.id, to)).toMatchObject({
+      messageId: 'resume-first-final'
+    });
+    expect(await sessionStoreModule.readResumeBootstrapFinal(source.id, to, handoff!.id, bootstrapId)).toMatchObject({
+      replyId: 'resume-first-final', turnId: 'reply:resume-first-final'
+    });
+    expect(goalPendingReplyFor(to)).toBeNull();
+    expect(snapshotGoalReplies().replies.some(row => row.conversationId === to)).toBe(false);
+    const feed = await request('GET', `/activity?conversationId=${to}&since=999999`);
+    expect(feed.status).toBe(200);
+    expect(feed.body.goal.pending).toMatchObject({
+      replyId: 'resume-first-final',
+      turnId: 'reply:resume-first-final'
+    });
+    expect(continuationByToken(opened.token)?.destinationSend.state).toBe('dispatched-unresolved');
+    const acceptedAt = goalPendingReplyFor(to)!.acceptedAt;
+    const savedReplies = snapshotGoalReplies();
+    expect(savedReplies.replies).toContainEqual(expect.objectContaining({
+      conversationId: to,
+      resumeHandoffId: handoff!.id,
+      resumeBootstrapMessageId: bootstrapId
+    }));
+    expect(savedReplies.replies[0]?.explicitActivation).toBeUndefined();
+    restoreGoalReplies(savedReplies);
+    expect(await loopReplyHasAuthority(source.id, to, 'reply:resume-first-final')).toBe(true);
+    await request('GET', `/activity?conversationId=${to}`);
+    expect(goalPendingReplyFor(to)?.acceptedAt).toBe(acceptedAt);
+
+    const realFetch = globalThis.fetch;
+    globalThis.fetch = (async () => Response.json({ choices: [{ message: { content: JSON.stringify({
+      action: 'continue', reply: 'Run the remaining verification step.'
+    }) } }] })) as never;
+    try {
+      const drafted = await request('POST', '/goal/draft', { body: {
+        conversationId: to,
+        turnId: 'reply:resume-first-final',
+        terminalRequired: true,
+        clientId: 'resume-first-final-page'
+      } });
+      expect(`${drafted.status} ${JSON.stringify(drafted.body)}`).toMatch(/^200 /);
+      let ready: any = null;
+      await vi.waitFor(async () => {
+        ready = (await request('GET', `/activity?conversationId=${to}&goalClient=resume-first-final-page`)).body.goal?.draft;
+        expect(ready?.stage).toBe('ready');
+      });
+      expect((await request('POST', '/goal/ack', { body: {
+        conversationId: to, token: ready.token, clientId: 'resume-first-final-page'
+      } })).body.acknowledged).toBe(true);
+      const handled = snapshotGoalReplies();
+      expect(handled.replies).toContainEqual(expect.objectContaining({
+        conversationId: to, replyId: 'resume-first-final', state: 'handled'
+      }));
+      restoreGoalReplies(handled);
+      const replay = await request('GET', `/activity?conversationId=${to}&since=999999`);
+      expect(replay.body.goal).toMatchObject({ pending: null, draft: null });
+
+      // A later user turn and no-MCP final use the ordinary Loop rule. The bootstrap grant is
+      // spent and cannot become authority for B's second answer.
+      await request('POST', '/events', { body: { conversationId: to, events: [
+        { kind: 'user_message', time: now + 400, text: 'I am taking over from here.', messageId: 'manual-after-resume' },
+        { kind: 'turn_start', time: now + 500, turnId: 'later-b-turn' },
+        { kind: 'turn_end', time: now + 700, turnId: 'later-b-turn', outcome: 'completed' },
+        { kind: 'assistant_message', time: now + 600, turnId: 'later-b-turn', messageId: 'later-b-final',
+          text: 'A later answer without local work.', state: 'final', final: true, goalEligible: true, activeNow: true }
+      ] } });
+      expect(await loopReplyHasAuthority(source.id, to, 'reply:resume-first-final')).toBe(false);
+      expect(await sessionStoreModule.readResumeBootstrapFinal(source.id, to, handoff!.id, bootstrapId)).toBeNull();
+      const superseded = await request('GET', `/activity?conversationId=${to}&goalClient=resume-first-final-page`);
+      expect(superseded.body.goal).toMatchObject({ pending: null, draft: null });
+    } finally {
+      globalThis.fetch = realFetch;
+    }
+  });
+
+  it.each(['later-marker', 'off', 'blocked', 'stopped', 'new-user', 'handled'] as const)(
+    'does not borrow the committed resume grant after %s',
+    async scenario => {
+      await pair();
+      const config = getConfig();
+      await saveConfig({ ...config, goal: { ...config.goal, loopBackend: 'api' } });
+      const suffix = ({ 'later-marker': '1', off: '2', blocked: '3', stopped: '4', 'new-user': '5', handled: '6' } as const)[scenario];
+      const from = `cafe0095-0000-4000-8000-00000000009${suffix}`;
+      const to = `cafe0096-0000-4000-8000-00000000009${suffix}`;
+      const source = await createSession({ title: `resume refusal ${scenario}`, conversationId: from });
+      setGoalObjective(from, 'continue only from the exact automatic bootstrap');
+      await setGoalSwitchNow(from, 'loop', true);
+
+      const opened = await openContinuationNow(source.id, from, true);
+      const handoff = await attachSummary(opened.token, SAMPLE_BRIEF);
+      expect(handoff).not.toBeNull();
+      expect(await claimContinuationNow(opened.token, `resume-refusal-${scenario}`)).not.toBeNull();
+      expect((await beginContinuationDestinationSendNow(opened.token))?.allowed).toBe(true);
+      expect(await dispatchContinuationDestinationSendNow(opened.token)).toBe(true);
+      expect(await commitContinuation(opened.token, to)).toBe(true);
+
+      const marker = `\\[\\[CLF\\-RESUME\\:${opened.token}\\]\\]`;
+      const now = Date.now();
+      const bootstrapId = `resume-refusal-bootstrap-${scenario}`;
+      const events: Array<Record<string, unknown>> = [];
+      if (scenario === 'later-marker') {
+        events.push({ kind: 'user_message', time: now, text: 'A different first authored message.', messageId: 'earlier-user' });
+        events.push({ kind: 'user_message', time: now + 10, text: `${marker}\n\nreplayed later`, messageId: bootstrapId });
+      } else {
+        events.push({ kind: 'user_message', time: now, text: `${marker}\n\nresume`, messageId: bootstrapId });
+        if (scenario === 'new-user') {
+          events.push({ kind: 'user_message', time: now + 10, text: 'A newer real question.', messageId: 'newer-user' });
+        }
+      }
+      events.push({ kind: 'turn_start', time: now + 100, turnId: `resume-refusal-turn-${scenario}` });
+      await request('POST', '/events', { body: { conversationId: to, events } });
+      await request('POST', '/events', { body: { conversationId: to, events: [
+        { kind: 'turn_end', time: now + 300, turnId: `resume-refusal-turn-${scenario}`,
+          outcome: scenario === 'stopped' ? 'stopped' : 'completed' }
+      ] } });
+      await request('POST', '/events', { body: { conversationId: to, events: [
+        { kind: 'assistant_message', time: now + 200, messageId: `resume-refusal-final-${scenario}`,
+          providerMessageId: `resume-refusal-provider-${scenario}`, text: 'Do not continue this answer.',
+          state: 'final', final: true }
+      ] } });
+
+      if (scenario === 'handled') {
+        const candidate = await sessionStoreModule.readResumeBootstrapFinal(source.id, to, handoff!.id, bootstrapId);
+        expect(candidate).not.toBeNull();
+        await acceptGoalReplyNow({ conversationId: to, sessionId: source.id,
+          replyId: candidate!.replyId, turnId: candidate!.turnId, eventSeq: candidate!.eventSeq, blocked: false });
+        expect(snapshotGoalReplies().replies.find(row => row.conversationId === to)?.state).toBe('handled');
+      }
+      if (scenario === 'off') await setGoalSwitchNow(to, 'loop', false);
+      if (scenario === 'blocked') setChatBlocked(to, true);
+      try {
+        const feed = await request('GET', `/activity?conversationId=${to}&since=999999`);
+        expect(feed.status).toBe(200);
+        expect(feed.body.goal.pending).toBeNull();
+        expect(goalPendingReplyFor(to)).toBeNull();
+        if (scenario === 'handled') expect(snapshotGoalReplies().replies.find(row => row.conversationId === to)?.resumeHandoffId).toBeUndefined();
+        if (scenario === 'later-marker' || scenario === 'new-user' || scenario === 'stopped') {
+          expect(await sessionStoreModule.readResumeBootstrapFinal(source.id, to, handoff!.id, bootstrapId)).toBeNull();
+        }
+      } finally {
+        if (scenario === 'blocked') setChatBlocked(to, false);
+      }
+    }
+  );
 
   it('repairs Goal onto the exact pre-fix resume-shadow chat and can draft there', async () => {
     await pair();
